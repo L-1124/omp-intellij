@@ -1,12 +1,41 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
 import type { FailureDetail, LicenseSummary } from './runtime-status.js';
 import { settings } from './service.js';
 
+export const PROJECT_ROOT_MARKERS = [
+  'pom.xml',
+  'build.gradle',
+  'build.gradle.kts',
+  'settings.gradle',
+  'settings.gradle.kts',
+  '.idea',
+] as const;
+
+function hasProjectMarker(dir: string): boolean {
+  for (const marker of PROJECT_ROOT_MARKERS) {
+    if (existsSync(join(dir, marker))) {
+      return true;
+    }
+  }
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.iml')) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
 export function findProjectRoot(startPath?: string): string {
-  if (!startPath) return process.cwd();
-  let current = resolve(startPath);
+  const raw = startPath && startPath.trim().length > 0 ? startPath : process.cwd();
+  const normalizedPath = raw.startsWith('file:') ? fileURLToPath(raw) : raw;
+
+  let current = resolve(normalizedPath);
   try {
     if (existsSync(current) && statSync(current).isFile()) {
       current = dirname(current);
@@ -15,31 +44,21 @@ export function findProjectRoot(startPath?: string): string {
     current = dirname(current);
   }
 
-  const markers = [
-    'pom.xml',
-    'build.gradle',
-    'build.gradle.kts',
-    'settings.gradle',
-    'settings.gradle.kts',
-    '.idea',
-    '.git',
-  ];
-
-  let candidate: string | null = null;
+  let fallbackGit: string | null = null;
   let cursor = current;
   while (true) {
-    for (const marker of markers) {
-      if (existsSync(join(cursor, marker))) {
-        candidate = cursor;
-        break;
-      }
+    if (hasProjectMarker(cursor)) {
+      return cursor;
+    }
+    if (!fallbackGit && existsSync(join(cursor, '.git'))) {
+      fallbackGit = cursor;
     }
     const parent = dirname(cursor);
     if (parent === cursor) break;
     cursor = parent;
   }
 
-  return candidate || current;
+  return fallbackGit || current;
 }
 
 export function failureContentKey(failure?: FailureDetail): string {

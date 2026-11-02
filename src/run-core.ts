@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
@@ -19,6 +19,7 @@ import {
   type StateRecord,
 } from './connection-state.js';
 import { encode, frameParser } from './protocol.js';
+import { findProjectRoot } from './readiness.js';
 import {
   type FailureDetail,
   LICENSE_RECOVERY_GUIDANCE,
@@ -59,37 +60,7 @@ export function detectProjectRoot(filePath: string, explicitProject?: string): s
   if (explicitProject) {
     return resolve(explicitProject);
   }
-  const markers = [
-    'pom.xml',
-    'build.gradle',
-    'build.gradle.kts',
-    'settings.gradle',
-    'settings.gradle.kts',
-    '.idea',
-    '.git',
-  ];
-
-  let current = resolve(filePath);
-  try {
-    if (existsSync(current) && statSync(current).isFile()) {
-      current = dirname(current);
-    }
-  } catch {
-    current = dirname(current);
-  }
-
-  while (true) {
-    for (const marker of markers) {
-      if (existsSync(join(current, marker))) {
-        return current;
-      }
-    }
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-
-  return dirname(resolve(filePath));
+  return findProjectRoot(filePath);
 }
 
 export function toLspFileUri(filePath: string, rootUri?: string): string {

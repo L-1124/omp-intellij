@@ -3,9 +3,10 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import type { ProjectStateResult } from '../src/connection-state.js';
 import { findProjectRoot, watchIndex } from '../src/readiness.js';
-
+import { detectProjectRoot } from '../src/run-core.js';
 test('findProjectRoot searches upward for project markers', async () => {
   const base = join(tmpdir(), 'omp-test-find-root-' + Math.random().toString(36).slice(2));
   const sub = join(base, 'module-a', 'src', 'main', 'java');
@@ -24,6 +25,135 @@ test('findProjectRoot returns cwd or startPath when no marker found', () => {
   const randomDir = join(tmpdir(), 'omp-no-marker-' + Math.random().toString(36).slice(2));
   const res = findProjectRoot(randomDir);
   assert.equal(res.toLowerCase(), randomDir.toLowerCase());
+});
+
+test('findProjectRoot prefers nearest build marker over outer unrelated .git in monorepo', async () => {
+  const base = join(tmpdir(), 'omp-test-monorepo-' + Math.random().toString(36).slice(2));
+  const gitDir = join(base, '.git');
+  const childMaven = join(base, 'packages', 'child-maven');
+  const childSrc = join(childMaven, 'src', 'main', 'java');
+  const sourceFile = join(childSrc, 'App.java');
+
+  await mkdir(gitDir, { recursive: true });
+  await mkdir(childSrc, { recursive: true });
+  await writeFile(join(childMaven, 'pom.xml'), '<project></project>', 'utf8');
+  await writeFile(sourceFile, 'public class App {}', 'utf8');
+
+  try {
+    const fromDir = findProjectRoot(childSrc);
+    const fromFile = findProjectRoot(sourceFile);
+    const fromUri = findProjectRoot(pathToFileURL(sourceFile).href);
+
+    assert.equal(fromDir.toLowerCase(), childMaven.toLowerCase());
+    assert.equal(fromFile.toLowerCase(), childMaven.toLowerCase());
+    assert.equal(fromUri.toLowerCase(), childMaven.toLowerCase());
+
+    assert.equal(detectProjectRoot(sourceFile).toLowerCase(), childMaven.toLowerCase());
+    assert.equal(detectProjectRoot(childSrc).toLowerCase(), childMaven.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('findProjectRoot identifies sibling Maven and Gradle child projects in same monorepo', async () => {
+  const base = join(tmpdir(), 'omp-test-siblings-' + Math.random().toString(36).slice(2));
+  const gitDir = join(base, '.git');
+  const mavenSvc = join(base, 'services', 'maven-svc');
+  const mavenSrc = join(mavenSvc, 'src', 'main', 'java');
+  const gradleSvc = join(base, 'services', 'gradle-svc');
+  const gradleSrc = join(gradleSvc, 'src', 'main', 'kotlin');
+
+  await mkdir(gitDir, { recursive: true });
+  await mkdir(mavenSrc, { recursive: true });
+  await mkdir(gradleSrc, { recursive: true });
+  await writeFile(join(mavenSvc, 'pom.xml'), '<project></project>', 'utf8');
+  await writeFile(join(gradleSvc, 'build.gradle.kts'), '// kotlin dsl', 'utf8');
+
+  try {
+    const mavenRoot = findProjectRoot(mavenSrc);
+    const gradleRoot = findProjectRoot(gradleSrc);
+
+    assert.equal(mavenRoot.toLowerCase(), mavenSvc.toLowerCase());
+    assert.equal(gradleRoot.toLowerCase(), gradleSvc.toLowerCase());
+
+    assert.equal(detectProjectRoot(mavenSrc).toLowerCase(), mavenSvc.toLowerCase());
+    assert.equal(detectProjectRoot(gradleSrc).toLowerCase(), gradleSvc.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('findProjectRoot falls back to .git only when no supported build/project marker exists', async () => {
+  const base = join(tmpdir(), 'omp-test-fallback-' + Math.random().toString(36).slice(2));
+  const gitDir = join(base, '.git');
+  const nested = join(base, 'tools', 'scripts');
+  const scriptFile = join(nested, 'run.sh');
+
+  await mkdir(gitDir, { recursive: true });
+  await mkdir(nested, { recursive: true });
+  await writeFile(scriptFile, '#!/bin/sh', 'utf8');
+
+  try {
+    const resDir = findProjectRoot(nested);
+    const resFile = findProjectRoot(scriptFile);
+
+    assert.equal(resDir.toLowerCase(), base.toLowerCase());
+    assert.equal(resFile.toLowerCase(), base.toLowerCase());
+
+    assert.equal(detectProjectRoot(scriptFile).toLowerCase(), base.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('findProjectRoot recognizes IntelliJ .idea and .iml module markers', async () => {
+  const base = join(tmpdir(), 'omp-test-idea-' + Math.random().toString(36).slice(2));
+  const gitDir = join(base, '.git');
+  const ideaProject = join(base, 'apps', 'idea-app');
+  const imlProject = join(base, 'apps', 'iml-app');
+  const ideaSrc = join(ideaProject, 'src');
+  const imlSrc = join(imlProject, 'src');
+
+  await mkdir(gitDir, { recursive: true });
+  await mkdir(join(ideaProject, '.idea'), { recursive: true });
+  await mkdir(ideaSrc, { recursive: true });
+  await mkdir(imlSrc, { recursive: true });
+  await writeFile(join(imlProject, 'custom-module.iml'), '<module/>', 'utf8');
+
+  try {
+    const resIdea = findProjectRoot(ideaSrc);
+    const resIml = findProjectRoot(imlSrc);
+
+    assert.equal(resIdea.toLowerCase(), ideaProject.toLowerCase());
+    assert.equal(resIml.toLowerCase(), imlProject.toLowerCase());
+
+    assert.equal(detectProjectRoot(ideaSrc).toLowerCase(), ideaProject.toLowerCase());
+    assert.equal(detectProjectRoot(imlSrc).toLowerCase(), imlProject.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('findProjectRoot returns nearest nested module root rather than outer aggregator', async () => {
+  const base = join(tmpdir(), 'omp-test-multimodule-' + Math.random().toString(36).slice(2));
+  const subModule = join(base, 'sub-module');
+  const subSrc = join(subModule, 'src', 'main', 'java');
+
+  await mkdir(subSrc, { recursive: true });
+  await writeFile(
+    join(base, 'pom.xml'),
+    '<project><modules><module>sub-module</module></modules></project>',
+    'utf8',
+  );
+  await writeFile(join(subModule, 'pom.xml'), '<project></project>', 'utf8');
+
+  try {
+    const res = findProjectRoot(subSrc);
+    assert.equal(res.toLowerCase(), subModule.toLowerCase());
+    assert.equal(detectProjectRoot(subSrc).toLowerCase(), subModule.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test('watchIndex polls state and fires onState on phase transitions', async (t) => {
