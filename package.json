@@ -1,0 +1,56 @@
+{
+  "name": "omp-intellij",
+  "version": "1.6.1",
+  "description": "IntelliJ Language Server and JVM runner/debugger integration for OMP",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist/",
+    "settings.json",
+    ".omp-plugin/marketplace.json",
+    "README.md"
+  ],
+  "bin": {
+    "omp-intellij-lsp": "./dist/bridge.js",
+    "omp-intellij-dap": "./dist/dap-proxy.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepack": "npm run build",
+    "watch": "tsc -w",
+    "pretest": "tsc -p tsconfig.test.json",
+    "test": "node --test --test-timeout=30000 dist-test/test/**/*.test.js",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "biome check .",
+    "check:fix": "biome check --write ."
+  },
+  "keywords": [
+    "omp",
+    "intellij",
+    "lsp",
+    "dap",
+    "jvm",
+    "kotlin",
+    "java"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@types/node": "^24.12.0",
+    "typescript": "^7.0.2"
+  },
+  "omp": {
+    "extensions": [
+      "./dist/plugin.js"
+    ]
+  }
+}

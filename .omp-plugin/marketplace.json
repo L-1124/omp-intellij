@@ -1,0 +1,88 @@
+{
+  "name": "omp-intellij-local",
+  "owner": { "name": "omp-intellij" },
+  "plugins": [
+    {
+      "name": "omp-intellij",
+      "source": "./",
+      "lspServers": {
+        "intellij-server": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/bridge.js"],
+          "fileTypes": [".java", ".kt", ".kts"],
+          "rootMarkers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            ".idea",
+            "*.iml"
+          ],
+          "warmupTimeoutMs": 30000,
+          "initOptions": { "runMainCodeLens": true },
+          "settings": {
+            "jetbrains.java": {
+              "hints.collapse complex types": true,
+              "hints.settings.method parameter": true,
+              "hints.types.local variable": true,
+              "settings.types.lambda parameter": true,
+              "hints.types.call chain": true
+            },
+            "jetbrains.kotlin": {
+              "hints.settings.types.property": true,
+              "hints.settings.types.variable": true,
+              "hints.type.function.return": true,
+              "hints.type.function.parameter": true,
+              "hints.settings.lambda.return": true,
+              "hints.parameters": true,
+              "hints.parameters.compiled": true
+            }
+          }
+        }
+      },
+      "dapAdapters": {
+        "intellij": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "fileTypes": [".java", ".kt", ".kts"],
+          "rootMarkers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            ".idea"
+          ],
+          "connectMode": "stdio",
+          "launchDefaults": { "console": "internalConsole", "build": true, "stopOnEntry": true },
+          "attachDefaults": { "hostName": "127.0.0.1", "timeout": 30000 }
+        },
+        "intellij-gradle": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "connectMode": "stdio",
+          "launchDefaults": {
+            "buildTool": "gradle",
+            "console": "internalConsole",
+            "stopOnEntry": true
+          }
+        },
+        "intellij-test": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "connectMode": "stdio",
+          "launchDefaults": {
+            "testMode": true,
+            "console": "internalConsole",
+            "build": true,
+            "stopOnEntry": true
+          }
+        }
+      }
+    }
+  ]
+}
