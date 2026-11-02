@@ -15,7 +15,7 @@ import {
   recoverDebugSession,
 } from '../src/debug-control.js';
 import type { ExtensionContext } from '../src/extension-types.js';
-import { executeIntellijIndex } from '../src/index-tool.js';
+import { executeIntellij } from '../src/intellij-tool.js';
 import { canonicalizeProject } from '../src/metadata.js';
 import {
   copyCachedWrapper,
@@ -62,16 +62,16 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
     bridge17.notify('initialized', {});
     bridge21.notify('initialized', {});
 
-    // Wait for indexing to complete on both projects using executeIntellijIndex
+    // Wait for indexing to complete on both projects using executeIntellij
     const [index17, index21] = await Promise.all([
-      executeIntellijIndex(
+      executeIntellij(
         { action: 'wait', project: jdk17Dir, timeout: 120 },
         undefined,
         undefined,
         { cwd: jdk17Dir } as ExtensionContext,
         { systemPath: sandbox.systemPath },
       ),
-      executeIntellijIndex(
+      executeIntellij(
         { action: 'wait', project: jdk21Dir, timeout: 120 },
         undefined,
         undefined,
@@ -303,7 +303,7 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
 
     // Cancel index wait with AbortController
     const ac = new AbortController();
-    const waitPromise = executeIntellijIndex(
+    const waitPromise = executeIntellij(
       { action: 'wait', project: bigTreeDir, timeout: 60 },
       ac.signal,
       undefined,
@@ -324,14 +324,14 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
         waitCancelled = true;
       }
     }
-    assert.ok(waitCancelled, 'executeIntellijIndex wait rejected with AbortError');
+    assert.ok(waitCancelled, 'executeIntellij wait rejected with AbortError');
     assert.ok(Date.now() - cancelledAt < 2000, 'Only the index wait must cancel promptly');
 
     // Verify server process is still alive and healthy
     assert.ok(isProcessAlive(serverPid), 'Server process must survive index wait cancellation');
 
     // Now wait for indexing to reach ready state
-    const readyResult = await executeIntellijIndex(
+    const readyResult = await executeIntellij(
       { action: 'wait', project: bigTreeDir, timeout: 120 },
       undefined,
       undefined,
@@ -535,7 +535,7 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
         text: await readFile(source, 'utf8'),
       },
     });
-    const indexed = await executeIntellijIndex(
+    const indexed = await executeIntellij(
       { action: 'wait', project, timeout: 120 },
       undefined,
       undefined,

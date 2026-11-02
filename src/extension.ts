@@ -9,7 +9,7 @@ import {
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
 import { listDebugSessions, recoverDebugSession } from './debug-control.js';
 import type { ExtensionContext, ExtensionPluginInstance } from './extension-types.js';
-import { registerIntellijIndex } from './index-tool.js';
+import { registerIntellij } from './intellij-tool.js';
 import {
   formatInstallDescription,
   formatInstallStatusText,
@@ -203,7 +203,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
   }
 
   pi.setLabel?.('IntelliJ LSP');
-  registerIntellijIndex(pi);
+  registerIntellij(pi);
 
   let statusVisible = false;
   let statusText = '';

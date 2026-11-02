@@ -329,6 +329,7 @@ export interface WorkspaceInfo {
   savedVersion: string | null;
   appliedJdk: string | null;
   isApplied: boolean;
+  savedEnvKeys?: string[];
   lastReady: number | null;
   lastConnected: number | null;
   hasLspRecorded: boolean;
@@ -566,6 +567,16 @@ export async function applyWorkspaceOptions(
   return result;
 }
 
+export interface ReimportWorkspaceResult {
+  ready: boolean;
+  projectRoot: string;
+  canonicalPath: string;
+  appliedJdk: string | null;
+  verifiedJdk?: boolean;
+  submittedEnvKeys?: string[];
+  elapsedMs?: number;
+}
+
 export async function reimportWorkspace(
   projectRoot: string,
   options: {
@@ -574,7 +585,7 @@ export async function reimportWorkspace(
     systemPath?: string;
     configDir?: string;
   } = {},
-) {
+): Promise<ReimportWorkspaceResult> {
   const startTime = Date.now();
   if (!projectRoot) throw new Error('Project root is required');
   const cleanedRoot = cleanPath(projectRoot);

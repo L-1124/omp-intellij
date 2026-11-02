@@ -3,7 +3,7 @@ export * from './connection-state.js';
 export * from './dap-proxy.js';
 export { default as extension } from './extension.js';
 export * from './index-barrier.js';
-export * from './index-tool.js';
+export * from './intellij-tool.js';
 export * from './metadata.js';
 export * from './protocol.js';
 export * from './readiness.js';
