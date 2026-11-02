@@ -6,6 +6,13 @@ import { join, resolve } from 'node:path';
 import { Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
+  loadDefaultPluginSettings,
+  loadProjectConfiguration,
+  recordConfigurationItems,
+  saveProjectConfiguration,
+  updateProjectSettings,
+} from './configuration.js';
+import {
   connectionCloseState,
   createConnectionState,
   type StateRecord,
@@ -16,14 +23,17 @@ import {
   type LeaseHandle,
   recordConnection,
   recordReadiness,
+  replaceLease,
 } from './metadata.js';
 import { asyncFramedStream, encode, frameParser } from './protocol.js';
 import { type FailureDetail, sanitizeStatus, sanitizeString } from './runtime-status.js';
 import { connectWithLease, settings } from './service.js';
 import { applyWorkspaceOptions } from './workspace.js';
 
-export async function saveInitializeParams(params: unknown): Promise<void> {
-  replaceLease,
+export async function saveInitializeParams(
+  params: unknown,
+  options?: { rawInitializationOptions?: Record<string, unknown> },
+): Promise<void> {
   const p = params as {
     rootUri?: string;
     rootPath?: string;
@@ -36,7 +46,10 @@ export async function saveInitializeParams(params: unknown): Promise<void> {
   const { id } = canonicalizeProject(uri);
   const target = join(dir, `initialize-${id}.json`);
   const temp = `${target}.${randomUUID()}.tmp`;
-  const sanitized = sanitizeStatus(params);
+  const sanitized = sanitizeStatus(params) as Record<string, unknown>;
+  if (options?.rawInitializationOptions) {
+    sanitized.rawInitializationOptions = sanitizeStatus(options.rawInitializationOptions);
+  }
   await writeFile(temp, JSON.stringify(sanitized), 'utf8');
   await rename(temp, target);
 }
@@ -63,6 +76,7 @@ export async function startBridge(): Promise<void> {
   let projectPath = process.cwd();
   let initializeTimer: NodeJS.Timeout | null = null;
 
+  const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
 
   let socket: net.Socket;
   try {
@@ -127,6 +141,7 @@ export async function startBridge(): Promise<void> {
           .catch(() => {});
       }
 
+      let rawInitializationOptions: Record<string, unknown> | undefined;
       try {
         message.params = message.params || {};
         const paramsObj = message.params as Record<string, unknown>;
@@ -138,19 +153,70 @@ export async function startBridge(): Promise<void> {
         const initializationOptions =
           (paramsObj.initializationOptions as Record<string, unknown>) || {};
         delete initializationOptions.eulaHash;
+        rawInitializationOptions = JSON.parse(JSON.stringify(initializationOptions));
         paramsObj.initializationOptions = await applyWorkspaceOptions(
           projectPath,
           initializationOptions,
           { systemPath: settings.systemPath },
         );
       } catch (err: unknown) {
-        const msg =
-          err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
-        console.error('intellij: failed to apply workspace options: ' + msg);
+        close(err instanceof Error ? err : new Error(String(err)), {
+          kind: 'import',
+          stage: 'initialize',
+        });
+        return;
       }
 
       if (uri) {
-        await saveInitializeParams(message.params).catch(() => {});
+        const { id, nativePath, rootUri: canonicalRootUri } = canonicalizeProject(uri);
+        try {
+          const existingConfig = await loadProjectConfiguration(settings.systemPath, id);
+          if (!existingConfig) {
+            const defaults = await loadDefaultPluginSettings();
+            const params = message.params;
+            let hostSettings: Record<string, unknown> | undefined;
+            if (
+              params &&
+              typeof params === 'object' &&
+              'settings' in params &&
+              params.settings &&
+              typeof params.settings === 'object'
+            ) {
+              hostSettings = params.settings as Record<string, unknown>;
+            } else if (
+              rawInitializationOptions &&
+              'settings' in rawInitializationOptions &&
+              rawInitializationOptions.settings &&
+              typeof rawInitializationOptions.settings === 'object'
+            ) {
+              hostSettings = rawInitializationOptions.settings as Record<string, unknown>;
+            }
+            const merged = hostSettings ? { ...defaults, ...hostSettings } : defaults;
+            await saveProjectConfiguration(settings.systemPath, {
+              id,
+              projectPath: nativePath,
+              rootUri: canonicalRootUri,
+              updatedAt: Date.now(),
+              settings: merged,
+              rawInitializationOptions,
+            });
+          } else {
+            existingConfig.projectPath = nativePath;
+            existingConfig.rootUri = canonicalRootUri;
+            existingConfig.rawInitializationOptions = rawInitializationOptions;
+            existingConfig.updatedAt = Date.now();
+            await saveProjectConfiguration(settings.systemPath, existingConfig);
+          }
+          await saveInitializeParams(message.params, { rawInitializationOptions });
+        } catch (err: unknown) {
+          const safeMsg = sanitizeString(err instanceof Error ? err.message : String(err));
+          console.error(`intellij: failed to persist initialize configuration: ${safeMsg}`);
+          close(err instanceof Error ? err : new Error(String(err)), {
+            kind: 'rpc',
+            stage: 'initialize',
+          });
+          return;
+        }
       }
 
       initializeTimer = setTimeout(() => {
@@ -167,6 +233,46 @@ export async function startBridge(): Promise<void> {
       const newFrame = encode(message);
       barrier.fromClient(message, newFrame);
       return;
+    }
+
+    if (message?.method === 'workspace/didChangeConfiguration') {
+      const params = message.params;
+      if (
+        params &&
+        typeof params === 'object' &&
+        'settings' in params &&
+        params.settings &&
+        typeof params.settings === 'object'
+      ) {
+        const { id, nativePath, rootUri: canonicalRootUri } = canonicalizeProject(projectPath);
+        try {
+          await updateProjectSettings(
+            settings.systemPath,
+            id,
+            params.settings as Record<string, unknown>,
+            {
+              projectPath: nativePath,
+              rootUri: canonicalRootUri,
+            },
+          );
+        } catch (err: unknown) {
+          const safeMsg = sanitizeString(err instanceof Error ? err.message : String(err));
+          console.error(`intellij-bridge: failed to save updated settings: ${safeMsg}`);
+          throw err;
+        }
+      }
+    } else if (
+      message &&
+      message.id !== undefined &&
+      !message.method &&
+      pendingConfigRequests.has(message.id)
+    ) {
+      const items = pendingConfigRequests.get(message.id);
+      pendingConfigRequests.delete(message.id);
+      if (items && Array.isArray(message.result)) {
+        const { id } = canonicalizeProject(projectPath);
+        await recordConfigurationItems(settings.systemPath, id, items, message.result);
+      }
     }
 
     if (message) {
@@ -186,6 +292,17 @@ export async function startBridge(): Promise<void> {
     }
     if (message.method === 'intellij/ready-for-test') {
       recordReadiness(settings.systemPath, projectPath, Date.now()).catch(() => {});
+    }
+    if (message.method === 'workspace/configuration' && message.id !== undefined) {
+      const params = message.params;
+      if (
+        params &&
+        typeof params === 'object' &&
+        'items' in params &&
+        Array.isArray(params.items)
+      ) {
+        pendingConfigRequests.set(message.id, params.items);
+      }
     }
     barrier.fromServer(message, frame);
   });

@@ -1,22 +1,26 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  canonicalizeProject,
-  type LeaseHandle,
-  recordConnection,
-  recordReadiness,
-} from './metadata.js';
+  getHostInitializationOptions,
+  resolveConfigurationItems,
+  stripRedactedPlaceholders,
+} from './configuration.js';
 import {
   connectionCloseState,
   createConnectionState,
   reduceConnectionState,
   type StateRecord,
 } from './connection-state.js';
+import {
+  canonicalizeProject,
+  type LeaseHandle,
+  recordConnection,
+  recordReadiness,
+} from './metadata.js';
 import { encode, frameParser } from './protocol.js';
 import { findProjectRoot } from './readiness.js';
 import {
@@ -524,8 +528,24 @@ export async function createLspSession(
 
     if (message.method && message.id !== undefined) {
       if (message.method === 'workspace/configuration') {
-        const items = (message.params?.items as unknown[]) ?? [];
-        send({ id: message.id, result: items.map(() => null) });
+        const params = message.params;
+        const items =
+          params && typeof params === 'object' && 'items' in params && Array.isArray(params.items)
+            ? (params.items as Array<{ scopeUri?: string; section?: string }>)
+            : [];
+        void resolveConfigurationItems(systemPath, id, items)
+          .then((results) => {
+            send({ id: message.id, result: results });
+          })
+          .catch((err: unknown) => {
+            send({
+              id: message.id,
+              error: {
+                code: -32603,
+                message: `Failed to resolve configuration: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            });
+          });
       } else if (
         [
           'client/registerCapability',
@@ -598,6 +618,7 @@ export async function createLspSession(
       })
       .catch(() => {});
 
+    const rawHostOpts = await getHostInitializationOptions(systemPath, id);
     if (!initParams) {
       initParams = {
         processId: process.pid,
@@ -626,14 +647,20 @@ export async function createLspSession(
           },
         },
         initializationOptions: {
+          ...rawHostOpts,
           runMainCodeLens: true,
         },
       };
     } else {
+      if (!rawHostOpts) {
+        initParams = stripRedactedPlaceholders(initParams);
+      }
+      delete initParams.rawInitializationOptions;
       const existingOpts =
-        initParams.initializationOptions && typeof initParams.initializationOptions === 'object'
+        rawHostOpts ??
+        (initParams.initializationOptions && typeof initParams.initializationOptions === 'object'
           ? (initParams.initializationOptions as Record<string, unknown>)
-          : {};
+          : {});
       if ('eulaHash' in existingOpts) {
         delete (existingOpts as Record<string, unknown>).eulaHash;
       }
