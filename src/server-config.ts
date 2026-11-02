@@ -69,7 +69,11 @@ export async function readServerConfig(
   options: ConfigOptions = {},
 ): Promise<ServerConfiguration> {
   const document = await readDocument(serverConfigFile(options));
-  if (document.server === undefined) return { mode: 'external', executable: fallbackExecutable };
+  if (document.server === undefined) {
+    return fallbackExecutable
+      ? { mode: 'external', executable: fallbackExecutable }
+      : { mode: 'managed', installDir: defaultInstallDir() };
+  }
   return parseServer(document.server);
 }
 

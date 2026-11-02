@@ -1,7 +1,5 @@
 {
-  "executable": "F:/toolchains/intellij-server/server/bin/intellij-server.exe",
   "host": "127.0.0.1",
-  "systemPath": "F:/cache/intellij-server/shared",
   "startupTimeoutMs": 30000,
   "initializeTimeoutMs": 30000,
   "requestWaitTimeoutMs": 300000,

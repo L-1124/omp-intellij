@@ -204,9 +204,9 @@ async function writeStateAtomically(installDir: string, state: InstallState): Pr
   }
 }
 
-async function findInstalled(
+export async function findInstalled(
   installDir: string,
-  bundle: ServerBundle,
+  bundle: ServerBundle = serverBundle(),
 ): Promise<InstallResult | null> {
   const versionDir = resolve(installDir, 'versions', bundle.version);
   const receiptFile = join(versionDir, 'receipt.json');

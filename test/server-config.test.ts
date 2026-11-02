@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import {
+  defaultInstallDir,
   readObservedInstallState,
   readServerConfig,
   saveServerConfig,
@@ -15,6 +16,20 @@ async function temporaryConfig(t: { after(fn: () => Promise<void>): void }) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, configFile: join(root, 'agent', 'intellij.json') };
 }
+
+test('first use selects managed installation while explicit external selection remains authoritative', async (t) => {
+  const options = await temporaryConfig(t);
+  assert.deepEqual(await readServerConfig('', options), {
+    mode: 'managed',
+    installDir: defaultInstallDir(),
+  });
+  const executable = join(options.root, 'external server');
+  await saveServerConfig({ mode: 'external', executable }, options);
+  assert.deepEqual(await readServerConfig('', options), {
+    mode: 'external',
+    executable: resolve(executable),
+  });
+});
 
 test('managed selection overrides external fallback, preserves unrelated user options, and can switch back', async (t) => {
   const options = await temporaryConfig(t);

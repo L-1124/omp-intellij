@@ -2,10 +2,11 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readServerConfig, trackInstallation } from './server-config.js';
 import { requireAcceptedEula } from './eula.js';
-import { ensureInstalled } from './server-install.js';
+import { findInstalled } from './server-install.js';
 import type { PluginSettings } from './types.js';
 
 async function loadSettings(): Promise<PluginSettings> {
@@ -18,7 +19,15 @@ async function loadSettings(): Promise<PluginSettings> {
       ];
   for (const url of candidates) {
     try {
-      const parsed: unknown = JSON.parse(await readFile(url, 'utf8'));
+      const document: unknown = JSON.parse(await readFile(url, 'utf8'));
+      const parsed: unknown =
+        document && typeof document === 'object' && !Array.isArray(document)
+          ? {
+              executable: '',
+              systemPath: join(homedir(), '.omp', 'cache', 'intellij', 'shared'),
+              ...document,
+            }
+          : document;
       if (
         !parsed ||
         typeof parsed !== 'object' ||
@@ -26,6 +35,7 @@ async function loadSettings(): Promise<PluginSettings> {
         typeof parsed.executable !== 'string' ||
         !('systemPath' in parsed) ||
         typeof parsed.systemPath !== 'string' ||
+        !parsed.systemPath.trim() ||
         !('host' in parsed) ||
         parsed.host !== '127.0.0.1' ||
         !('startupTimeoutMs' in parsed) ||
@@ -380,7 +390,13 @@ export async function ensureServer(): Promise<net.Socket> {
   let executable: string;
   if (configuration.mode === 'managed') {
     await trackInstallation(configuration.installDir);
-    executable = (await ensureInstalled(configuration.installDir)).executable;
+    const installed = await findInstalled(configuration.installDir);
+    if (!installed) {
+      throw new Error(
+        `IntelliJ server is not installed at "${configuration.installDir}". Run /intellij install to download and install it explicitly.`,
+      );
+    }
+    executable = installed.executable;
   } else {
     executable = configuration.executable;
   }
