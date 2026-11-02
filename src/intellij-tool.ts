@@ -1,12 +1,5 @@
 import { join, resolve } from 'node:path';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
-import {
-  type FailureDetail,
-  type LicenseSummary,
-  LICENSE_RECOVERY_GUIDANCE,
-  sanitizeStatus,
-  sanitizeString,
-} from './runtime-status.js';
 import type {
   ExtensionContext,
   ExtensionPluginInstance,
@@ -14,12 +7,19 @@ import type {
   ToolUpdate,
 } from './extension-types.js';
 import { findProjectRoot } from './readiness.js';
+import {
+  type FailureDetail,
+  LICENSE_RECOVERY_GUIDANCE,
+  type LicenseSummary,
+  sanitizeStatus,
+  sanitizeString,
+} from './runtime-status.js';
 import { settings } from './service.js';
 import {
-  type ReimportWorkspaceResult,
-  type WorkspaceInfo,
   getWorkspaceInfo as defaultGetWorkspaceInfo,
   reimportWorkspace as defaultReimportWorkspace,
+  type ReimportWorkspaceResult,
+  type WorkspaceInfo,
 } from './workspace.js';
 
 export interface IntellijWorkspaceContext {

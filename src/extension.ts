@@ -843,6 +843,26 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               `IntelliJ workspace: ${info.canonicalPath}${typePart}; JDK: ${jdkPart}`,
               `index: ${projectState.phase}${projectState.detail ? ` (${projectState.detail})` : ''}`,
             ];
+            if (info.savedEnvKeys && info.savedEnvKeys.length > 0) {
+              statusParts.push(
+                `env: ${info.savedEnvKeys.length} configured (${info.savedEnvKeys.join(', ')})`,
+              );
+            }
+            if (info.importStatus) {
+              if (info.importStatus.status === 'failed') {
+                statusParts.push(
+                  `import: failed (${info.importStatus.stage || 'reload'}) - ${sanitizeString(info.importStatus.failure?.message || 'unknown error')}`,
+                );
+              } else if (info.importStatus.status === 'pending') {
+                statusParts.push('import: saved, not applied - run /intellij workspace reload');
+              } else if (info.importStatus.status === 'submitted') {
+                statusParts.push('import: reload submitted');
+              } else if (info.importStatus.status === 'applied') {
+                statusParts.push(
+                  'import: reload succeeded (model reloaded; build tool runtime effectiveness depends on daemon)',
+                );
+              }
+            }
             const licPart = formatLicenseSummary(projectState.license);
             if (licPart) statusParts.push(licPart);
             const failPart = formatFailureSummary(projectState.failure, activeSystemPath);
@@ -870,7 +890,11 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                     : 'default';
                 const type =
                   w.projectType && w.projectType !== 'unknown' ? `${w.projectType}, ` : '';
-                return `${w.canonicalPath} (${type}JDK: ${jdk})`;
+                const envNote =
+                  w.savedEnvKeys && w.savedEnvKeys.length > 0
+                    ? `, env: ${w.savedEnvKeys.length} var(s)`
+                    : '';
+                return `${w.canonicalPath} (${type}JDK: ${jdk}${envNote})`;
               })
               .join('; ');
             ctx.ui?.notify(`IntelliJ workspaces (${list.length}): ${entries}`, 'info');
@@ -879,7 +903,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           }
         } else if (wsSub === 'jdks') {
           try {
-            const projectRoot = findProjectRoot(ctx.cwd);
+            const projectRoot = findProjectRootFn(ctx.cwd);
             const candidates = await wsApi.discoverJdks(projectRoot, {
               systemPath: settings.systemPath,
             });
@@ -915,7 +939,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               );
               return;
             }
-            const projectRoot = findProjectRoot(ctx.cwd);
+            const projectRoot = findProjectRootFn(ctx.cwd);
             let candidates: DiscoveredJdkItem[] = [];
             try {
               candidates = await wsApi.discoverJdks(projectRoot, {
@@ -948,7 +972,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 : String(selected);
           }
 
-          const projectRoot = findProjectRoot(ctx.cwd);
+          const projectRoot = findProjectRootFn(ctx.cwd);
           let saved: { javaHome?: string } | undefined;
           try {
             saved = await wsApi.setWorkspaceJdk(projectRoot, targetPath, {
@@ -995,7 +1019,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             }
           }
         } else if (wsSub === 'reload') {
-          const projectRoot = findProjectRoot(ctx.cwd);
+          const projectRoot = findProjectRootFn(ctx.cwd);
           try {
             const reimport = await wsApi.reimportWorkspace(projectRoot, {
               systemPath: settings.systemPath,
@@ -1014,9 +1038,169 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               ctx.ui?.notify('Workspace reimport failed: ' + msg + '.', 'warning');
             }
           }
+        } else if (wsSub === 'env') {
+          const action = (parts[2] || 'view').toLowerCase();
+          const projectRoot = findProjectRootFn(ctx.cwd);
+
+          if (action === 'view') {
+            try {
+              const info = await wsApi.getWorkspaceInfo(projectRoot, {
+                systemPath: activeSystemPath,
+              });
+              if (!info.savedEnvKeys || info.savedEnvKeys.length === 0) {
+                ctx.ui?.notify(
+                  `IntelliJ workspace: ${info.canonicalPath}; no custom environment variables configured.`,
+                  'info',
+                );
+                return;
+              }
+              const entries = info.savedEnvKeys
+                .map((k) => `${k}=${info.maskedEnv?.[k] ?? '***'}`)
+                .join(', ');
+              ctx.ui?.notify(
+                `IntelliJ workspace: ${info.canonicalPath}; env (${info.savedEnvKeys.length}): ${entries}. (Note: configured JDK java-home takes precedence over env.JAVA_HOME).`,
+                'info',
+              );
+            } catch (err: unknown) {
+              ctx.ui?.notify('Failed to get workspace env: ' + getErrorMessage(err), 'warning');
+            }
+          } else if (action === 'set') {
+            const match = args.match(
+              /^workspace\s+env\s+set(?:\s+("[^"]+"|'[^']+'|[^\s]+))?(?:\s+([\s\S]+))?$/i,
+            );
+            const rawName = match ? match[1] : null;
+            const name = rawName ? parseJdkPath(rawName).trim() : '';
+            const rawValue = match ? match[2] : null;
+            const value =
+              rawValue !== null && rawValue !== undefined ? parseJdkPath(rawValue) : null;
+
+            if (!name || value === null) {
+              ctx.ui?.notify('Usage: /intellij workspace env set <NAME> <VALUE>', 'warning');
+              return;
+            }
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+              ctx.ui?.notify(
+                `Invalid environment variable name "${name}". Variable names must be valid alphanumeric identifiers (e.g. HTTP_PROXY).`,
+                'warning',
+              );
+              return;
+            }
+
+            try {
+              await wsApi.setWorkspaceEnvVar(projectRoot, name, value, {
+                systemPath: activeSystemPath,
+              });
+            } catch (err: unknown) {
+              ctx.ui?.notify(
+                'Failed to save workspace environment variable: ' + getErrorMessage(err),
+                'warning',
+              );
+              return;
+            }
+
+            const precedenceNote =
+              name === 'JAVA_HOME'
+                ? ' (Note: configured workspace JDK takes precedence over env.JAVA_HOME)'
+                : '';
+
+            try {
+              const reimport = await wsApi.reimportWorkspace(projectRoot, {
+                systemPath: activeSystemPath,
+              });
+              const timeNote =
+                reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+              ctx.ui?.notify(
+                `Workspace environment variable ${name} saved and reload submitted: index ready${timeNote}.${precedenceNote}`,
+                'info',
+              );
+            } catch (err: unknown) {
+              const rawMsg = getErrorMessage(err);
+              const msg = sanitizeString(
+                typeof wsApi.maskConfiguredSecrets === 'function'
+                  ? wsApi.maskConfiguredSecrets(rawMsg, { [name]: value })
+                  : rawMsg,
+              );
+              if (isTimeoutError(err)) {
+                ctx.ui?.notify(
+                  `Workspace environment variable ${name} saved, but reimport timed out: ${msg}. Settings are saved but not yet fully applied.`,
+                  'warning',
+                );
+              } else {
+                ctx.ui?.notify(
+                  `Workspace environment variable ${name} saved, but reimport failed: ${msg}. Settings are saved but not applied to active session.`,
+                  'warning',
+                );
+              }
+            }
+          } else if (action === 'unset') {
+            const match = args.match(/^workspace\s+env\s+unset(?:\s+([\s\S]+))?$/i);
+            const rawName = match ? match[1] : null;
+            const name = rawName ? parseJdkPath(rawName).trim() : '';
+
+            if (!name) {
+              ctx.ui?.notify('Usage: /intellij workspace env unset <NAME>', 'warning');
+              return;
+            }
+
+            let unsetResult: { wasSet?: boolean } | undefined;
+            try {
+              unsetResult = await wsApi.unsetWorkspaceEnvVar(projectRoot, name, {
+                systemPath: activeSystemPath,
+              });
+            } catch (err: unknown) {
+              ctx.ui?.notify(
+                'Failed to unset workspace environment variable: ' + getErrorMessage(err),
+                'warning',
+              );
+              return;
+            }
+
+            if (!unsetResult?.wasSet) {
+              ctx.ui?.notify(
+                `Environment variable "${name}" is not set in workspace configuration.`,
+                'info',
+              );
+              return;
+            }
+
+            try {
+              const reimport = await wsApi.reimportWorkspace(projectRoot, {
+                systemPath: activeSystemPath,
+              });
+              const timeNote =
+                reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+              ctx.ui?.notify(
+                `Workspace environment variable ${name} unset and reload submitted: index ready${timeNote}.`,
+                'info',
+              );
+            } catch (err: unknown) {
+              const rawMsg = getErrorMessage(err);
+              const msg = sanitizeString(
+                typeof wsApi.maskConfiguredSecrets === 'function'
+                  ? wsApi.maskConfiguredSecrets(rawMsg, { [name]: '' })
+                  : rawMsg,
+              );
+              if (isTimeoutError(err)) {
+                ctx.ui?.notify(
+                  `Workspace environment variable ${name} unset, but reimport timed out: ${msg}. Settings are saved but not yet fully applied.`,
+                  'warning',
+                );
+              } else {
+                ctx.ui?.notify(
+                  `Workspace environment variable ${name} unset, but reimport failed: ${msg}. Settings are saved but not applied to active session.`,
+                  'warning',
+                );
+              }
+            }
+          } else {
+            ctx.ui?.notify(
+              'Usage: /intellij workspace env [view|set <NAME> <VALUE>|unset <NAME>]',
+              'warning',
+            );
+          }
         } else {
           ctx.ui?.notify(
-            'Usage: /intellij workspace [status|list|jdks|jdk [path]|reload]',
+            'Usage: /intellij workspace [status|list|jdks|jdk [path]|env [view|set|unset]|reload]',
             'warning',
           );
         }
@@ -1188,7 +1372,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|install [--dir <path>]|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop|restart|install [--dir <path>]|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }
@@ -1197,7 +1381,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
 
   pi.on?.('session_start', (_event: unknown, ctx: ExtensionContext) => {
     if (ctx.agent?.kind === 'sub') return;
-    const projectRoot = findProjectRoot(ctx.cwd);
+    const projectRoot = findProjectRootFn(ctx.cwd);
     const markers = [
       'pom.xml',
       'build.gradle',

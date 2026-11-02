@@ -1,16 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { getHostInitializationOptions } from './configuration.js';
 import {
   canonicalizeProject,
   getAllProjectLedgers,
   getProjectLedger,
   type ProjectRecord,
 } from './metadata.js';
+import type { LspSession } from './run-core.js';
+import { sanitizeString } from './runtime-status.js';
 import { settings } from './service.js';
 
 export function cleanPath(input: unknown): string {
@@ -29,10 +32,18 @@ export function getWorkspaceConfigDir(options: { configDir?: string } = {}): str
 }
 
 async function writeAtomicJson(filePath: string, data: unknown): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
+  const dir = dirname(filePath);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   const tempPath = `${filePath}.${randomUUID()}.tmp`;
-  await writeFile(tempPath, JSON.stringify(data, null, 2), 'utf8');
-  await rename(tempPath, filePath);
+  try {
+    await writeFile(tempPath, JSON.stringify(data, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await rename(tempPath, filePath);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => {});
+  }
 }
 
 export interface WorkspaceConfigFile {
@@ -40,9 +51,61 @@ export interface WorkspaceConfigFile {
   canonicalPath: string;
   nativePath: string;
   rootUri: string;
-  javaHome: string;
-  javaVersion: string;
+  javaHome?: string;
+  javaVersion?: string;
+  env?: Record<string, string>;
   updatedAt: number;
+  [key: string]: unknown;
+}
+
+export function maskEnvValue(val: unknown): string {
+  if (typeof val !== 'string') return '';
+  if (val.length === 0) return '""';
+  return '***';
+}
+
+export function maskConfiguredSecrets(text: string, env?: Record<string, string> | null): string {
+  if (typeof text !== 'string') return '';
+  let result = text;
+  if (env && typeof env === 'object') {
+    for (const val of Object.values(env)) {
+      if (typeof val === 'string' && val.length > 0) {
+        result = result.replaceAll(val, '[REDACTED]');
+      }
+    }
+  }
+  return result;
+}
+
+export function validateEnvMap(env: unknown): Record<string, string> {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) {
+    throw new Error('Environment variables must be a non-null object of string key-value pairs');
+  }
+  const result: Record<string, string> = Object.create(null);
+  for (const [rawKey, rawVal] of Object.entries(env)) {
+    const key = typeof rawKey === 'string' ? rawKey.trim() : '';
+    if (!key) {
+      throw new Error('Invalid environment variable key: empty key is not allowed');
+    }
+    if (key.includes('=')) {
+      throw new Error(`Invalid environment variable key "${key}": key cannot contain '='`);
+    }
+    if (key.includes('\0')) {
+      throw new Error(`Invalid environment variable key "${key}": key cannot contain null bytes`);
+    }
+    if (typeof rawVal !== 'string') {
+      throw new Error(
+        `Invalid environment variable value for "${key}": value must be a string, got ${typeof rawVal}`,
+      );
+    }
+    if (rawVal.includes('\0')) {
+      throw new Error(
+        `Invalid environment variable value for "${key}": value cannot contain null bytes`,
+      );
+    }
+    result[key] = rawVal;
+  }
+  return result;
 }
 
 async function readWorkspaceConfig(
@@ -296,14 +359,17 @@ export async function setWorkspaceJdk(
 
   const { javaHome, javaVersion } = validateJdk(jdkHome);
 
+  const existing = await readWorkspaceConfig(targetDir, id);
+
   const config: WorkspaceConfigFile = {
+    ...(existing || {}),
     id,
     canonicalPath,
     nativePath,
     rootUri,
     javaHome,
     javaVersion,
-    updatedAt: Date.now(),
+    updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1),
   };
 
   const filePath = join(targetDir, `${id}.json`);
@@ -319,6 +385,144 @@ export async function setWorkspaceJdk(
   };
 }
 
+export interface SetWorkspaceEnvVarResult {
+  projectRoot: string;
+  canonicalPath: string;
+  nativePath: string;
+  rootUri: string;
+  name: string;
+  maskedValue: string;
+  savedEnvKeys: string[];
+}
+
+export interface UnsetWorkspaceEnvVarResult {
+  projectRoot: string;
+  canonicalPath: string;
+  nativePath: string;
+  rootUri: string;
+  name: string;
+  wasSet: boolean;
+  savedEnvKeys: string[];
+}
+
+export async function setWorkspaceEnvVar(
+  projectRoot: string,
+  name: string,
+  value: string,
+  options: { systemPath?: string; configDir?: string } = {},
+): Promise<SetWorkspaceEnvVarResult> {
+  if (!projectRoot) throw new Error('Project root is required');
+  const cleanedName = typeof name === 'string' ? name.trim() : '';
+  if (!cleanedName) throw new Error('Environment variable name is required');
+  if (typeof value !== 'string') throw new Error('Environment variable value must be a string');
+  const valid = validateEnvMap({ [cleanedName]: value });
+
+  const targetDir = getWorkspaceConfigDir(options);
+  const cleanedRoot = cleanPath(projectRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+
+  const existing = await readWorkspaceConfig(targetDir, id);
+  const existingEnv = validateEnvMap(existing?.env ?? {});
+  existingEnv[cleanedName] = valid[cleanedName];
+
+  const config: WorkspaceConfigFile = {
+    ...(existing || {}),
+    id,
+    canonicalPath,
+    nativePath,
+    rootUri,
+    env: existingEnv,
+    updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1),
+  };
+
+  const filePath = join(targetDir, `${id}.json`);
+  await writeAtomicJson(filePath, config);
+
+  return {
+    projectRoot: cleanedRoot,
+    canonicalPath,
+    nativePath,
+    rootUri,
+    name: cleanedName,
+    maskedValue: maskEnvValue(valid[cleanedName]),
+    savedEnvKeys: Object.keys(existingEnv).sort(),
+  };
+}
+
+export async function unsetWorkspaceEnvVar(
+  projectRoot: string,
+  name: string,
+  options: { systemPath?: string; configDir?: string } = {},
+): Promise<UnsetWorkspaceEnvVarResult> {
+  if (!projectRoot) throw new Error('Project root is required');
+  const cleanedName = typeof name === 'string' ? name.trim() : '';
+  if (!cleanedName) throw new Error('Environment variable name is required');
+
+  const targetDir = getWorkspaceConfigDir(options);
+  const cleanedRoot = cleanPath(projectRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+
+  const existing = await readWorkspaceConfig(targetDir, id);
+  if (!existing?.env || typeof existing.env !== 'object' || !(cleanedName in existing.env)) {
+    return {
+      projectRoot: cleanedRoot,
+      canonicalPath,
+      nativePath,
+      rootUri,
+      name: cleanedName,
+      wasSet: false,
+      savedEnvKeys:
+        existing?.env && typeof existing.env === 'object' ? Object.keys(existing.env).sort() : [],
+    };
+  }
+
+  const existingEnv = validateEnvMap(existing.env);
+  delete existingEnv[cleanedName];
+
+  const config: WorkspaceConfigFile = {
+    ...existing,
+    id,
+    canonicalPath,
+    nativePath,
+    rootUri,
+    updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1),
+  };
+
+  if (Object.keys(existingEnv).length > 0) {
+    config.env = existingEnv;
+  } else {
+    delete config.env;
+  }
+
+  const filePath = join(targetDir, `${id}.json`);
+  await writeAtomicJson(filePath, config);
+
+  return {
+    projectRoot: cleanedRoot,
+    canonicalPath,
+    nativePath,
+    rootUri,
+    name: cleanedName,
+    wasSet: true,
+    savedEnvKeys: Object.keys(existingEnv).sort(),
+  };
+}
+
+/**
+ * Structured status for project import and reload.
+ * Note: 'applied' represents that the language server workspace reload completed
+ * with the submitted configuration; it does not claim arbitrary env variables took effect
+ * inside build tool processes/daemons.
+ */
+export interface WorkspaceImportStatus {
+  status: 'idle' | 'pending' | 'submitted' | 'applied' | 'failed';
+  stage?: 'saved' | 'connect' | 'submitted' | 'reload' | 'verification' | 'ready';
+  revision?: number;
+  submittedEnvKeys?: string[];
+  failure?: { stage: string; message: string };
+  updatedAt?: number;
+}
+
 export interface WorkspaceInfo {
   projectRoot: string;
   canonicalPath: string;
@@ -330,6 +534,8 @@ export interface WorkspaceInfo {
   appliedJdk: string | null;
   isApplied: boolean;
   savedEnvKeys?: string[];
+  maskedEnv?: Record<string, string>;
+  importStatus?: WorkspaceImportStatus;
   lastReady: number | null;
   lastConnected: number | null;
   hasLspRecorded: boolean;
@@ -399,8 +605,68 @@ export async function getWorkspaceInfo(
     }
   } catch {}
 
+  const importReceiptPath = join(
+    systemPath,
+    'plugin-metadata',
+    'receipts',
+    `${id}.import-status.json`,
+  );
+  let importStatus: WorkspaceImportStatus = {
+    status: 'idle',
+    submittedEnvKeys: [],
+  };
+
+  const savedRevision = saved?.updatedAt ?? 0;
+  try {
+    if (existsSync(importReceiptPath)) {
+      const r = JSON.parse(await readFile(importReceiptPath, 'utf8')) as {
+        status?: WorkspaceImportStatus['status'];
+        stage?: WorkspaceImportStatus['stage'];
+        revision?: number;
+        submittedEnvKeys?: string[];
+        failure?: { stage: string; message: string } | null;
+        timestamp?: number;
+      };
+      const receiptRev = r.revision ?? 0;
+      const isOutdated = savedRevision > 0 && savedRevision !== receiptRev;
+      if (isOutdated) {
+        importStatus = {
+          status: 'pending',
+          stage: 'saved',
+          revision: receiptRev,
+          submittedEnvKeys: r.submittedEnvKeys || [],
+          updatedAt: r.timestamp,
+        };
+      } else {
+        importStatus = {
+          status: r.status || 'idle',
+          stage: r.stage,
+          revision: r.revision,
+          submittedEnvKeys: r.submittedEnvKeys || [],
+          failure: r.failure ? { stage: r.failure.stage, message: r.failure.message } : undefined,
+          updatedAt: r.timestamp,
+        };
+      }
+    } else if (saved && (saved.javaHome || (saved.env && Object.keys(saved.env).length > 0))) {
+      importStatus = {
+        status: 'pending',
+        stage: 'saved',
+        revision: 0,
+        submittedEnvKeys: [],
+        updatedAt: saved.updatedAt,
+      };
+    }
+  } catch {}
+
   const savedJdk = saved?.javaHome ?? null;
   const savedVersion = saved?.javaVersion ?? null;
+  const savedEnv =
+    saved?.env && typeof saved.env === 'object' && !Array.isArray(saved.env) ? saved.env : {};
+  const savedEnvKeys = Object.keys(savedEnv).sort();
+  const maskedEnv: Record<string, string> = {};
+  for (const k of savedEnvKeys) {
+    maskedEnv[k] = maskEnvValue(savedEnv[k]);
+  }
 
   return {
     projectRoot: cleanedRoot,
@@ -412,12 +678,14 @@ export async function getWorkspaceInfo(
     savedVersion,
     appliedJdk,
     isApplied,
+    savedEnvKeys,
+    maskedEnv,
+    importStatus,
     lastReady: ledger?.lastReady ?? null,
     lastConnected: ledger?.lastConnected ?? null,
     hasLspRecorded,
   };
 }
-
 export async function listWorkspaces(
   options: { systemPath?: string; configDir?: string } = {},
 ): Promise<WorkspaceInfo[]> {
@@ -500,13 +768,19 @@ export async function applyWorkspaceOptions(
   const targetDir = getWorkspaceConfigDir(options);
 
   const saved = await readWorkspaceConfig(targetDir, id);
-  if (!saved?.javaHome) {
+  const hasSavedJdk = Boolean(saved?.javaHome);
+  const hasSavedEnv = Boolean(
+    saved?.env && typeof saved.env === 'object' && Object.keys(saved.env).length > 0,
+  );
+
+  if (!hasSavedJdk && !hasSavedEnv) {
     return initOptions || {};
   }
 
   const result: Record<string, unknown> = initOptions
     ? JSON.parse(JSON.stringify(initOptions))
     : {};
+
   const projects: Array<Record<string, unknown>> = Array.isArray(result.projects)
     ? [...(result.projects as Array<Record<string, unknown>>)]
     : [];
@@ -537,30 +811,70 @@ export async function applyWorkspaceOptions(
     );
   }
 
+  const savedEnv = hasSavedEnv && saved?.env ? (saved.env as Record<string, string>) : {};
+
   if (matchIndex >= 0) {
     const existing = projects[matchIndex];
-    projects[matchIndex] = {
+    const existingEnv =
+      existing.env && typeof existing.env === 'object' && !Array.isArray(existing.env)
+        ? { ...(existing.env as Record<string, string>) }
+        : {};
+
+    const mergedEnv: Record<string, string> = {
+      ...existingEnv,
+      ...savedEnv,
+    };
+
+    const effectiveJdk =
+      saved?.javaHome ||
+      (typeof existing['java-home'] === 'string' ? existing['java-home'] : undefined);
+    if (effectiveJdk) {
+      mergedEnv.JAVA_HOME = effectiveJdk;
+    }
+
+    const updatedProject: Record<string, unknown> = {
       ...existing,
       type: projectType,
       path:
         typeof existing.path === 'string' && existing.path.startsWith('file:')
           ? existing.path
           : targetUri,
-      'java-home': saved.javaHome,
-      env: {
-        ...((existing.env as Record<string, string>) || {}),
-        JAVA_HOME: saved.javaHome,
-      },
     };
+
+    if (saved?.javaHome) {
+      updatedProject['java-home'] = saved.javaHome;
+    }
+
+    if (Object.keys(mergedEnv).length > 0) {
+      updatedProject.env = mergedEnv;
+    } else {
+      delete updatedProject.env;
+    }
+
+    projects[matchIndex] = updatedProject;
   } else {
-    projects.push({
+    const mergedEnv: Record<string, string> = {
+      ...savedEnv,
+    };
+
+    if (saved?.javaHome) {
+      mergedEnv.JAVA_HOME = saved.javaHome;
+    }
+
+    const newProject: Record<string, unknown> = {
       type: projectType,
       path: targetUri,
-      'java-home': saved.javaHome,
-      env: {
-        JAVA_HOME: saved.javaHome,
-      },
-    });
+    };
+
+    if (saved?.javaHome) {
+      newProject['java-home'] = saved.javaHome;
+    }
+
+    if (Object.keys(mergedEnv).length > 0) {
+      newProject.env = mergedEnv;
+    }
+
+    projects.push(newProject);
   }
 
   result.projects = projects;
@@ -593,37 +907,116 @@ export async function reimportWorkspace(
   const systemPath = options.systemPath ?? settings.systemPath;
   const configDir = options.configDir;
 
-  let recorded: { initializationOptions?: Record<string, unknown> } | null = null;
-  const recordedPath = join(systemPath, 'plugin-metadata', `initialize-${id}.json`);
-  try {
-    recorded = JSON.parse(await readFile(recordedPath, 'utf8'));
-  } catch {}
+  const targetDir = getWorkspaceConfigDir({ configDir });
+  const saved = await readWorkspaceConfig(targetDir, id);
+  const configRevision = saved?.updatedAt ?? Date.now();
+  const plannedEnvKeys = saved?.env ? Object.keys(saved.env).sort() : [];
+  const appliedJdk = saved?.javaHome || null;
 
-  const baseInitOptions = recorded?.initializationOptions || {};
+  const receiptDir = join(systemPath, 'plugin-metadata', 'receipts');
+  const importReceiptPath = join(receiptDir, `${id}.import-status.json`);
+
+  const writeImportReceipt = async (
+    status: 'pending' | 'submitted' | 'applied' | 'failed',
+    stage: 'saved' | 'connect' | 'submitted' | 'reload' | 'verification' | 'ready',
+    failure?: { stage: string; message: string } | null,
+    verifiedJdk = false,
+  ) => {
+    try {
+      const doc = {
+        id,
+        canonicalPath,
+        status,
+        stage,
+        revision: configRevision,
+        submittedEnvKeys: stage === 'connect' || stage === 'saved' ? [] : plannedEnvKeys,
+        appliedJdk: verifiedJdk ? appliedJdk : null,
+        verifiedJdk,
+        failure: failure
+          ? {
+              stage: failure.stage,
+              message: sanitizeString(maskConfiguredSecrets(failure.message, saved?.env)),
+            }
+          : null,
+        timestamp: Date.now(),
+      };
+      await writeAtomicJson(importReceiptPath, doc);
+    } catch {}
+  };
+
+  const rawHostOpts = await getHostInitializationOptions(systemPath, id);
+  const baseInitOptions = rawHostOpts ?? {};
   const fullInitOptions = await applyWorkspaceOptions(nativePath, baseInitOptions, {
     systemPath,
     configDir,
   });
 
-  const { createLspSession, resolveLaunch } = await import('./run-core.js');
   const waitTimeout = options.timeoutMs ?? settings.requestWaitTimeoutMs ?? 300000;
 
-  const session = await createLspSession(nativePath, {
-    signal: options.signal,
-    requestWaitTimeoutMs: waitTimeout,
-    systemPath,
-    configDir,
-  });
+  let session: LspSession | null = null;
   try {
-    // Reload model and await real ready-for-test notification
-    await session.reloadWorkspace({
-      initializationOptions: fullInitOptions,
-      timeoutMs: waitTimeout,
-      signal: options.signal,
-    });
-    const targetDir = getWorkspaceConfigDir({ configDir });
-    const saved = await readWorkspaceConfig(targetDir, id);
-    const appliedJdk = saved?.javaHome || null;
+    try {
+      // Dynamic import to avoid circular dependency: run-core.ts imports workspace.ts
+      const { createLspSession } = await import('./run-core.js');
+      session = await createLspSession(nativePath, {
+        signal: options.signal,
+        requestWaitTimeoutMs: waitTimeout,
+        systemPath,
+        configDir,
+      });
+    } catch (connectErr: unknown) {
+      const errMsg = connectErr instanceof Error ? connectErr.message : String(connectErr);
+      await writeImportReceipt('failed', 'connect', { stage: 'connect', message: errMsg });
+      throw connectErr;
+    }
+
+    try {
+      await writeImportReceipt('submitted', 'submitted');
+      await session.reloadWorkspace({
+        initializationOptions: fullInitOptions,
+        timeoutMs: waitTimeout,
+        signal: options.signal,
+      });
+    } catch (reloadErr: unknown) {
+      const errMsg = reloadErr instanceof Error ? reloadErr.message : String(reloadErr);
+      await writeImportReceipt('failed', 'reload', { stage: 'reload', message: errMsg });
+      throw reloadErr;
+    }
+
+    let javaExec: string | null = null;
+    let verified = false;
+
+    const sourceFile = await findFirstSourceFile(nativePath);
+    if (sourceFile && appliedJdk) {
+      try {
+        const { resolveLaunch, toLspFileUri } = await import('./run-core.js');
+        const sourceFileUri = toLspFileUri(sourceFile, rootUri);
+        const launch = await resolveLaunch(session, sourceFileUri);
+        if (!launch?.javaExec) {
+          throw new Error(
+            `Model verification failed: resolveLaunch returned no javaExec for ${sourceFileUri}`,
+          );
+        }
+        javaExec = launch.javaExec;
+        const resolvedLaunchJdk = resolve(dirname(dirname(javaExec)))
+          .replace(/\\/g, '/')
+          .toLowerCase();
+        const expectedJdk = resolve(appliedJdk).replace(/\\/g, '/').toLowerCase();
+        if (resolvedLaunchJdk !== expectedJdk) {
+          throw new Error(
+            `Model verification mismatch: expected JDK "${appliedJdk}" but IntelliJ resolved "${javaExec}"`,
+          );
+        }
+        verified = true;
+      } catch (verifyErr: unknown) {
+        const errMsg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+        await writeImportReceipt('failed', 'verification', {
+          stage: 'verification',
+          message: errMsg,
+        });
+        throw verifyErr;
+      }
+    }
 
     let serverPid: number | null = null;
     try {
@@ -636,36 +1029,7 @@ export async function reimportWorkspace(
       }
     } catch {}
 
-    let javaExec: string | null = null;
-    let verified = false;
-
-    const sourceFile = await findFirstSourceFile(nativePath);
-    if (sourceFile) {
-      const { toLspFileUri } = await import('./run-core.js');
-      const sourceFileUri = toLspFileUri(sourceFile, rootUri);
-      const launch = await resolveLaunch(session, sourceFileUri);
-      if (!launch?.javaExec) {
-        throw new Error(
-          `Model verification failed: resolveLaunch returned no javaExec for ${sourceFileUri}`,
-        );
-      }
-      javaExec = launch.javaExec;
-      if (appliedJdk) {
-        const resolvedLaunchJdk = resolve(dirname(dirname(javaExec)))
-          .replace(/\\/g, '/')
-          .toLowerCase();
-        const expectedJdk = resolve(appliedJdk).replace(/\\/g, '/').toLowerCase();
-        if (resolvedLaunchJdk !== expectedJdk) {
-          throw new Error(
-            `Model verification mismatch: expected JDK "${appliedJdk}" but IntelliJ resolved "${javaExec}"`,
-          );
-        }
-        verified = true;
-      }
-    }
-
     if (appliedJdk && serverPid && verified) {
-      const receiptDir = join(systemPath, 'plugin-metadata', 'receipts');
       const receiptPath = join(receiptDir, `${id}.applied.json`);
       const receipt = {
         id,
@@ -680,16 +1044,23 @@ export async function reimportWorkspace(
       const { recordReadiness } = await import('./metadata.js');
       await recordReadiness(systemPath, nativePath, Date.now()).catch(() => {});
     }
+
+    await writeImportReceipt('applied', 'ready', null, verified);
+
     const elapsedMs = Date.now() - startTime;
     return {
       ready: true,
       projectRoot: cleanedRoot,
       canonicalPath,
-      appliedJdk,
+      appliedJdk: verified ? appliedJdk : null,
+      verifiedJdk: verified,
+      submittedEnvKeys: plannedEnvKeys,
       elapsedMs,
     };
   } finally {
-    await session.close().catch(() => {});
+    if (session) {
+      await session.close().catch(() => {});
+    }
   }
 }
 

@@ -11,7 +11,12 @@ import {
   detectProjectType,
   discoverJdks,
   getWorkspaceInfo,
+  maskConfiguredSecrets,
+  maskEnvValue,
+  setWorkspaceEnvVar,
   setWorkspaceJdk,
+  unsetWorkspaceEnvVar,
+  validateEnvMap,
   validateJdk,
 } from '../src/workspace.js';
 
@@ -421,4 +426,398 @@ test('asyncFramedStream from protocol.ts gates frames in strict FIFO order', asy
     'initialized',
     'workspace/executeCommand',
   ]);
+});
+
+test('validateEnvMap validates keys, values, and boundary restrictions', () => {
+  assert.deepEqual({ ...validateEnvMap({ FOO: 'bar', BAZ: '123' }) }, { FOO: 'bar', BAZ: '123' });
+  assert.deepEqual({ ...validateEnvMap({ '  TRIMMED  ': 'val' }) }, { TRIMMED: 'val' });
+  const protoMap = validateEnvMap(JSON.parse('{"__proto__": "safe_val"}'));
+  assert.equal(Object.hasOwn(protoMap, '__proto__'), true);
+  assert.equal(Object.getOwnPropertyDescriptor(protoMap, '__proto__')?.value, 'safe_val');
+  assert.throws(() => validateEnvMap(null), /must be a non-null object/);
+  assert.throws(() => validateEnvMap('string'), /must be a non-null object/);
+  assert.throws(() => validateEnvMap([]), /must be a non-null object/);
+  assert.throws(() => validateEnvMap({ '': 'val' }), /empty key is not allowed/);
+  assert.throws(() => validateEnvMap({ 'FOO=BAR': 'val' }), /cannot contain '='/);
+  assert.throws(() => validateEnvMap({ 'FOO\0': 'val' }), /cannot contain null bytes/);
+  assert.throws(() => validateEnvMap({ FOO: 123 as unknown as string }), /must be a string/);
+  assert.throws(() => validateEnvMap({ FOO: 'val\0' }), /cannot contain null bytes/);
+});
+
+test('maskEnvValue masks sensitive values without data leakage', () => {
+  assert.equal(maskEnvValue(''), '""');
+  assert.equal(maskEnvValue('secret'), '***');
+  assert.equal(maskEnvValue('http://user:password@proxy:8080'), '***');
+  assert.equal(maskEnvValue(123 as unknown as string), '');
+});
+
+test('maskConfiguredSecrets strips literal configured env values from echoed error strings', () => {
+  const env = {
+    CUSTOM_SECRET: 'my_top_secret_token_12345',
+    SAFE_KEY: 'abc',
+    SHORT: 'xy',
+  };
+  const echoed =
+    'LSP Error: Failed to authenticate with my_top_secret_token_12345 and token xy on remote server';
+  const masked = maskConfiguredSecrets(echoed, env);
+  assert.equal(masked.includes('my_top_secret_token_12345'), false);
+  assert.equal(masked.includes('xy'), false);
+  assert.match(
+    masked,
+    /Failed to authenticate with \[REDACTED\] and token \[REDACTED\] on remote server/,
+  );
+});
+
+test('setWorkspaceEnvVar, unsetWorkspaceEnvVar and setWorkspaceJdk preserve unrelated fields and each other', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-env-' + Math.random().toString(36).slice(2));
+  const projDir = join(tmpdir(), 'omp-test-ws-proj-' + Math.random().toString(36).slice(2));
+  const jdk21 = join(tmpdir(), 'omp-test-jdk-' + Math.random().toString(36).slice(2));
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projDir, { recursive: true });
+    await createMockJdk(jdk21, { version: '21.0.4' });
+
+    // 1. Set JDK first
+    await setWorkspaceJdk(projDir, jdk21, { configDir });
+
+    // 2. Set an environment variable; verify JDK and custom fields are preserved
+    const envRes1 = await setWorkspaceEnvVar(projDir, 'HTTP_PROXY', 'http://127.0.0.1:8080', {
+      configDir,
+    });
+    assert.equal(envRes1.name, 'HTTP_PROXY');
+    assert.equal(envRes1.maskedValue, '***');
+    assert.deepEqual(envRes1.savedEnvKeys, ['HTTP_PROXY']);
+
+    let info = await getWorkspaceInfo(projDir, { configDir });
+    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
+    assert.equal(info.savedVersion, '21.0.4');
+    assert.deepEqual(info.savedEnvKeys, ['HTTP_PROXY']);
+    assert.deepEqual(info.maskedEnv, { HTTP_PROXY: '***' });
+
+    // 3. Add second env variable
+    await setWorkspaceEnvVar(projDir, 'GRADLE_OPTS', '-Dorg.gradle.daemon=true', { configDir });
+    info = await getWorkspaceInfo(projDir, { configDir });
+    assert.deepEqual(info.savedEnvKeys, ['GRADLE_OPTS', 'HTTP_PROXY']);
+
+    // 4. Update JDK; verify env is preserved!
+    await setWorkspaceJdk(projDir, jdk21, { configDir });
+    info = await getWorkspaceInfo(projDir, { configDir });
+    assert.deepEqual(info.savedEnvKeys, ['GRADLE_OPTS', 'HTTP_PROXY']);
+    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
+
+    // 5. Unset one env var
+    const unsetRes = await unsetWorkspaceEnvVar(projDir, 'HTTP_PROXY', { configDir });
+    assert.equal(unsetRes.wasSet, true);
+    assert.deepEqual(unsetRes.savedEnvKeys, ['GRADLE_OPTS']);
+
+    info = await getWorkspaceInfo(projDir, { configDir });
+    assert.deepEqual(info.savedEnvKeys, ['GRADLE_OPTS']);
+    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
+
+    // 6. Unset non-existent env var
+    const unsetRes2 = await unsetWorkspaceEnvVar(projDir, 'NON_EXISTENT', { configDir });
+    assert.equal(unsetRes2.wasSet, false);
+    assert.deepEqual(unsetRes2.savedEnvKeys, ['GRADLE_OPTS']);
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(projDir, { recursive: true, force: true });
+    await rm(jdk21, { recursive: true, force: true });
+  }
+});
+
+test('applyWorkspaceOptions applies env-only configuration without saved JDK and never mutates process.env', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-env-only-' + Math.random().toString(36).slice(2));
+  const projDir = join(
+    tmpdir(),
+    'omp-test-ws-proj-env-only-' + Math.random().toString(36).slice(2),
+  );
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projDir, { recursive: true });
+    await writeFile(join(projDir, 'pom.xml'), '<project></project>', 'utf8');
+
+    // Only set env, NO JDK configured
+    await setWorkspaceEnvVar(projDir, 'MAVEN_OPTS', '-Xmx2g', { configDir });
+
+    const envKeysBefore = Object.keys(process.env).sort();
+    const envHashBefore = JSON.stringify(Object.entries(process.env).sort());
+
+    const initialOptions = {
+      eulaHash: 'cd82e6cdaf2790f1',
+      projects: [
+        {
+          path: projDir,
+          type: 'maven',
+          env: { HOST_VAR: 'host_val' },
+        },
+      ],
+    };
+
+    const result = await applyWorkspaceOptions(projDir, initialOptions, { configDir });
+    const projects = result.projects as Array<Record<string, unknown>>;
+    assert.equal(projects.length, 1);
+    const p = projects[0];
+    assert.equal(p['java-home'], undefined); // No saved JDK, so java-home remains untouched
+    assert.deepEqual(p.env, {
+      HOST_VAR: 'host_val',
+      MAVEN_OPTS: '-Xmx2g',
+    });
+
+    // Ensure process.env was NEVER mutated (using keys and hash comparison, no credential dumping)
+    const envKeysAfter = Object.keys(process.env).sort();
+    const envHashAfter = JSON.stringify(Object.entries(process.env).sort());
+    assert.deepEqual(envKeysAfter, envKeysBefore);
+    assert.equal(envHashAfter === envHashBefore, true);
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(projDir, { recursive: true, force: true });
+  }
+});
+
+test('applyWorkspaceOptions isolates multiple projects and prevents cross-project env pollution', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-iso-' + Math.random().toString(36).slice(2));
+  const projA = join(tmpdir(), 'omp-test-proj-a-' + Math.random().toString(36).slice(2));
+  const projB = join(tmpdir(), 'omp-test-proj-b-' + Math.random().toString(36).slice(2));
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projA, { recursive: true });
+    await mkdir(projB, { recursive: true });
+    await writeFile(join(projA, 'pom.xml'), '<project></project>', 'utf8');
+    await writeFile(join(projB, 'build.gradle'), '', 'utf8');
+
+    await setWorkspaceEnvVar(projA, 'PROJECT_SCOPE', 'scope_a', { configDir });
+    await setWorkspaceEnvVar(projB, 'PROJECT_SCOPE', 'scope_b', { configDir });
+
+    const initialOptions = {
+      projects: [
+        { path: projA, type: 'maven', env: { DEFAULT_KEY: 'shared' } },
+        { path: projB, type: 'gradle', env: { DEFAULT_KEY: 'shared' } },
+      ],
+    };
+
+    // Apply options for Project A only
+    const resA = await applyWorkspaceOptions(projA, initialOptions, { configDir });
+    const projsA = resA.projects as Array<Record<string, unknown>>;
+
+    assert.deepEqual(projsA[0].env, {
+      DEFAULT_KEY: 'shared',
+      PROJECT_SCOPE: 'scope_a',
+    });
+    // Project B must NOT have Project A's env
+    assert.deepEqual(projsA[1].env, {
+      DEFAULT_KEY: 'shared',
+    });
+
+    // Apply options for Project B
+    const resB = await applyWorkspaceOptions(projB, resA, { configDir });
+    const projsB = resB.projects as Array<Record<string, unknown>>;
+
+    assert.deepEqual(projsB[0].env, {
+      DEFAULT_KEY: 'shared',
+      PROJECT_SCOPE: 'scope_a',
+    });
+    assert.deepEqual(projsB[1].env, {
+      DEFAULT_KEY: 'shared',
+      PROJECT_SCOPE: 'scope_b',
+    });
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(projA, { recursive: true, force: true });
+    await rm(projB, { recursive: true, force: true });
+  }
+});
+
+test('applyWorkspaceOptions enforces JDK authoritative precedence over conflicting env JAVA_HOME', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-prec-' + Math.random().toString(36).slice(2));
+  const projDir = join(tmpdir(), 'omp-test-proj-prec-' + Math.random().toString(36).slice(2));
+  const validJdk = join(tmpdir(), 'omp-test-jdk-valid-' + Math.random().toString(36).slice(2));
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projDir, { recursive: true });
+    await writeFile(join(projDir, 'pom.xml'), '<project></project>', 'utf8');
+    await createMockJdk(validJdk, { version: '21.0.4' });
+
+    await setWorkspaceJdk(projDir, validJdk, { configDir });
+    // Attempt to set conflicting JAVA_HOME in env
+    await setWorkspaceEnvVar(projDir, 'JAVA_HOME', '/conflicting/env/jdk', { configDir });
+    await setWorkspaceEnvVar(projDir, 'CUSTOM_VAR', 'hello', { configDir });
+
+    const initialOptions = {
+      projects: [{ path: projDir, type: 'maven', env: { JAVA_HOME: '/host/jdk' } }],
+    };
+
+    const result = await applyWorkspaceOptions(projDir, initialOptions, { configDir });
+    const projects = result.projects as Array<Record<string, unknown>>;
+    const p = projects[0];
+
+    // Configured JDK must win over env JAVA_HOME
+    assert.equal(resolve(p['java-home'] as string).toLowerCase(), resolve(validJdk).toLowerCase());
+    const env = p.env as Record<string, string>;
+    assert.equal(resolve(env.JAVA_HOME).toLowerCase(), resolve(validJdk).toLowerCase());
+    assert.equal(env.CUSTOM_VAR, 'hello');
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(projDir, { recursive: true, force: true });
+    await rm(validJdk, { recursive: true, force: true });
+  }
+});
+
+test('applyWorkspaceOptions with raw host options cleans up unset env vars', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-unset-' + Math.random().toString(36).slice(2));
+  const projDir = join(tmpdir(), 'omp-test-ws-proj-unset-' + Math.random().toString(36).slice(2));
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projDir, { recursive: true });
+    await writeFile(join(projDir, 'pom.xml'), '<project></project>', 'utf8');
+
+    const rawHostOptions = {
+      projects: [
+        {
+          path: projDir,
+          type: 'maven',
+          env: {
+            HOST_STATIC: 'keep_me',
+          },
+        },
+      ],
+    };
+
+    // 1. Set env
+    await setWorkspaceEnvVar(projDir, 'DYNAMIC_OPT', 'value-1', { configDir });
+    const firstPass = await applyWorkspaceOptions(projDir, rawHostOptions, { configDir });
+    const firstProj = (firstPass.projects as Array<Record<string, unknown>>)[0];
+    const firstEnv = firstProj.env as Record<string, string>;
+    assert.equal(firstEnv.DYNAMIC_OPT, 'value-1');
+    assert.equal(firstEnv.HOST_STATIC, 'keep_me');
+
+    // 2. Unset DYNAMIC_OPT
+    await unsetWorkspaceEnvVar(projDir, 'DYNAMIC_OPT', { configDir });
+
+    // 3. Reapply using raw host options
+    const secondPass = await applyWorkspaceOptions(projDir, rawHostOptions, { configDir });
+    const secondProj = (secondPass.projects as Array<Record<string, unknown>>)[0];
+    const secondEnv = secondProj.env as Record<string, string>;
+
+    // DYNAMIC_OPT must be gone!
+    assert.equal(secondEnv.DYNAMIC_OPT, undefined);
+    assert.equal(secondEnv.HOST_STATIC, 'keep_me');
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(projDir, { recursive: true, force: true });
+  }
+});
+
+test('unsetWorkspaceEnvVar cleans up env while preserving JDK and other fields', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-reset-' + Math.random().toString(36).slice(2));
+  const projDir = join(tmpdir(), 'omp-test-ws-proj-reset-' + Math.random().toString(36).slice(2));
+  const jdk21 = join(tmpdir(), 'omp-test-jdk-reset-' + Math.random().toString(36).slice(2));
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projDir, { recursive: true });
+    await createMockJdk(jdk21, { version: '21.0.4' });
+
+    await setWorkspaceJdk(projDir, jdk21, { configDir });
+    await setWorkspaceEnvVar(projDir, 'A', '1', { configDir });
+    await setWorkspaceEnvVar(projDir, 'B', '2', { configDir });
+
+    let info = await getWorkspaceInfo(projDir, { configDir });
+    assert.deepEqual(info.savedEnvKeys, ['A', 'B']);
+    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
+
+    await unsetWorkspaceEnvVar(projDir, 'A', { configDir });
+    const unsetRes = await unsetWorkspaceEnvVar(projDir, 'B', { configDir });
+    assert.deepEqual(unsetRes.savedEnvKeys, []);
+
+    info = await getWorkspaceInfo(projDir, { configDir });
+    assert.deepEqual(info.savedEnvKeys, []);
+    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(projDir, { recursive: true, force: true });
+    await rm(jdk21, { recursive: true, force: true });
+  }
+});
+
+test('getWorkspaceInfo accurately tracks persistent importStatus receipt and marks pending if config changed', async () => {
+  const configDir = join(tmpdir(), 'omp-test-ws-status-' + Math.random().toString(36).slice(2));
+  const systemPath = join(tmpdir(), 'omp-test-sys-status-' + Math.random().toString(36).slice(2));
+  const projDir = join(tmpdir(), 'omp-test-proj-status-' + Math.random().toString(36).slice(2));
+
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projDir, { recursive: true });
+    await writeFile(join(projDir, 'pom.xml'), '<project></project>', 'utf8');
+
+    // 1. Save config; initially no receipt exists -> status: 'pending'
+    await setWorkspaceEnvVar(projDir, 'HTTP_PROXY', 'http://127.0.0.1:8080', { configDir });
+    let info = await getWorkspaceInfo(projDir, { configDir, systemPath });
+    assert.equal(info.importStatus?.status, 'pending');
+    assert.equal(info.importStatus?.stage, 'saved');
+
+    // 2. Simulate successful reload receipt matching config revision
+    const receiptsDir = join(systemPath, 'plugin-metadata', 'receipts');
+    await mkdir(receiptsDir, { recursive: true });
+    const { canonicalizeProject } = await import('../src/metadata.js');
+    const { id } = canonicalizeProject(projDir);
+    const importReceiptPath = join(receiptsDir, `${id}.import-status.json`);
+
+    const receiptDoc = {
+      id,
+      canonicalPath: projDir,
+      status: 'applied',
+      stage: 'ready',
+      revision: info.importStatus?.updatedAt || Date.now(),
+      submittedEnvKeys: ['HTTP_PROXY'],
+      appliedJdk: null,
+      verifiedJdk: false,
+      failure: null,
+      timestamp: Date.now(),
+    };
+    await writeFile(importReceiptPath, JSON.stringify(receiptDoc), 'utf8');
+
+    info = await getWorkspaceInfo(projDir, { configDir, systemPath });
+    assert.equal(info.importStatus?.status, 'applied');
+    assert.equal(info.importStatus?.stage, 'ready');
+    assert.deepEqual(info.importStatus?.submittedEnvKeys, ['HTTP_PROXY']);
+
+    // 3. Simulate config updated after receipt (receipt revision is older than saved.updatedAt) -> status: 'pending'
+    const olderReceiptDoc = {
+      ...receiptDoc,
+      revision: receiptDoc.revision - 100,
+    };
+    await writeFile(importReceiptPath, JSON.stringify(olderReceiptDoc), 'utf8');
+    info = await getWorkspaceInfo(projDir, { configDir, systemPath });
+    assert.equal(info.importStatus?.status, 'pending');
+    assert.equal(info.importStatus?.stage, 'saved');
+
+    // 4. Simulate failed reload receipt at connect stage matching current config revision
+    const failDoc = {
+      id,
+      canonicalPath: projDir,
+      status: 'failed',
+      stage: 'connect',
+      revision: receiptDoc.revision,
+      submittedEnvKeys: [],
+      appliedJdk: null,
+      verifiedJdk: false,
+      failure: { stage: 'connect', message: 'connection refused to server PID 9999' },
+      timestamp: Date.now(),
+    };
+    await writeFile(importReceiptPath, JSON.stringify(failDoc), 'utf8');
+
+    info = await getWorkspaceInfo(projDir, { configDir, systemPath });
+    assert.equal(info.importStatus?.status, 'failed');
+    assert.equal(info.importStatus?.stage, 'connect');
+    assert.equal(info.importStatus?.failure?.message, 'connection refused to server PID 9999');
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+    await rm(systemPath, { recursive: true, force: true });
+    await rm(projDir, { recursive: true, force: true });
+  }
 });

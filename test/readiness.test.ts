@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import type { ProjectStateResult } from '../src/connection-state.js';
 import { findProjectRoot, watchIndex } from '../src/readiness.js';
 import { detectProjectRoot } from '../src/run-core.js';
+
 test('findProjectRoot searches upward for project markers', async () => {
   const base = join(tmpdir(), 'omp-test-find-root-' + Math.random().toString(36).slice(2));
   const sub = join(base, 'module-a', 'src', 'main', 'java');

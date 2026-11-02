@@ -3,9 +3,9 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { canonicalizeProject } from '../src/metadata.js';
 import extension, { parseJdkPath } from '../src/extension.js';
 import type { SelectItem } from '../src/extension-types.js';
+import { canonicalizeProject } from '../src/metadata.js';
 import type { DiscoveredJdkItem, WorkspaceInfo } from '../src/workspace.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
@@ -573,4 +573,318 @@ test('/intellij workspace status surfaces sanitized failure and license state al
   } finally {
     await rm(tempSystemPath, { recursive: true, force: true });
   }
+});
+
+test('/intellij workspace env (view) handles empty and configured env safely', async () => {
+  const pi = createMockPi();
+  let mockInfo: Partial<WorkspaceInfo> = {
+    canonicalPath: 'f:/projects/demo',
+    savedEnvKeys: [],
+    maskedEnv: {},
+  };
+
+  const mockApi = {
+    async getWorkspaceInfo() {
+      return mockInfo as WorkspaceInfo;
+    },
+  };
+
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  // 1. Empty env
+  const ctx1 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env', ctx1);
+  assert.equal(ctx1.notifications.length, 1);
+  assert.match(ctx1.notifications[0].msg, /no custom environment variables configured/i);
+  assert.equal(ctx1.notifications[0].level, 'info');
+
+  // 2. Configured env (masked)
+  mockInfo = {
+    canonicalPath: 'f:/projects/demo',
+    savedEnvKeys: ['API_KEY', 'GRADLE_OPTS'],
+    maskedEnv: {
+      API_KEY: '***',
+      GRADLE_OPTS: '***',
+    },
+  };
+
+  const ctx2 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env view', ctx2);
+  assert.equal(ctx2.notifications.length, 1);
+  const msg = ctx2.notifications[0].msg;
+  assert.match(msg, /env \(2\): API_KEY=\*\*\*, GRADLE_OPTS=\*\*\*/);
+  assert.match(msg, /configured JDK java-home takes precedence over env\.JAVA_HOME/);
+  assert.equal(ctx2.notifications[0].level, 'info');
+});
+
+test('/intellij workspace env set validates syntax, preserves spaces/quotes, and triggers reimport', async () => {
+  const pi = createMockPi();
+  let savedName = '';
+  let savedVal = '';
+  let reimportCalled = false;
+
+  const mockApi = {
+    async setWorkspaceEnvVar(_root: string, name: string, value: string) {
+      savedName = name;
+      savedVal = value;
+      return {
+        projectRoot: _root,
+        canonicalPath: _root,
+        nativePath: _root,
+        rootUri: `file:///${_root}`,
+        name,
+        maskedValue: '***',
+        savedEnvKeys: [name],
+      };
+    },
+    async reimportWorkspace(root: string) {
+      reimportCalled = true;
+      return {
+        ready: true,
+        projectRoot: root,
+        canonicalPath: root,
+        appliedJdk: null,
+        elapsedMs: 42,
+      };
+    },
+  };
+
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  // Set with quotes and spaces in value
+  const ctx = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env set GRADLE_OPTS "-Dorg.gradle.daemon=true -Xmx2g"', ctx);
+
+  assert.equal(savedName, 'GRADLE_OPTS');
+  assert.equal(savedVal, '-Dorg.gradle.daemon=true -Xmx2g');
+  assert.equal(reimportCalled, true);
+  assert.equal(ctx.notifications.length, 1);
+  assert.match(
+    ctx.notifications[0].msg,
+    /Workspace environment variable GRADLE_OPTS saved and reload submitted: index ready \(42ms\)\./,
+  );
+  assert.equal(ctx.notifications[0].level, 'info');
+
+  // Set JAVA_HOME notes precedence
+  const ctxJdk = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env set JAVA_HOME "C:\\Program Files\\Java\\jdk-21"', ctxJdk);
+  assert.equal(savedName, 'JAVA_HOME');
+  assert.equal(savedVal, 'C:\\Program Files\\Java\\jdk-21');
+  assert.match(
+    ctxJdk.notifications[0].msg,
+    /configured workspace JDK takes precedence over env\.JAVA_HOME/,
+  );
+});
+
+test('/intellij workspace env set validates invalid names and missing values', async () => {
+  const pi = createMockPi();
+  let setCalled = false;
+  const mockApi = {
+    async setWorkspaceEnvVar(_root: string) {
+      setCalled = true;
+      return {
+        projectRoot: _root,
+        canonicalPath: _root,
+        nativePath: _root,
+        rootUri: `file:///${_root}`,
+        name: '',
+        maskedValue: '',
+        savedEnvKeys: [],
+      };
+    },
+  };
+
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  // Missing value
+  const ctx1 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env set FOO', ctx1);
+  assert.equal(setCalled, false);
+  assert.equal(ctx1.notifications.length, 1);
+  assert.match(ctx1.notifications[0].msg, /Usage: \/intellij workspace env set <NAME> <VALUE>/);
+  assert.equal(ctx1.notifications[0].level, 'warning');
+
+  // Invalid identifier name
+  const ctx2 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env set "INVALID=NAME" "val"', ctx2);
+  assert.equal(setCalled, false);
+  assert.equal(ctx2.notifications.length, 1);
+  assert.match(ctx2.notifications[0].msg, /Invalid environment variable name "INVALID=NAME"/);
+  assert.equal(ctx2.notifications[0].level, 'warning');
+});
+
+test('/intellij workspace env unset removes variable and reports whether it existed', async () => {
+  const pi = createMockPi();
+  let unsetTarget = '';
+  let reimportCalled = false;
+  let wasSetReturn = true;
+
+  const mockApi = {
+    async unsetWorkspaceEnvVar(_root: string, name: string) {
+      unsetTarget = name;
+      return {
+        projectRoot: _root,
+        canonicalPath: _root,
+        nativePath: _root,
+        rootUri: `file:///${_root}`,
+        name,
+        wasSet: wasSetReturn,
+        savedEnvKeys: [],
+      };
+    },
+    async reimportWorkspace(root: string) {
+      reimportCalled = true;
+      return {
+        ready: true,
+        projectRoot: root,
+        canonicalPath: root,
+        appliedJdk: null,
+        elapsedMs: 15,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  // Unset existing
+  const ctx1 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env unset HTTP_PROXY', ctx1);
+  assert.equal(unsetTarget, 'HTTP_PROXY');
+  assert.equal(reimportCalled, true);
+  assert.match(
+    ctx1.notifications[0].msg,
+    /Workspace environment variable HTTP_PROXY unset and reload submitted: index ready \(15ms\)\./,
+  );
+  assert.equal(ctx1.notifications[0].level, 'info');
+
+  // Unset non-existing
+  reimportCalled = false;
+  wasSetReturn = false;
+  const ctx2 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env unset UNKNOWN_VAR', ctx2);
+  assert.equal(unsetTarget, 'UNKNOWN_VAR');
+  assert.equal(reimportCalled, false);
+  assert.match(
+    ctx2.notifications[0].msg,
+    /Environment variable "UNKNOWN_VAR" is not set in workspace configuration\./,
+  );
+  assert.equal(ctx2.notifications[0].level, 'info');
+});
+
+test('/intellij workspace env set honest error reporting on reimport failure and timeout', async () => {
+  const pi = createMockPi();
+  let timeoutMode = true;
+
+  const mockApi = {
+    async setWorkspaceEnvVar(_root: string) {
+      return {
+        projectRoot: _root,
+        canonicalPath: _root,
+        nativePath: _root,
+        rootUri: `file:///${_root}`,
+        name: 'FAIL_VAR',
+        maskedValue: '***',
+        savedEnvKeys: ['FAIL_VAR'],
+      };
+    },
+    async reimportWorkspace() {
+      if (timeoutMode) {
+        const err = new Error('Reimport deadline exceeded');
+        (err as unknown as { code: string }).code = 'ETIMEDOUT';
+        throw err;
+      }
+      throw new Error('Connection reset by LSP peer');
+    },
+  };
+
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  // Timeout
+  const ctx1 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env set FAIL_VAR test', ctx1);
+  assert.equal(ctx1.notifications.length, 1);
+  assert.match(
+    ctx1.notifications[0].msg,
+    /Workspace environment variable FAIL_VAR saved, but reimport timed out: Reimport deadline exceeded\. Settings are saved but not yet fully applied\./,
+  );
+  assert.equal(ctx1.notifications[0].level, 'warning');
+
+  // Network / peer failure
+  timeoutMode = false;
+  const ctx2 = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace env set FAIL_VAR test', ctx2);
+  assert.equal(ctx2.notifications.length, 1);
+  assert.match(
+    ctx2.notifications[0].msg,
+    /Workspace environment variable FAIL_VAR saved, but reimport failed: Connection reset by LSP peer\. Settings are saved but not applied to active session\./,
+  );
+  assert.equal(ctx2.notifications[0].level, 'warning');
+});
+
+test('/intellij workspace status displays structured importStatus without leaking secret values', async () => {
+  const pi = createMockPi();
+  const mockInfo: Partial<WorkspaceInfo> = {
+    canonicalPath: 'f:/projects/demo',
+    projectType: 'maven',
+    savedJdk: null,
+    appliedJdk: null,
+    isApplied: false,
+    savedEnvKeys: ['APP_SECRET', 'GRADLE_OPTS'],
+    importStatus: {
+      status: 'failed',
+      stage: 'connect',
+      failure: {
+        stage: 'connect',
+        message: 'server failed with secret [REDACTED]',
+      },
+    },
+  };
+
+  const mockApi = {
+    async getWorkspaceInfo() {
+      return mockInfo as WorkspaceInfo;
+    },
+  };
+
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctx = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace status', ctx);
+  assert.equal(ctx.notifications.length, 1);
+  const msg = ctx.notifications[0].msg;
+
+  assert.match(msg, /env: 2 configured \(APP_SECRET, GRADLE_OPTS\)/);
+  assert.match(msg, /import: failed \(connect\) - server failed with secret \[REDACTED\]/);
+
+  // Pending status
+  mockInfo.importStatus = {
+    status: 'pending',
+    stage: 'saved',
+  };
+  const ctxPending = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace status', ctxPending);
+  assert.match(
+    ctxPending.notifications[0].msg,
+    /import: saved, not applied - run \/intellij workspace reload/,
+  );
+
+  // Succeeded status
+  mockInfo.importStatus = {
+    status: 'applied',
+    stage: 'ready',
+  };
+  const ctxApplied = createMockCtx('F:/projects/demo');
+  await cmd.handler('workspace status', ctxApplied);
+  assert.match(ctxApplied.notifications[0].msg, /import: reload succeeded/);
 });
