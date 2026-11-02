@@ -1,0 +1,472 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import extension, { parseJdkPath } from '../src/extension.js';
+import type { SelectItem } from '../src/extension-types.js';
+import type { DiscoveredJdkItem, WorkspaceInfo } from '../src/workspace.js';
+import { createMockCtx, createMockPi } from './helpers.js';
+
+test('parseJdkPath handles unquoted and quoted paths with spaces', () => {
+  assert.equal(parseJdkPath('C:/tools/jdk-21'), 'C:/tools/jdk-21');
+  assert.equal(parseJdkPath('C:\\Program Files\\Java\\jdk-21'), 'C:\\Program Files\\Java\\jdk-21');
+  assert.equal(
+    parseJdkPath('"C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.4"'),
+    'C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.4',
+  );
+  assert.equal(parseJdkPath("'D:\\Toolchains\\Java 21\\store'"), 'D:\\Toolchains\\Java 21\\store');
+  assert.equal(parseJdkPath('  "F:/tools/jdk with spaces"  '), 'F:/tools/jdk with spaces');
+  assert.equal(parseJdkPath(null), '');
+  assert.equal(parseJdkPath(undefined), '');
+  assert.equal(parseJdkPath(123), '');
+});
+
+test('/intellij workspace (default) and status report project JDK and applied state', async () => {
+  const pi = createMockPi();
+  const mockApi = {
+    async getWorkspaceInfo(root: string) {
+      return {
+        projectRoot: root,
+        canonicalPath: 'f:/projects/app',
+        nativePath: root,
+        rootUri: `file:///${root}`,
+        lastReady: null,
+        lastConnected: null,
+        hasLspRecorded: false,
+        projectType: 'maven',
+        savedJdk: 'F:/toolchains/jvms/store/21.0.4',
+        savedVersion: '21.0.4',
+        appliedJdk: 'F:/toolchains/jvms/store/21.0.4',
+        isApplied: true,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctx1 = createMockCtx('F:/projects/app');
+  await cmd.handler('workspace', ctx1);
+  assert.equal(ctx1.notifications.length, 1);
+  assert.match(ctx1.notifications[0].msg, /IntelliJ workspace: f:\/projects\/app \(maven\)/);
+  assert.match(ctx1.notifications[0].msg, /21\.0\.4.*\[applied\]/);
+  assert.equal(ctx1.notifications[0].level, 'info');
+
+  const ctx2 = createMockCtx('F:/projects/app');
+  await cmd.handler('workspace status', ctx2);
+  assert.equal(ctx2.notifications.length, 1);
+  assert.match(ctx2.notifications[0].msg, /IntelliJ workspace: f:\/projects\/app/);
+});
+
+test('/intellij workspace status clearly reports saved but not yet applied JDK', async () => {
+  const pi = createMockPi();
+  const mockApi = {
+    async getWorkspaceInfo(root: string) {
+      return {
+        projectRoot: root,
+        canonicalPath: 'f:/projects/app',
+        nativePath: root,
+        rootUri: `file:///${root}`,
+        lastReady: null,
+        lastConnected: null,
+        hasLspRecorded: false,
+        projectType: 'gradle',
+        savedJdk: 'F:/toolchains/jvms/store/21.0.4',
+        savedVersion: '21.0.4',
+        appliedJdk: 'F:/toolchains/jvms/store/17.0.2',
+        isApplied: false,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+  const ctx = createMockCtx('F:/projects/app');
+
+  await cmd.handler('workspace status', ctx);
+  assert.equal(ctx.notifications.length, 1);
+  assert.match(ctx.notifications[0].msg, /saved, not applied - run \/intellij workspace reload/);
+});
+
+test('/intellij workspace list formats configured workspaces and handles empty state', async () => {
+  const pi = createMockPi();
+  let listReturn: WorkspaceInfo[] = [];
+  const mockApi = {
+    async listWorkspaces() {
+      return listReturn;
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctxEmpty = createMockCtx('F:/projects/app');
+  await cmd.handler('workspace list', ctxEmpty);
+  assert.equal(ctxEmpty.notifications.length, 1);
+  assert.match(ctxEmpty.notifications[0].msg, /No configured IntelliJ workspaces found/);
+
+  listReturn = [
+    { canonicalPath: 'f:/app-a', projectType: 'maven', savedJdk: 'F:/jdk-21', isApplied: true },
+    {
+      canonicalPath: 'f:/app-b',
+      projectType: 'gradle',
+      savedJdk: null,
+      isApplied: false,
+    },
+  ].map((row) => ({
+    projectRoot: row.canonicalPath,
+    nativePath: row.canonicalPath,
+    rootUri: `file:///${row.canonicalPath}`,
+    savedVersion: null,
+    appliedJdk: null,
+    lastReady: null,
+    lastConnected: null,
+    hasLspRecorded: false,
+    ...row,
+  }));
+  const ctxPopulated = createMockCtx('F:/projects/app');
+  await cmd.handler('workspace list', ctxPopulated);
+  assert.equal(ctxPopulated.notifications.length, 1);
+  assert.match(ctxPopulated.notifications[0].msg, /IntelliJ workspaces \(2\):/);
+  assert.match(
+    ctxPopulated.notifications[0].msg,
+    /f:\/app-a \(maven, JDK: F:\/jdk-21 \[applied\]\)/,
+  );
+  assert.match(ctxPopulated.notifications[0].msg, /f:\/app-b \(gradle, JDK: default\)/);
+});
+
+test('/intellij workspace jdks discovers candidates and formats vendor/version', async () => {
+  const pi = createMockPi();
+  const mockApi = {
+    async discoverJdks(): Promise<DiscoveredJdkItem[]> {
+      return [
+        {
+          javaHome: 'F:/toolchains/jvms/store/21.0.4',
+          version: '21.0.4',
+          vendor: 'Eclipse Adoptium',
+          majorVersion: 21,
+          source: 'test',
+        },
+        {
+          javaHome: 'C:/Program Files/Java/jdk-17',
+          version: '17.0.10',
+          vendor: 'Oracle Corporation',
+          majorVersion: 17,
+          source: 'test',
+        },
+      ];
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+  const ctx = createMockCtx('F:/projects/app');
+
+  await cmd.handler('workspace jdks', ctx);
+  assert.equal(ctx.notifications.length, 1);
+  assert.match(ctx.notifications[0].msg, /Discovered JDKs \(2\):/);
+  assert.match(
+    ctx.notifications[0].msg,
+    /v21\.0\.4 \(Eclipse Adoptium\): F:\/toolchains\/jvms\/store\/21\.0\.4/,
+  );
+  assert.match(
+    ctx.notifications[0].msg,
+    /v17\.0\.10 \(Oracle Corporation\): C:\/Program Files\/Java\/jdk-17/,
+  );
+});
+
+test('/intellij workspace jdk <path> with spaces saves and reimports successfully', async () => {
+  const pi = createMockPi();
+  let savedPath: string | null = null;
+  let reimportedRoot: string | null = null;
+
+  const mockApi = {
+    async setWorkspaceJdk(root: string, jdkPath: string) {
+      savedPath = jdkPath;
+      return {
+        projectRoot: root,
+        canonicalPath: root,
+        nativePath: root,
+        rootUri: `file:///${root}`,
+        javaHome: jdkPath,
+        javaVersion: '21',
+      };
+    },
+    async reimportWorkspace(root: string) {
+      reimportedRoot = root;
+      return {
+        ready: true,
+        projectRoot: root,
+        canonicalPath: root,
+        appliedJdk: null,
+        elapsedMs: 142,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+  const ctx = createMockCtx('F:/projects/app');
+
+  await cmd.handler('workspace jdk "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.4"', ctx);
+  assert.equal(savedPath, 'C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.4');
+  assert.ok(reimportedRoot);
+  assert.equal(ctx.notifications.length, 1);
+  assert.equal(ctx.notifications[0].level, 'info');
+  assert.match(
+    ctx.notifications[0].msg,
+    /Workspace JDK saved and applied: C:\\Program Files\\Eclipse Adoptium\\jdk-21\.0\.4 \(142ms\)\./,
+  );
+});
+
+test('/intellij workspace jdk reports saved-but-not-applied when reimport times out', async () => {
+  const pi = createMockPi();
+  const mockApi = {
+    async setWorkspaceJdk(root: string, jdkPath: string) {
+      return {
+        projectRoot: root,
+        canonicalPath: root,
+        nativePath: root,
+        rootUri: `file:///${root}`,
+        javaHome: jdkPath,
+        javaVersion: '21',
+      };
+    },
+    async reimportWorkspace() {
+      const err = Object.assign(new Error('Reimport timed out after 300000ms'), {
+        code: 'ETIMEDOUT',
+      });
+      throw err;
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+  const ctx = createMockCtx('F:/projects/app');
+
+  await cmd.handler('workspace jdk C:\\Program Files\\Java\\jdk-21', ctx);
+  assert.equal(ctx.notifications.length, 1);
+  assert.equal(ctx.notifications[0].level, 'warning');
+  assert.match(
+    ctx.notifications[0].msg,
+    /Workspace JDK saved \(C:\\Program Files\\Java\\jdk-21\), but reimport timed out/,
+  );
+  assert.match(ctx.notifications[0].msg, /Settings are saved but not yet fully applied\./);
+});
+
+test('/intellij workspace jdk reports saved-but-not-applied when reimport fails', async () => {
+  const pi = createMockPi();
+  const mockApi = {
+    async setWorkspaceJdk(root: string, jdkPath: string) {
+      return {
+        projectRoot: root,
+        canonicalPath: root,
+        nativePath: root,
+        rootUri: `file:///${root}`,
+        javaHome: jdkPath,
+        javaVersion: '21',
+      };
+    },
+    async reimportWorkspace() {
+      throw new Error('Connection refused to LSP server');
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+  const ctx = createMockCtx('F:/projects/app');
+
+  await cmd.handler('workspace jdk F:/Java/jdk-21', ctx);
+  assert.equal(ctx.notifications.length, 1);
+  assert.equal(ctx.notifications[0].level, 'warning');
+  assert.match(
+    ctx.notifications[0].msg,
+    /Workspace JDK saved \(F:\/Java\/jdk-21\), but reimport failed/,
+  );
+  assert.match(ctx.notifications[0].msg, /Settings are saved but not applied to active session\./);
+});
+
+test('/intellij workspace jdk reports error and does not reimport on invalid JDK', async () => {
+  const pi = createMockPi();
+  let reimportCalled = false;
+  const mockApi = {
+    async setWorkspaceJdk() {
+      throw new Error('Invalid JDK at F:/bogus: missing bin/java or bin/javac');
+    },
+    async reimportWorkspace() {
+      reimportCalled = true;
+      return {
+        ready: true,
+        projectRoot: '/fake',
+        canonicalPath: '/fake',
+        appliedJdk: null,
+        elapsedMs: 0,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+  const ctx = createMockCtx('F:/projects/app');
+
+  await cmd.handler('workspace jdk F:/bogus', ctx);
+  assert.equal(reimportCalled, false);
+  assert.equal(ctx.notifications.length, 1);
+  assert.equal(ctx.notifications[0].level, 'warning');
+  assert.match(ctx.notifications[0].msg, /Failed to save workspace JDK: Invalid JDK at F:\/bogus/);
+});
+
+test('/intellij workspace jdk without path uses ctx.ui.select when available', async () => {
+  const pi = createMockPi();
+  let selectTitle = '';
+  let selectItems: SelectItem[] = [];
+  let savedPath: string | null = null;
+
+  const mockApi = {
+    async discoverJdks(): Promise<DiscoveredJdkItem[]> {
+      return [
+        {
+          javaHome: 'F:/toolchains/jvms/store/21.0.4',
+          version: '21.0.4',
+          vendor: 'Adoptium',
+          majorVersion: 21,
+          source: 'test',
+        },
+        {
+          javaHome: 'C:/Program Files/Java/jdk-17',
+          version: '17.0.2',
+          vendor: 'Oracle',
+          majorVersion: 17,
+          source: 'test',
+        },
+      ];
+    },
+    async setWorkspaceJdk(root: string, path: string) {
+      savedPath = path;
+      return {
+        projectRoot: root,
+        canonicalPath: root,
+        nativePath: root,
+        rootUri: `file:///${root}`,
+        javaHome: path,
+        javaVersion: '21',
+      };
+    },
+    async reimportWorkspace(root: string) {
+      return {
+        ready: true,
+        projectRoot: root,
+        canonicalPath: root,
+        appliedJdk: null,
+        elapsedMs: 50,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctx = createMockCtx('F:/projects/app', {
+    async select(title: string, items: SelectItem[]) {
+      selectTitle = title;
+      selectItems = items;
+      return items[0].value;
+    },
+  });
+
+  await cmd.handler('workspace jdk', ctx);
+  assert.equal(selectTitle, 'Select JDK for workspace:');
+  assert.equal(selectItems.length, 2);
+  assert.equal(savedPath, 'F:/toolchains/jvms/store/21.0.4');
+  assert.match(
+    ctx.notifications[0].msg,
+    /Workspace JDK saved and applied: F:\/toolchains\/jvms\/store\/21\.0\.4/,
+  );
+});
+
+test('/intellij workspace jdk without path handles user cancellation in ctx.ui.select', async () => {
+  const pi = createMockPi();
+  let setCalled = false;
+  const mockApi = {
+    async discoverJdks(): Promise<DiscoveredJdkItem[]> {
+      return [
+        { javaHome: 'F:/jdk-21', version: '21', vendor: '', majorVersion: 21, source: 'test' },
+      ];
+    },
+    async setWorkspaceJdk() {
+      setCalled = true;
+      return {
+        projectRoot: '/fake',
+        canonicalPath: '/fake',
+        nativePath: '/fake',
+        rootUri: `file:///${'/fake'}`,
+        javaHome: '/fake',
+        javaVersion: '21',
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctx = createMockCtx('F:/projects/app', {
+    async select() {
+      return null;
+    },
+  });
+
+  await cmd.handler('workspace jdk', ctx);
+  assert.equal(setCalled, false);
+  assert.equal(ctx.notifications.length, 1);
+  assert.match(ctx.notifications[0].msg, /JDK selection cancelled\./);
+});
+
+test('/intellij workspace jdk without path warns when ctx.ui.select is not available', async () => {
+  const pi = createMockPi();
+  const mockApi = {
+    async discoverJdks(): Promise<DiscoveredJdkItem[]> {
+      return [];
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctx = createMockCtx('F:/projects/app');
+  await cmd.handler('workspace jdk', ctx);
+
+  assert.equal(ctx.notifications.length, 1);
+  assert.equal(ctx.notifications[0].level, 'warning');
+  assert.match(
+    ctx.notifications[0].msg,
+    /No interactive UI available\. Run \/intellij workspace jdks/,
+  );
+});
+
+test('/intellij workspace reload triggers reimport and reports outcome', async () => {
+  const pi = createMockPi();
+  let reimported = false;
+  const mockApi = {
+    async reimportWorkspace(root: string) {
+      reimported = true;
+      return {
+        ready: true,
+        projectRoot: root,
+        canonicalPath: root,
+        appliedJdk: null,
+        elapsedMs: 88,
+      };
+    },
+  };
+  extension(pi, { workspaceApi: mockApi });
+  const cmd = pi.getCommand('intellij');
+  assert.ok(cmd);
+
+  const ctx = createMockCtx('F:/projects/app');
+  await cmd.handler('workspace reload', ctx);
+
+  assert.equal(reimported, true);
+  assert.equal(ctx.notifications.length, 1);
+  assert.match(
+    ctx.notifications[0].msg,
+    /Workspace reimported successfully: index ready \(88ms\)\./,
+  );
+});
