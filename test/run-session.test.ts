@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { canonicalizeProject } from '../src/metadata.js';
 import { encode, frameParser } from '../src/protocol.js';
 import { createLspSession } from '../src/run-core.js';
+import { RpcResponseError } from '../src/runtime-status.js';
 
 interface RpcMessage {
   id?: number;
@@ -293,7 +294,6 @@ test('recorded initialize replay is skipped when canonical root does not match',
   const receivedOpts = (receivedInitParams as Record<string, unknown>)
     .initializationOptions as Record<string, unknown>;
   assert.equal(receivedOpts.customNativeOption, undefined);
-  assert.equal(receivedOpts.eulaHash, 'cd82e6cdaf2790f1');
   assert.equal(receivedOpts.runMainCodeLens, true);
 
   await session.close();
@@ -412,4 +412,162 @@ test('session close and cancellation semantics', async (t) => {
   await session.close();
   await assert.rejects(session.request('workspace/executeCommand', {}), /LSP session is closed/);
   await assert.rejects(session.reloadWorkspace(), /LSP session is closed/);
+});
+
+test('runner creates kind runner connection record and marks it closed on exit', async (t) => {
+  const fake = await createFakeLspServer(t);
+  const session = await createLspSession(process.cwd(), {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+  });
+
+  const connDir = join(fake.systemPath, 'plugin-metadata', 'connections');
+  const filesBefore = await readdir(connDir);
+  assert.equal(filesBefore.length, 1);
+
+  const recordPath = join(connDir, filesBefore[0]);
+  const activeRecord = JSON.parse(await readFile(recordPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(activeRecord.kind, 'runner');
+  assert.equal(activeRecord.closed, false);
+  assert.equal(activeRecord.phase, 'ready');
+
+  await session.close();
+
+  const closedRecord = JSON.parse(await readFile(recordPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(closedRecord.closed, true);
+  assert.equal(closedRecord.phase, 'disconnected');
+  assert.deepEqual(closedRecord.license, { status: 'unknown' });
+});
+
+test('runner preserves raw RpcResponseError code and data in memory while message is sanitized', async (t) => {
+  const fake = await createFakeLspServer(t, {
+    onRequest: (method, _params, id, socket) => {
+      if (method === 'initialize') {
+        socket.write(encode({ jsonrpc: '2.0', id, result: { capabilities: {} } }));
+        setImmediate(() => {
+          socket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
+        });
+      } else if (method === 'custom/failing') {
+        socket.write(
+          encode({
+            jsonrpc: '2.0',
+            id,
+            error: {
+              code: -32001,
+              message:
+                'Failed to fetch https://user:secretpass@repo.example.com Bearer token_secret_999',
+              data: {
+                repository: 'https://user:secretpass@repo.example.com',
+                token: 'token_secret_999',
+                module: ':core',
+              },
+            },
+          }),
+        );
+      }
+    },
+  });
+
+  const session = await createLspSession(process.cwd(), {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+  });
+  t.after(() => session.close());
+
+  let caughtError: unknown;
+  try {
+    await session.request('custom/failing', {});
+  } catch (err: unknown) {
+    caughtError = err;
+  }
+
+  assert.ok(caughtError instanceof RpcResponseError);
+  assert.equal(caughtError.code, -32001);
+
+  // Raw error data is preserved in memory for callers
+  const data = caughtError.data as Record<string, unknown>;
+  assert.equal(data.token, 'token_secret_999');
+  assert.equal(data.repository, 'https://user:secretpass@repo.example.com');
+  assert.equal(data.module, ':core');
+
+  // Message is sanitized
+  assert.ok(!caughtError.message.includes('secretpass'));
+  assert.ok(!caughtError.message.includes('token_secret_999'));
+  assert.ok(caughtError.message.includes('[REDACTED]'));
+  const dir = join(fake.systemPath, 'plugin-metadata', 'connections');
+  const recordPath = join(dir, (await readdir(dir)).find((name) => name.endsWith('.json'))!);
+  const storedText = await readFile(recordPath, 'utf8');
+  const stored = JSON.parse(storedText);
+  assert.equal(stored.phase, 'ready');
+  assert.equal(stored.failure.stage, 'request');
+  assert.equal(stored.failure.code, -32001);
+  assert.equal(stored.failure.data.module, ':core');
+  assert.equal(storedText.includes('secretpass'), false);
+  assert.equal(storedText.includes('token_secret_999'), false);
+  assert.equal(session.isReady(), true);
+
+  await session.close();
+});
+
+test('runner initialize failure retains safe RPC cause after its connection closes', async (t) => {
+  const fake = await createFakeLspServer(t, {
+    onRequest: (_method, _params, id, socket) => {
+      socket.write(
+        encode({
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32001,
+            message: 'Cannot resolve dependency',
+            data: { repository: 'https://user:secret@repo/x', token: 'secret', module: ':app' },
+          },
+        }),
+      );
+    },
+  });
+  await assert.rejects(
+    createLspSession(process.cwd(), { socket: fake.clientSocket, systemPath: fake.systemPath }),
+    (error: unknown) => error instanceof RpcResponseError && error.code === -32001,
+  );
+  const dir = join(fake.systemPath, 'plugin-metadata', 'connections');
+  const text = await readFile(join(dir, (await readdir(dir))[0]), 'utf8');
+  const stored = JSON.parse(text);
+  assert.equal(stored.closed, true);
+  assert.equal(stored.failure.stage, 'initialize');
+  assert.equal(stored.failure.code, -32001);
+  assert.equal(stored.failure.data.module, ':app');
+  assert.equal(text.includes('user:secret'), false);
+  assert.equal(text.includes('"secret"'), false);
+});
+
+test('runner authorization denial rejects a wait without disconnecting; recovery still needs ready', async (t) => {
+  const fake = await createFakeLspServer(t);
+  const session = await createLspSession(process.cwd(), {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+  });
+  t.after(() => session.close());
+
+  fake.sendNotification('jetbrains/licensing/state', {
+    activeLicense: { status: 'Expired' },
+    featuresDeclined: true,
+    parkedReason: 'SubscriptionExpired',
+  });
+  await session.request('custom/fence', {});
+  assert.equal(session.isReady(), false);
+  await assert.rejects(
+    session.reloadWorkspace(),
+    /IntelliJ authorization denied: SubscriptionExpired/,
+  );
+  assert.equal(fake.clientSocket.destroyed, false);
+
+  fake.sendNotification('jetbrains/licensing/state', { activeLicense: { status: 'Valid' } });
+  await session.request('custom/fence', {});
+  assert.equal(session.isReady(), false);
+
+  const reloaded = session.reloadWorkspace();
+  fake.sendNotification('intellij/ready-for-test', {});
+  assert.deepEqual(await reloaded, { ready: true });
+  assert.equal(session.isReady(), true);
+  await session.close();
 });

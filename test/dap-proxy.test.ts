@@ -455,6 +455,35 @@ test('EOF during backend initialize fails the pending attach exactly once', asyn
   );
 });
 
+test('unresponsive backend initialize reaches its deadline and rejects startup once', async (t) => {
+  const initializing = Promise.withResolvers<void>();
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'initialize') {
+        initializing.resolve();
+        return true;
+      }
+    },
+  });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const seq = h.send('attach', { port: 5005 });
+  await initializing.promise;
+  t.mock.timers.tick(14999);
+  assert.equal(
+    h.messages.some((m) => m.type === 'response' && m.request_seq === seq),
+    false,
+  );
+  t.mock.timers.tick(1);
+  assert.equal(await h.closed, 1);
+  const responses = h.messages.filter((m) => m.type === 'response' && m.request_seq === seq);
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0]?.type === 'response' && responses[0].success, false);
+  assert.equal(
+    h.backendRequests.some((request) => request.command === 'attach'),
+    false,
+  );
+});
+
 test('a second startup is rejected while the first backend is initializing', async (t) => {
   const initializing = Promise.withResolvers<void>();
   const h = await createDapTestHarness(t, {
@@ -739,6 +768,40 @@ test('backend termination reaches the client only after JDWP cleanup', async (t)
   h.respond(request);
   await h.closed;
   assert.equal(h.messages.filter((m) => m.type === 'event' && m.event === 'terminated').length, 1);
+});
+
+test('unresponsive detach uses the cleanup deadline and never terminates an external JVM', async (t) => {
+  const disconnecting = Promise.withResolvers<void>();
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'disconnect') {
+        disconnecting.resolve();
+        return true;
+      }
+    },
+  });
+  await h.request('attach', { port: 5005 });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let closed = false;
+  void h.closed.then(() => {
+    closed = true;
+  });
+  h.stdin.end();
+  await disconnecting.promise;
+  t.mock.timers.tick(14999);
+  await Promise.resolve();
+  assert.equal(closed, false);
+  t.mock.timers.tick(1);
+  assert.equal(await h.closed, 1);
+  assert.equal(
+    h.backendRequests.some((request) => request.command === 'terminate'),
+    false,
+  );
+  assert.equal(
+    h.backendRequests.find((request) => request.command === 'disconnect')?.arguments
+      ?.terminateDebuggee,
+    false,
+  );
 });
 
 for (const cleanupFails of [false, true]) {

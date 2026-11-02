@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { join } from 'node:path';
 import { readServerConfig, trackInstallation } from './server-config.js';
+import { requireAcceptedEula } from './eula.js';
 import { ensureInstalled } from './server-install.js';
 import type { PluginSettings } from './types.js';
 
@@ -397,6 +398,7 @@ export async function ensureServer(): Promise<net.Socket> {
     try {
       return await connect();
     } catch {}
+    const eulaDoc = await requireAcceptedEula(executable);
     await rm(portFile, { force: true });
     await rm(ownerFile, { force: true });
     const log = await open(join(settings.systemPath, 'launcher.log'), 'a');
@@ -410,6 +412,7 @@ export async function ensureServer(): Promise<net.Socket> {
           '--system-path=' + settings.systemPath,
           '--idle-timeout=' + settings.idleTimeout,
           '--data-sharing=none',
+          '--eula=' + eulaDoc.hash,
         ],
         { detached: true, windowsHide: true, stdio: ['ignore', log.fd, log.fd] },
       );
@@ -431,11 +434,11 @@ export async function ensureServer(): Promise<net.Socket> {
         } catch {}
         await pause(100);
       }
-      throw new Error(
-        'IntelliJ server startup exceeded ' +
-          settings.startupTimeoutMs +
-          'ms; see ' +
-          join(settings.systemPath, 'launcher.log'),
+      throw Object.assign(
+        new Error(
+          `IntelliJ server startup exceeded ${settings.startupTimeoutMs}ms; see ${join(settings.systemPath, 'launcher.log')}`,
+        ),
+        { code: 'ETIMEDOUT' },
       );
     } finally {
       await log.close();

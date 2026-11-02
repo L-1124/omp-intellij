@@ -18,6 +18,7 @@ import {
   recordReadiness,
 } from './metadata.js';
 import { asyncFramedStream, encode, frameParser } from './protocol.js';
+import { type FailureDetail, sanitizeStatus, sanitizeString } from './runtime-status.js';
 import { ensureServer, settings } from './service.js';
 import { applyWorkspaceOptions } from './workspace.js';
 
@@ -34,7 +35,8 @@ export async function saveInitializeParams(params: unknown): Promise<void> {
   const { id } = canonicalizeProject(uri);
   const target = join(dir, `initialize-${id}.json`);
   const temp = `${target}.${randomUUID()}.tmp`;
-  await writeFile(temp, JSON.stringify(params), 'utf8');
+  const sanitized = sanitizeStatus(params);
+  await writeFile(temp, JSON.stringify(sanitized), 'utf8');
   await rename(temp, target);
 }
 
@@ -54,7 +56,16 @@ export async function startBridge(): Promise<void> {
     kind: 'bridge',
   });
 
-  const socket = await ensureServer();
+  const socket = await ensureServer().catch(async (error: unknown) => {
+    await connState.update({ root: process.cwd() });
+    await connState.close(
+      connectionCloseState(error instanceof Error ? error : new Error(String(error)), {
+        stage: 'connect',
+        systemPath: settings.systemPath,
+      }),
+    );
+    throw error;
+  });
   let closing = false;
   let barrier: IndexBarrier;
   let leaseHandle: LeaseHandle | null = null;
@@ -99,6 +110,10 @@ export async function startBridge(): Promise<void> {
         recordConnection(settings.systemPath, projectPath, Date.now()).catch(() => {});
         createLease(settings.systemPath, { kind: 'bridge', projectPath })
           .then((newLease) => {
+            if (closing) {
+              void newLease.release().catch(() => {});
+              return;
+            }
             leaseHandle?.release().catch(() => {});
             leaseHandle = newLease;
           })
@@ -108,14 +123,23 @@ export async function startBridge(): Promise<void> {
       try {
         message.params = message.params || {};
         const paramsObj = message.params as Record<string, unknown>;
+        const caps = (paramsObj.capabilities as Record<string, unknown>) || {};
+        const exp = (caps.experimental as Record<string, unknown>) || {};
+        exp.licensingUi = true;
+        caps.experimental = exp;
+        paramsObj.capabilities = caps;
+        const initializationOptions =
+          (paramsObj.initializationOptions as Record<string, unknown>) || {};
+        delete initializationOptions.eulaHash;
         paramsObj.initializationOptions = await applyWorkspaceOptions(
           projectPath,
-          (paramsObj.initializationOptions as Record<string, unknown>) || {},
+          initializationOptions,
           { systemPath: settings.systemPath },
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error('intellij: failed to apply workspace options:', msg);
+        const msg =
+          err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
+        console.error('intellij: failed to apply workspace options: ' + msg);
       }
 
       if (uri) {
@@ -123,7 +147,13 @@ export async function startBridge(): Promise<void> {
       }
 
       initializeTimer = setTimeout(() => {
-        close(new Error(`IntelliJ initialize handshake timed out after ${initializeTimeoutMs}ms`));
+        close(
+          Object.assign(
+            new Error(`IntelliJ initialize handshake timed out after ${initializeTimeoutMs}ms`),
+            { code: 'ETIMEDOUT' },
+          ),
+          { kind: 'timeout', stage: 'initialize' },
+        );
       }, initializeTimeoutMs);
       initializeTimer.unref();
 
@@ -164,12 +194,17 @@ export async function startBridge(): Promise<void> {
           detail: state.detail,
           progress: state.progress,
           rootUri: state.rootUri ?? undefined,
+          failure: state.failure ?? null,
+          license: state.license ?? { status: 'unknown' },
         })
         .catch(() => {});
     },
   });
 
-  function close(error?: Error) {
+  function close(
+    error?: Error,
+    closeOpts?: { kind?: FailureDetail['kind']; stage?: FailureDetail['stage'] },
+  ) {
     if (closing) return;
     closing = true;
 
@@ -177,7 +212,15 @@ export async function startBridge(): Promise<void> {
       clearTimeout(initializeTimer);
       initializeTimer = null;
     }
-    connState.close(connectionCloseState(error)).catch(() => {});
+    connState
+      .close(
+        connectionCloseState(error, {
+          kind: closeOpts?.kind,
+          stage: closeOpts?.stage,
+          systemPath: settings.systemPath,
+        }),
+      )
+      .catch(() => {});
 
     if (leaseHandle) {
       leaseHandle.release().catch(() => {});
@@ -185,11 +228,24 @@ export async function startBridge(): Promise<void> {
     }
 
     if (error) {
-      console.error('intellij-bridge: ' + error.message);
+      const safeMsg = sanitizeString(error.message);
+      console.error('intellij-bridge: ' + safeMsg);
       process.exitCode = 1;
     }
 
-    barrier.fail(error?.message ?? 'IntelliJ connection closed before queued requests completed');
+    const failureDetail: FailureDetail | undefined = error
+      ? {
+          kind: closeOpts?.kind ?? 'connection',
+          stage: closeOpts?.stage ?? 'connect',
+          message: error.message,
+          logPath: join(settings.systemPath, 'launcher.log'),
+        }
+      : undefined;
+
+    barrier.fail(
+      error?.message ?? 'IntelliJ connection closed before queued requests completed',
+      failureDetail,
+    );
     barrier.dispose();
 
     process.stdin.unpipe(upstream);
@@ -208,8 +264,8 @@ export async function startBridge(): Promise<void> {
   process.stdin.on('error', (err: Error) => close(err));
   process.stdout.on('error', (err: Error) => close(err));
   process.stdin.on('end', () => close());
-  process.on('SIGTERM', () => close());
-  process.on('SIGINT', () => close());
+  process.on('SIGTERM', () => close(undefined, { kind: 'cancelled', stage: 'connect' }));
+  process.on('SIGINT', () => close(undefined, { kind: 'cancelled', stage: 'connect' }));
 
   process.stdin.pipe(upstream).pipe(socket);
   socket.pipe(downstream).pipe(process.stdout);
@@ -217,7 +273,9 @@ export async function startBridge(): Promise<void> {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   startBridge().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    const safeMsg =
+      error instanceof Error ? sanitizeString(error.message) : sanitizeString(String(error));
+    console.error(safeMsg);
+    process.exit(1);
   });
 }

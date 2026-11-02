@@ -12,7 +12,19 @@ import {
   recordConnection,
   recordReadiness,
 } from './metadata.js';
+import {
+  connectionCloseState,
+  createConnectionState,
+  reduceConnectionState,
+  type StateRecord,
+} from './connection-state.js';
 import { encode, frameParser } from './protocol.js';
+import {
+  type FailureDetail,
+  LICENSE_RECOVERY_GUIDANCE,
+  RpcResponseError,
+  sanitizeString,
+} from './runtime-status.js';
 import { ensureServer, settings } from './service.js';
 import { applyWorkspaceOptions, getWorkspaceInfo } from './workspace.js';
 
@@ -325,6 +337,10 @@ export async function createLspSession(
   }
 
   const socket = options.socket ?? (await ensureServer());
+  const connState = createConnectionState({
+    systemPath,
+    kind: 'runner',
+  });
   let leaseHandle: LeaseHandle | null = null;
   try {
     leaseHandle = await createLease(systemPath, { kind: 'runner', projectPath: nativePath });
@@ -339,27 +355,116 @@ export async function createLspSession(
   let isClosed = false;
   let serverReady = false;
 
-  const readyListeners = new Set<
-    (event: { type: string; folders?: unknown[]; error?: Error }) => void
-  >();
-  const indexingTokens = new Set<unknown>();
+  const readinessWaiters = new Set<{ resolve: () => void; reject: (err: Error) => void }>();
+  let fatalError: Error | null = null;
+  let closePromise: Promise<void> | undefined;
+  let protocolState: StateRecord = {
+    phase: 'connecting',
+    detail: '',
+    progress: null,
+    rootUri: null,
+    initializeRequestId: null,
+    generation: 0,
+    systemPath,
+  };
 
-  function onReady(
-    listener: (event: { type: string; folders?: unknown[]; error?: Error }) => void,
-  ) {
-    readyListeners.add(listener);
-    return () => readyListeners.delete(listener);
+  function readinessError(): Error | undefined {
+    if (fatalError) return fatalError;
+    if (protocolState.failure && protocolState.failure.stage !== 'request') {
+      const prefix =
+        protocolState.failure.kind === 'authorization' ? 'IntelliJ authorization denied: ' : '';
+      return new Error(prefix + sanitizeString(protocolState.failure.message));
+    }
+    if (
+      protocolState.license?.featuresDeclined ||
+      protocolState.license?.status === 'needs-activation' ||
+      protocolState.license?.status === 'expired'
+    ) {
+      return new Error(LICENSE_RECOVERY_GUIDANCE);
+    }
+    return undefined;
   }
 
-  const {
-    promise: readyPromise,
-    resolve: readyResolve,
-    reject: readyReject,
-  } = Promise.withResolvers<void>();
-  readyPromise.catch(() => {});
+  function applyState(message: Record<string, unknown>, direction: 'client' | 'server') {
+    const previous = protocolState;
+    protocolState = reduceConnectionState(previous, message, direction);
+    serverReady = protocolState.phase === 'ready' && !readinessError();
+    if (
+      previous.phase !== protocolState.phase ||
+      previous.detail !== protocolState.detail ||
+      previous.rootUri !== protocolState.rootUri ||
+      previous.failure !== protocolState.failure ||
+      previous.license !== protocolState.license ||
+      previous.progress !== protocolState.progress
+    ) {
+      void connState.update({
+        rootUri: protocolState.rootUri ?? undefined,
+        phase: protocolState.phase,
+        detail: protocolState.detail,
+        progress: protocolState.progress,
+        failure: protocolState.failure ?? null,
+        license: protocolState.license ?? { status: 'unknown' },
+      });
+    }
+    const error = readinessError();
+    if (error || serverReady) {
+      for (const waiter of readinessWaiters) {
+        if (error) waiter.reject(error);
+        else waiter.resolve();
+      }
+      readinessWaiters.clear();
+    }
+    if (serverReady && previous.phase !== 'ready') {
+      void recordReadiness(systemPath, nativePath, Date.now()).catch(() => {});
+    }
+  }
+
+  function waitForReady(timeoutMs: number, abortSignal?: AbortSignal): Promise<void> {
+    const error = readinessError();
+    if (error) return Promise.reject(error);
+    if (serverReady) return Promise.resolve();
+
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    const waiter = { resolve, reject };
+    readinessWaiters.add(waiter);
+
+    const timer = setTimeout(() => {
+      readinessWaiters.delete(waiter);
+      const err = new Error(`IntelliJ readiness timed out after ${timeoutMs}ms`);
+      (err as Error & { code?: string }).code = 'ETIMEDOUT';
+      reject(err);
+    }, timeoutMs);
+    timer.unref();
+
+    let abortHandler: (() => void) | undefined;
+    if (abortSignal) {
+      abortHandler = () => {
+        readinessWaiters.delete(waiter);
+        clearTimeout(timer);
+        reject(
+          abortSignal.reason instanceof Error
+            ? abortSignal.reason
+            : new Error(String(abortSignal.reason || 'Cancelled')),
+        );
+      };
+      if (abortSignal.aborted) {
+        abortHandler();
+        return promise;
+      }
+      abortSignal.addEventListener('abort', abortHandler, { once: true });
+    }
+
+    return promise.finally(() => {
+      clearTimeout(timer);
+      if (abortSignal && abortHandler) {
+        abortSignal.removeEventListener('abort', abortHandler);
+      }
+    });
+  }
 
   function send(msg: Record<string, unknown>) {
     if (isClosed || socket.destroyed) return;
+    applyState(msg, 'client');
     socket.write(encode({ jsonrpc: '2.0', ...msg }));
   }
 
@@ -368,27 +473,29 @@ export async function createLspSession(
     send({ method, params });
   }
 
-  function cleanup(error?: Error) {
-    if (isClosed) return;
+  function cleanup(
+    error?: Error,
+    closeOpts?: { kind?: FailureDetail['kind']; stage?: FailureDetail['stage'] },
+  ): Promise<void> {
+    if (closePromise) return closePromise;
     isClosed = true;
-    if (leaseHandle) {
-      leaseHandle.release().catch(() => {});
-      leaseHandle = null;
-    }
+    const lease = leaseHandle;
+    leaseHandle = null;
     const err = error || new Error('LSP connection closed');
-    for (const [, handler] of Array.from(pending.entries())) {
+    fatalError = err;
+    for (const handler of pending.values()) {
       clearTimeout(handler.timer);
       handler.reject(err);
     }
     pending.clear();
-    readyReject(err);
-    for (const listener of Array.from(readyListeners)) {
-      listener({ type: 'error', error: err });
-    }
-    readyListeners.clear();
-    try {
-      socket.destroy();
-    } catch {}
+    for (const waiter of readinessWaiters) waiter.reject(err);
+    readinessWaiters.clear();
+    closePromise = Promise.all([
+      connState.close(connectionCloseState(error, { ...closeOpts, systemPath })),
+      lease?.release(),
+    ]).then(() => {});
+    socket.destroy();
+    return closePromise;
   }
 
   function handleMessage(messageRaw: unknown) {
@@ -401,6 +508,7 @@ export async function createLspSession(
     } | null;
 
     if (!message) return;
+    applyState(message as Record<string, unknown>, 'server');
 
     if (message.id !== undefined && !message.method) {
       const handler = pending.get(message.id);
@@ -408,8 +516,34 @@ export async function createLspSession(
         pending.delete(message.id);
         clearTimeout(handler.timer);
         if (message.error) {
-          handler.reject(new Error(message.error.message || JSON.stringify(message.error)));
+          const error = new RpcResponseError(
+            message.error as { code?: number | string; message?: string; data?: unknown },
+          );
+          if (
+            message.id !== protocolState.initializeRequestId &&
+            error.code !== -32800 &&
+            (!protocolState.failure || protocolState.failure.stage === 'request')
+          ) {
+            protocolState.failure = {
+              kind: 'rpc',
+              stage: 'request',
+              message: error.message,
+              code: error.code,
+              data: error.data,
+              logPath: join(systemPath, 'launcher.log'),
+            };
+            void connState.update({ failure: protocolState.failure }).then(
+              () => handler.reject(error),
+              () => handler.reject(error),
+            );
+          } else {
+            handler.reject(error);
+          }
         } else {
+          if (protocolState.failure?.stage === 'request') {
+            delete protocolState.failure;
+            void connState.update({ failure: null });
+          }
           handler.resolve(message.result);
         }
       }
@@ -441,68 +575,23 @@ export async function createLspSession(
       }
       return;
     }
-
-    if (message.method === '$/progress') {
-      const token = message.params?.token;
-      const value = message.params?.value as { kind?: string; title?: string } | undefined;
-      if (value?.kind === 'begin' && value.title === 'Indexing') indexingTokens.add(token);
-      if (value?.kind === 'end' && indexingTokens.delete(token)) {
-        for (const listener of Array.from(readyListeners)) listener({ type: 'index-finished' });
-      }
-    }
-    if (message.method === 'intellij/workspaceImportState') {
-      const folders =
-        (message.params?.folders as Array<{
-          status: string;
-          errorMessage?: string;
-          statusText?: string;
-        }>) ?? [];
-      const failedFolder = folders.find((folder) =>
-        ['FAILURE', 'FAILED', 'ERROR'].includes(folder.status),
-      );
-      if (failedFolder) {
-        const importErrorReason =
-          failedFolder.errorMessage || failedFolder.statusText || 'Workspace import failed';
-        const err = new Error(`Project import failed: ${importErrorReason}`);
-        readyReject(err);
-        for (const listener of Array.from(readyListeners)) {
-          listener({ type: 'error', error: err });
-        }
-      } else if (message.params?.phase === 'FINISHED' || message.params?.phase === 'SUCCESS') {
-        for (const listener of Array.from(readyListeners)) {
-          listener({ type: 'import-finished', folders });
-        }
-      }
-    } else if (message.method === 'intellij/ready-for-test') {
-      serverReady = true;
-      recordReadiness(systemPath, nativePath, Date.now()).catch(() => {});
-      readyResolve();
-      for (const listener of Array.from(readyListeners)) {
-        listener({ type: 'ready' });
-      }
-    }
   }
 
   socket.on('data', frameParser(handleMessage));
-  socket.once('error', (err: Error) => cleanup(err));
-  socket.once('close', () => cleanup());
+  socket.once('error', (err: Error) => void cleanup(err).catch(() => {}));
+  socket.once('close', () => void cleanup().catch(() => {}));
 
   const onAbort = () => {
-    cleanup(
-      new Error(
-        signal?.reason instanceof Error
-          ? signal.reason.message
-          : String(signal?.reason || 'LSP session cancelled'),
-      ),
-    );
+    void cleanup(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new Error(String(signal?.reason || 'LSP session cancelled')),
+      { kind: 'cancelled', stage: 'request' },
+    ).catch(() => {});
   };
   if (signal?.aborted) {
-    onAbort();
-    throw new Error(
-      signal?.reason instanceof Error
-        ? signal.reason.message
-        : String(signal?.reason || 'LSP session cancelled'),
-    );
+    await cleanup(new Error('LSP session cancelled'), { kind: 'cancelled', stage: 'connect' });
+    throw fatalError;
   }
   signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -528,6 +617,14 @@ export async function createLspSession(
       .replace(/\\/g, '/')
       .replace(/^([A-Za-z]):/, (_, d) => `${d.toLowerCase()}:`);
     const normRootUri = pathToFileURL(normPath).href;
+    connState
+      .update({
+        root: nativePath,
+        rootUri: normRootUri,
+        phase: 'connecting',
+        detail: 'Initializing runner connection',
+      })
+      .catch(() => {});
 
     if (!initParams) {
       initParams = {
@@ -536,6 +633,9 @@ export async function createLspSession(
         rootPath: nativePath,
         workspaceFolders: [{ uri: normRootUri, name: basename(nativePath) }],
         capabilities: {
+          experimental: {
+            licensingUi: true,
+          },
           textDocument: {
             synchronization: { didSave: true, dynamicRegistration: false },
             hover: { contentFormat: ['markdown', 'plaintext'], dynamicRegistration: false },
@@ -554,7 +654,6 @@ export async function createLspSession(
           },
         },
         initializationOptions: {
-          eulaHash: 'cd82e6cdaf2790f1',
           runMainCodeLens: true,
         },
       };
@@ -563,15 +662,22 @@ export async function createLspSession(
         initParams.initializationOptions && typeof initParams.initializationOptions === 'object'
           ? (initParams.initializationOptions as Record<string, unknown>)
           : {};
+      if ('eulaHash' in existingOpts) {
+        delete (existingOpts as Record<string, unknown>).eulaHash;
+      }
       initParams.initializationOptions = {
         ...existingOpts,
         runMainCodeLens: true,
       };
-      const capabilities = initParams.capabilities as Record<string, unknown> | undefined;
-      const textDocument = capabilities?.textDocument as Record<string, unknown> | undefined;
+      const capabilities = (initParams.capabilities as Record<string, unknown>) || {};
+      const exp = (capabilities.experimental as Record<string, unknown>) || {};
+      exp.licensingUi = true;
+      capabilities.experimental = exp;
+      const textDocument = capabilities.textDocument as Record<string, unknown> | undefined;
       if (textDocument) {
         textDocument.codeLens = { dynamicRegistration: false };
       }
+      initParams.capabilities = capabilities;
     }
 
     const folders = initParams.workspaceFolders as Array<{ uri?: string }> | undefined;
@@ -609,47 +715,9 @@ export async function createLspSession(
     await request('initialize', initParams, initTimeout);
     send({ method: 'initialized', params: {} });
 
-    if (!serverReady) {
-      const { promise: timeoutPromise, reject: timeoutReject } = Promise.withResolvers<never>();
-      const readyTimer = setTimeout(() => {
-        const err = new Error(`IntelliJ readiness timed out after ${requestTimeout}ms`);
-        (err as Error & { code?: string }).code = 'ETIMEDOUT';
-        timeoutReject(err);
-      }, requestTimeout);
-      readyTimer.unref();
-
-      const { promise: abortPromise, reject: abortReject } = Promise.withResolvers<never>();
-      let abortHandler: (() => void) | undefined;
-      if (signal?.aborted) {
-        abortReject(
-          new Error(
-            signal.reason instanceof Error
-              ? signal.reason.message
-              : String(signal.reason || 'Cancelled'),
-          ),
-        );
-      } else if (signal) {
-        abortHandler = () => {
-          abortReject(
-            new Error(
-              signal.reason instanceof Error
-                ? signal.reason.message
-                : String(signal.reason || 'Cancelled'),
-            ),
-          );
-        };
-        signal.addEventListener('abort', abortHandler, { once: true });
-      }
-
-      try {
-        await Promise.race([readyPromise, timeoutPromise, abortPromise]);
-      } finally {
-        clearTimeout(readyTimer);
-        if (signal && abortHandler) {
-          signal.removeEventListener('abort', abortHandler);
-        }
-      }
-    }
+    await waitForReady(requestTimeout, signal);
+    await connState.flush();
+    if (fatalError) throw fatalError;
 
     async function reloadWorkspace(
       reloadOpts: {
@@ -673,64 +741,19 @@ export async function createLspSession(
         );
       }
 
-      serverReady = false;
-      const {
-        promise: waitForReloadReady,
-        resolve: resolveReload,
-        reject: rejectReload,
-      } = Promise.withResolvers<void>();
-      const readyTimer = setTimeout(() => {
-        const err = new Error(
-          `Workspace reload timed out after ${opTimeout}ms waiting for ready-for-test`,
-        );
-        (err as Error & { code?: string }).code = 'ETIMEDOUT';
-        rejectReload(err);
-      }, opTimeout);
-      readyTimer.unref();
+      applyState({ method: 'intellij/reloadWorkspace' }, 'client');
+      const waitPromise = waitForReady(opTimeout, effectiveSignal);
 
-      const cleanupListener = onReady((event) => {
-        if (
-          event.type === 'import-finished' ||
-          event.type === 'index-finished' ||
-          event.type === 'ready'
-        ) {
-          resolveReload();
-        } else if (event.type === 'error' && event.error) {
-          rejectReload(event.error);
-        }
-      });
-
-      let abortHandler: (() => void) | undefined;
-      if (effectiveSignal) {
-        abortHandler = () => {
-          rejectReload(
-            new Error(
-              effectiveSignal?.reason instanceof Error
-                ? effectiveSignal.reason.message
-                : String(effectiveSignal?.reason || 'Reload cancelled'),
-            ),
-          );
-        };
-        effectiveSignal.addEventListener('abort', abortHandler, { once: true });
-      }
-
-      try {
-        await Promise.all([
-          request(
-            'intellij/reloadWorkspace',
-            { initializationOptions: reloadOpts.initializationOptions },
-            opTimeout,
-          ),
-          waitForReloadReady,
-        ]);
-        return { ready: true };
-      } finally {
-        clearTimeout(readyTimer);
-        cleanupListener();
-        if (effectiveSignal && abortHandler) {
-          effectiveSignal.removeEventListener('abort', abortHandler);
-        }
-      }
+      await Promise.all([
+        request(
+          'intellij/reloadWorkspace',
+          { initializationOptions: reloadOpts.initializationOptions },
+          opTimeout,
+        ),
+        waitPromise,
+      ]);
+      await connState.flush();
+      return { ready: true };
     }
 
     return {
@@ -742,12 +765,16 @@ export async function createLspSession(
       reloadWorkspace,
       close: async () => {
         signal?.removeEventListener('abort', onAbort);
-        cleanup();
+        await cleanup();
       },
     };
   } catch (err: unknown) {
     signal?.removeEventListener('abort', onAbort);
-    cleanup(err instanceof Error ? err : new Error(String(err)));
+    await cleanup(err instanceof Error ? err : new Error(String(err)), {
+      stage:
+        protocolState.failure?.stage ??
+        (protocolState.phase === 'connecting' ? 'initialize' : 'index'),
+    });
     throw err;
   }
 }

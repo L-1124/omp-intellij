@@ -283,3 +283,164 @@ test('invalid or oversized Content-Length is rejected before buffering a payload
     /frame length/,
   );
 });
+
+test('initialization failure drains queued requests with sanitized failure and passes raw error frame', () => {
+  const h = harness();
+  h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+  h.client(query(10));
+  assert.equal(h.upstream.filter((m) => m.id === 10).length, 0);
+
+  const rawInitError = {
+    jsonrpc: '2.0',
+    id: 1,
+    error: { code: -32001, message: 'Invalid SDK: secret-token=xyz', data: { token: 'secret' } },
+  };
+  h.server(rawInitError);
+
+  // Original response frame forwarded untouched to client
+  const initFwd = h.downstream.find((m) => m.id === 1);
+  assert.deepEqual(initFwd, rawInitError);
+
+  // Queued request 10 drained and rejected
+  const qReject = h.downstream.find((m) => m.id === 10);
+  assert.ok(qReject);
+  assert.equal(qReject.error?.code, -32803);
+  assert.match(qReject.error?.message ?? '', /Initialize failed/);
+  assert.equal(h.barrier.pending.size, 0);
+  h.barrier.dispose();
+});
+
+test('import failure with folder error message drains queue and preserves root cause', () => {
+  const h = harness();
+  h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+  h.server({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } });
+  h.client(query(11));
+  assert.equal(h.barrier.pending.size, 1);
+
+  h.server({
+    jsonrpc: '2.0',
+    method: 'intellij/workspaceImportState',
+    params: {
+      phase: 'FAILED',
+      folders: [
+        {
+          folderUri: 'file:///project/app',
+          tool: 'gradle',
+          status: 'ERROR',
+          message: 'Cannot resolve plugin: internal error',
+        },
+      ],
+    },
+  });
+
+  assert.equal(h.barrier.pending.size, 0);
+  const qReject = h.downstream.find((m) => m.id === 11);
+  assert.ok(qReject);
+  assert.equal(qReject.error?.code, -32803);
+  assert.match(qReject.error?.message ?? '', /Cannot resolve plugin: internal error/);
+  h.barrier.dispose();
+});
+
+test('authorization denial drains queue without disconnect; valid clears only auth failure, release needs ready', () => {
+  const h = harness();
+  h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+  h.server({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } });
+  h.client(query(12));
+  assert.equal(h.barrier.pending.size, 1);
+
+  h.server({
+    jsonrpc: '2.0',
+    method: 'jetbrains/licensing/state',
+    params: {
+      activeLicense: { status: 'Expired' },
+      featuresDeclined: true,
+      parkedReason: 'LicenseExpired',
+    },
+  });
+
+  // Denied queue drained immediately
+  assert.equal(h.barrier.pending.size, 0);
+  const qReject = h.downstream.find((m) => m.id === 12);
+  assert.ok(qReject);
+  assert.equal(qReject.error?.code, -32803);
+  assert.match(qReject.error?.message ?? '', /LicenseExpired/);
+  assert.notEqual(h.barrier.state.phase, 'disconnected');
+
+  // License recovers to valid
+  h.server({
+    jsonrpc: '2.0',
+    method: 'jetbrains/licensing/state',
+    params: {
+      activeLicense: { status: 'Valid' },
+      featuresDeclined: false,
+    },
+  });
+  assert.equal(h.barrier.failure, null);
+
+  // New request queues and is NOT released on Valid alone
+  h.client(query(13));
+  assert.equal(h.upstream.filter((m) => m.id === 13).length, 0);
+
+  // Real ready evidence releases queue
+  h.server(ready);
+  assert.equal(h.upstream.filter((m) => m.id === 13).length, 1);
+  h.barrier.dispose();
+});
+
+test('authorization denial and recovery retain an existing import root cause', () => {
+  const h = harness();
+  h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+  h.server({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } });
+
+  h.server({
+    jsonrpc: '2.0',
+    method: 'intellij/workspaceImportState',
+    params: {
+      phase: 'FAILED',
+      folders: [{ status: 'ERROR', message: 'Build file corrupted' }],
+    },
+  });
+  assert.match(h.barrier.failure ?? '', /Build file corrupted/);
+  h.server({
+    jsonrpc: '2.0',
+    method: 'jetbrains/licensing/state',
+    params: { featuresDeclined: true },
+  });
+  assert.equal(h.barrier.state.failure?.kind, 'import');
+  assert.match(h.barrier.failure ?? '', /Build file corrupted/);
+
+  // Licensing recovery notification must not erase the import failure
+  h.server({
+    jsonrpc: '2.0',
+    method: 'jetbrains/licensing/state',
+    params: { activeLicense: { status: 'Valid' } },
+  });
+  assert.match(h.barrier.failure ?? '', /Build file corrupted/);
+  h.barrier.dispose();
+});
+
+test('individual request cancellation does not abort other queued requests or fail project', () => {
+  const h = harness();
+  h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+  h.server({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } });
+  h.client(query(14));
+  h.client(query(15));
+  assert.equal(h.barrier.pending.size, 2);
+
+  // Client cancels only request 14
+  h.client({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id: 14 } });
+  assert.equal(h.barrier.pending.size, 1);
+  assert.ok(!h.barrier.pending.has(14));
+  assert.ok(h.barrier.pending.has(15));
+  assert.equal(h.barrier.failure, null);
+  assert.notEqual(h.barrier.state.phase, 'failed');
+
+  const cancelResponse = h.downstream.find((m) => m.id === 14);
+  assert.ok(cancelResponse);
+  assert.equal(cancelResponse.error?.code, -32800);
+
+  // Ready releases remaining request 15
+  h.server(ready);
+  assert.equal(h.upstream.filter((m) => m.id === 15).length, 1);
+  h.barrier.dispose();
+});

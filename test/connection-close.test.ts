@@ -30,5 +30,12 @@ test('protocol and handshake failures remain failures', () => {
   assert.deepEqual(connectionCloseState(new Error('IntelliJ initialize handshake timed out')), {
     phase: 'failed',
     detail: 'IntelliJ initialize handshake timed out',
+    failure: {
+      kind: 'connection',
+      stage: 'connect',
+      message: 'IntelliJ initialize handshake timed out',
+      code: undefined,
+      logPath: undefined,
+    },
   });
 });

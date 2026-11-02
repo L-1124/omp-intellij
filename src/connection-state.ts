@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { canonicalizeProject } from './metadata.js';
+import {
+  type FailureDetail,
+  type LicenseSummary,
+  LICENSE_RECOVERY_GUIDANCE,
+  projectLicenseState,
+  sanitizeStatus,
+  sanitizeString,
+} from './runtime-status.js';
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -21,6 +30,9 @@ export interface StateRecord {
   generation: number;
   indexReadySeen?: boolean;
   indexingTokens?: unknown[];
+  failure?: FailureDetail;
+  license?: LicenseSummary;
+  systemPath?: string;
 }
 
 export interface ConnectionRecord extends StateRecord {
@@ -47,15 +59,56 @@ export interface ProjectStateResult {
   canonicalPath?: string | null;
   pid?: number;
   seq?: number;
+  failure?: FailureDetail;
+  license?: LicenseSummary;
 }
-export function connectionCloseState(error?: { code?: string; message?: string }): {
+
+export function connectionCloseState(
+  error?: { code?: string; message?: string; name?: string },
+  options?:
+    | {
+        kind?: FailureDetail['kind'];
+        stage?: FailureDetail['stage'];
+        systemPath?: string;
+      }
+    | string,
+): {
   phase: string;
   detail: string;
+  failure?: FailureDetail;
 } {
+  const opts = typeof options === 'string' ? { systemPath: options } : (options ?? {});
   const connectionLost = !error || error.code === 'ECONNRESET' || error.code === 'EPIPE';
+  const detail = error?.message ?? 'IntelliJ bridge connection closed';
+  let failure: FailureDetail | undefined;
+
+  if (error) {
+    let kind: FailureDetail['kind'] = opts.kind ?? 'connection';
+    const stage: FailureDetail['stage'] = opts.stage ?? 'connect';
+
+    if (!opts.kind) {
+      if (error.code === 'ETIMEDOUT') {
+        kind = 'timeout';
+      } else if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
+        kind = 'cancelled';
+      } else {
+        kind = 'connection';
+      }
+    }
+
+    failure = {
+      kind,
+      stage,
+      message: error.message || 'Connection failed',
+      code: error.code,
+      logPath: opts.systemPath ? join(opts.systemPath, 'launcher.log') : undefined,
+    };
+  }
+
   return {
     phase: connectionLost ? 'disconnected' : 'failed',
-    detail: error?.message ?? 'IntelliJ bridge connection closed',
+    detail,
+    ...(failure ? { failure } : {}),
   };
 }
 
@@ -88,14 +141,23 @@ export function reduceConnectionState(
       next.detail = 'Initializing connection';
       next.indexReadySeen = false;
       next.indexingTokens = [];
+      delete next.failure;
+      delete next.license;
       if (message.id !== undefined) {
         next.initializeRequestId = message.id;
       }
       if (rootUri) next.rootUri = rootUri;
-    } else if (message.method === 'workspace/didChangeWorkspaceFolders') {
+    } else if (
+      message.method === 'workspace/didChangeWorkspaceFolders' ||
+      message.method === 'intellij/reloadWorkspace'
+    ) {
       next.generation = (next.generation || 0) + 1;
       next.phase = 'importing';
       next.detail = 'Workspace folders changed; reimporting';
+      next.indexingTokens = [];
+      if (next.failure?.kind === 'import' || next.failure?.kind === 'cancelled') {
+        delete next.failure;
+      }
     } else if (message.method === 'shutdown' || message.method === 'exit') {
       next.phase = 'disconnected';
       next.detail = 'IntelliJ connection is shutting down';
@@ -117,30 +179,122 @@ export function reduceConnectionState(
     ) {
       next.phase = 'importing';
       next.detail = 'Project import in progress';
+      if (next.failure?.kind !== 'authorization') delete next.failure;
     } else if (isInitResponse && message.error && current.phase === 'connecting') {
-      const errMsg =
-        typeof message.error === 'object' && message.error !== null && 'message' in message.error
-          ? String((message.error as { message?: unknown }).message)
-          : 'unknown error';
+      const errObj =
+        typeof message.error === 'object' && message.error !== null
+          ? (message.error as { code?: number | string; message?: unknown; data?: unknown })
+          : undefined;
+      const errMsg = typeof errObj?.message === 'string' ? errObj.message : 'unknown error';
       next.phase = 'failed';
       next.detail = 'Initialize failed: ' + errMsg;
+      next.failure = {
+        kind: 'rpc',
+        stage: 'initialize',
+        message: errMsg,
+        code: errObj?.code,
+        data: errObj?.data,
+        logPath: current.systemPath ? join(current.systemPath, 'launcher.log') : undefined,
+      };
     } else if (message.method === 'intellij/workspaceImportState') {
-      const params = message.params as
-        | { folders?: Array<{ status: string }>; phase?: string }
-        | undefined;
-      const folders = params?.folders ?? [];
-      const hasFailure = folders.some((f) => ['FAILURE', 'FAILED', 'ERROR'].includes(f.status));
-      if (hasFailure) {
+      const params =
+        message.params && typeof message.params === 'object'
+          ? (message.params as Record<string, unknown>)
+          : undefined;
+      const rawFolders = Array.isArray(params?.folders) ? params.folders : [];
+      const folders = rawFolders
+        .filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object')
+        .map((f) => ({
+          status: typeof f.status === 'string' ? f.status : '',
+          folderUri: typeof f.folderUri === 'string' ? f.folderUri : undefined,
+          uri: typeof f.uri === 'string' ? f.uri : undefined,
+          tool: typeof f.tool === 'string' ? f.tool : undefined,
+          message: typeof f.message === 'string' ? f.message : undefined,
+          errorMessage: typeof f.errorMessage === 'string' ? f.errorMessage : undefined,
+          statusText: typeof f.statusText === 'string' ? f.statusText : undefined,
+        }));
+
+      const failedFolders = folders.filter((f) =>
+        ['FAILURE', 'FAILED', 'ERROR', 'BLOCKED'].includes(f.status),
+      );
+      const phase = typeof params?.phase === 'string' ? params.phase : undefined;
+      const paramErrorMsg =
+        typeof params?.errorMessage === 'string' ? params.errorMessage : undefined;
+      const paramStatusText =
+        typeof params?.statusText === 'string' ? params.statusText : undefined;
+
+      const isFailed = phase === 'FAILED' || phase === 'CANCELLED' || failedFolders.length > 0;
+
+      if (isFailed) {
         next.phase = 'failed';
-        next.detail = 'IntelliJ project import failed; inspect the server import log';
-      } else if (params?.phase === 'FINISHED') {
+        const firstFailedWithMsg = failedFolders.find(
+          (f) => f.message || f.errorMessage || f.statusText,
+        );
+        const folderMsg =
+          firstFailedWithMsg?.message ||
+          firstFailedWithMsg?.errorMessage ||
+          firstFailedWithMsg?.statusText;
+        const directMsg = paramErrorMsg || paramStatusText || folderMsg;
+        if (directMsg) {
+          next.detail = directMsg;
+        } else if (failedFolders.length > 0) {
+          const f0 = failedFolders[0];
+          const folderUri = f0.folderUri ?? f0.uri ?? 'unknown folder';
+          const tool = f0.tool ?? 'tool';
+          next.detail = `${tool} (${f0.status}) at ${folderUri}`;
+        } else {
+          next.detail =
+            phase === 'CANCELLED'
+              ? 'Workspace import cancelled'
+              : 'IntelliJ project import failed; inspect the server import log';
+        }
+        next.failure = {
+          kind: phase === 'CANCELLED' ? 'cancelled' : 'import',
+          stage: 'import',
+          message: next.detail,
+          folders: failedFolders.map((f) => ({
+            uri: f.folderUri ?? f.uri,
+            tool: f.tool,
+            status: f.status,
+            message: f.message ?? f.errorMessage ?? f.statusText,
+          })),
+          logPath: current.systemPath ? join(current.systemPath, 'launcher.log') : undefined,
+        };
+      } else if (phase === 'FINISHED' || phase === 'SUCCESS') {
         next.phase = 'indexing';
         next.detail = 'Import finished; indexing project';
+        if (next.failure?.stage === 'import') delete next.failure;
       } else {
         next.phase = 'importing';
-        next.detail = params?.phase
-          ? `Importing workspace (${params.phase})`
-          : 'Importing workspace folders';
+        next.detail = phase ? `Importing workspace (${phase})` : 'Importing workspace folders';
+        if (next.failure?.kind === 'import' || next.failure?.kind === 'cancelled') {
+          delete next.failure;
+        }
+      }
+    } else if (message.method === 'jetbrains/licensing/state') {
+      const summary = projectLicenseState(message.params ?? message);
+      next.license = summary;
+      if (
+        summary.featuresDeclined ||
+        summary.status === 'needs-activation' ||
+        summary.status === 'expired'
+      ) {
+        const reason = summary.reason || LICENSE_RECOVERY_GUIDANCE;
+        // Do not overwrite prior non-auth failure (like import/rpc failures)
+        if (!next.failure || next.failure.kind === 'authorization') {
+          next.failure = {
+            kind: 'authorization',
+            stage: 'initialize',
+            message: reason,
+          };
+        }
+        if (next.phase === 'ready') {
+          next.phase = 'indexing';
+        }
+      } else if (summary.status === 'valid') {
+        if (next.failure?.kind === 'authorization') {
+          delete next.failure;
+        }
       }
     } else if (message.method === '$/progress') {
       const params = message.params as
@@ -159,9 +313,15 @@ export function reduceConnectionState(
           next.phase = 'indexing';
         } else if (kind === 'end' && indexingTokens.includes(token)) {
           next.indexingTokens = indexingTokens.filter((active) => active !== token);
-          if (next.indexReadySeen && next.indexingTokens.length === 0 && next.phase !== 'failed') {
+          if (
+            next.indexReadySeen &&
+            next.indexingTokens.length === 0 &&
+            next.phase !== 'failed' &&
+            (!next.failure || next.failure.kind !== 'authorization')
+          ) {
             next.phase = 'ready';
             next.detail = 'IntelliJ index ready';
+            delete next.failure;
           }
         }
         if (kind === 'begin' || kind === 'report') {
@@ -175,12 +335,13 @@ export function reduceConnectionState(
         }
       }
     } else if (message.method === 'intellij/ready-for-test') {
-      if (next.phase !== 'failed') {
+      next.indexReadySeen = true;
+      next.indexingTokens = [];
+      if (next.phase !== 'failed' && (!next.failure || next.failure.kind !== 'authorization')) {
         next.phase = 'ready';
-        next.indexReadySeen = true;
-        next.indexingTokens = [];
         next.detail = 'IntelliJ index ready';
         next.progress = null;
+        delete next.failure;
       }
     }
     return next;
@@ -227,6 +388,7 @@ export function createConnectionState(options: {
     closed: false,
     initializeRequestId: null,
     generation: 0,
+    systemPath,
   };
 
   let writeQueue = Promise.resolve();
@@ -234,13 +396,33 @@ export function createConnectionState(options: {
   function enqueueWrite(snapshot: ConnectionRecord, isClose = false): Promise<void> {
     writeQueue = writeQueue.then(async () => {
       if (closed && !isClose) return;
+      const tempPath = `${filePath}.${randomUUID()}.tmp`;
       try {
         await mkdir(dir, { recursive: true });
-        const tempPath = `${filePath}.${randomUUID()}.tmp`;
-        await writeFile(tempPath, JSON.stringify(snapshot, null, 2), 'utf8');
-        await rename(tempPath, filePath);
+        const sanitizedSnapshot = sanitizeStatus(snapshot);
+        await writeFile(tempPath, JSON.stringify(sanitizedSnapshot, null, 2), 'utf8');
+        const deadline = Date.now() + 1000;
+        for (;;) {
+          try {
+            await rename(tempPath, filePath);
+            break;
+          } catch (error: unknown) {
+            // Windows readers can briefly deny replacement of an otherwise writable record.
+            if (
+              process.platform !== 'win32' ||
+              Date.now() >= deadline ||
+              !error ||
+              typeof error !== 'object' ||
+              !('code' in error) ||
+              (error.code !== 'EPERM' && error.code !== 'EACCES')
+            )
+              throw error;
+            await sleep(10);
+          }
+        }
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const rawMsg = err instanceof Error ? err.message : String(err);
+        const message = sanitizeString(rawMsg);
         console.error('intellij connection-state write error: ' + message);
         if (onWriteError) {
           try {
@@ -248,6 +430,8 @@ export function createConnectionState(options: {
           } catch {}
         }
         if (isClose) throw err;
+      } finally {
+        await rm(tempPath, { force: true }).catch(() => {});
       }
     });
     return writeQueue;
@@ -257,6 +441,7 @@ export function createConnectionState(options: {
     connectionId,
     startedAt,
     getState: () => ({ ...currentRecord }),
+    flush: () => writeQueue,
     async update(
       updateOpts: {
         root?: string;
@@ -264,6 +449,8 @@ export function createConnectionState(options: {
         phase?: string;
         detail?: string;
         progress?: ProgressPayload | null;
+        failure?: FailureDetail | null;
+        license?: LicenseSummary;
       } = {},
     ) {
       if (closed) return;
@@ -279,6 +466,13 @@ export function createConnectionState(options: {
         } catch {}
       }
 
+      let failure = currentRecord.failure;
+      if (updateOpts.failure === null) {
+        failure = undefined;
+      } else if (updateOpts.failure !== undefined) {
+        failure = updateOpts.failure;
+      }
+
       currentRecord = {
         ...currentRecord,
         updatedAt,
@@ -288,28 +482,50 @@ export function createConnectionState(options: {
         progress: updateOpts.progress !== undefined ? updateOpts.progress : currentRecord.progress,
         rootUri: resolvedRootUri,
         canonicalPath,
+        failure,
+        license: updateOpts.license !== undefined ? updateOpts.license : currentRecord.license,
       };
 
       const snapshot = { ...currentRecord };
       return enqueueWrite(snapshot, false);
     },
-    async close(closeOpts: { phase?: string; detail?: string } = {}) {
+    async close(closeOpts: { phase?: string; detail?: string; failure?: FailureDetail } = {}) {
       if (closed) return;
       closed = true;
       seq++;
       const updatedAt = Date.now();
+
+      const priorFailure = currentRecord.failure;
+      const isPriorRootFailure = Boolean(priorFailure && priorFailure.kind !== 'authorization');
+
+      let failure = priorFailure;
+      if (!isPriorRootFailure && closeOpts.failure !== undefined) {
+        failure = closeOpts.failure;
+      }
+
+      let detail = currentRecord.detail;
+      if (isPriorRootFailure) {
+        detail = currentRecord.detail;
+      } else if (closeOpts.detail !== undefined) {
+        detail = closeOpts.detail;
+      } else if (currentRecord.phase === 'ready') {
+        detail = 'Session ended after the index was ready';
+      } else {
+        detail = currentRecord.detail || 'Connection closed';
+      }
+
+      const phase =
+        currentRecord.phase === 'failed' ? 'failed' : (closeOpts.phase ?? 'disconnected');
+
       currentRecord = {
         ...currentRecord,
         updatedAt,
         seq,
-        phase: closeOpts.phase ?? 'disconnected',
-        detail:
-          closeOpts.detail !== undefined
-            ? closeOpts.detail
-            : currentRecord.phase === 'ready'
-              ? 'Session ended after the index was ready'
-              : currentRecord.detail || 'Connection closed',
+        phase,
+        detail,
         closed: true,
+        failure,
+        license: { status: 'unknown' },
       };
 
       const snapshot = { ...currentRecord };
@@ -323,13 +539,23 @@ export async function readProjectState(
   projectPath?: string,
 ): Promise<ProjectStateResult> {
   if (!projectPath) {
-    return { phase: 'not-started', detail: 'No project path specified' };
+    const emptyResult: ProjectStateResult = {
+      phase: 'not-started',
+      detail: 'No project path specified',
+      license: { status: 'unknown' },
+    };
+    return sanitizeStatus(emptyResult) as ProjectStateResult;
   }
   let targetCanonical: string;
   try {
     targetCanonical = canonicalizeProject(projectPath).canonicalPath.toLowerCase();
   } catch {
-    return { phase: 'not-started', detail: 'Invalid project path' };
+    const invalidResult: ProjectStateResult = {
+      phase: 'not-started',
+      detail: 'Invalid project path',
+      license: { status: 'unknown' },
+    };
+    return sanitizeStatus(invalidResult) as ProjectStateResult;
   }
 
   const dir = join(systemPath, 'plugin-metadata', 'connections');
@@ -338,10 +564,20 @@ export async function readProjectState(
     entries = await readdir(dir);
   } catch (e: unknown) {
     if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') {
-      return { phase: 'not-started', detail: 'No active or previous IntelliJ connection found' };
+      const noFoundResult: ProjectStateResult = {
+        phase: 'not-started',
+        detail: 'No active or previous IntelliJ connection found',
+        license: { status: 'unknown' },
+      };
+      return sanitizeStatus(noFoundResult) as ProjectStateResult;
     }
     const message = e instanceof Error ? e.message : String(e);
-    return { phase: 'not-started', detail: 'Failed to read connection metadata: ' + message };
+    const readErrResult: ProjectStateResult = {
+      phase: 'not-started',
+      detail: 'Failed to read connection metadata: ' + message,
+      license: { status: 'unknown' },
+    };
+    return sanitizeStatus(readErrResult) as ProjectStateResult;
   }
 
   const now = Date.now();
@@ -360,6 +596,7 @@ export async function readProjectState(
     }
 
     if (!record || typeof record !== 'object') continue;
+    if (record.canonicalPath != null && typeof record.canonicalPath !== 'string') continue;
 
     let isAlive = false;
     if (!record.closed && Number.isSafeInteger(record.pid) && record.pid > 0) {
@@ -375,11 +612,16 @@ export async function readProjectState(
       record.isAlive = false;
     } else if (!isAlive) {
       const lastPhase = record.phase || 'unknown';
-      record.phase = 'disconnected';
-      record.detail =
-        lastPhase === 'ready'
-          ? 'Connection process exited after the index was ready'
-          : `Connection process exited (last phase: ${lastPhase})`;
+      if (record.phase === 'failed' || record.failure) {
+        record.isAlive = false;
+      } else {
+        record.phase = 'disconnected';
+        record.detail =
+          lastPhase === 'ready'
+            ? 'Connection process exited after the index was ready'
+            : `Connection process exited (last phase: ${lastPhase})`;
+        record.isAlive = false;
+      }
     } else {
       record.isAlive = true;
     }
@@ -431,11 +673,19 @@ export async function readProjectState(
   }
 
   if (matchingConnections.length === 0) {
-    return { phase: 'not-started', detail: 'No active or previous IntelliJ connection found' };
+    const noConnResult: ProjectStateResult = {
+      phase: 'not-started',
+      detail: 'No active or previous IntelliJ connection found',
+      license: { status: 'unknown' },
+    };
+    return sanitizeStatus(noConnResult) as ProjectStateResult;
   }
 
   const liveBridges = matchingConnections.filter(
-    (c) => c.isAlive && !c.closed && c.phase !== 'disconnected',
+    (c) => c.kind === 'bridge' && c.isAlive && !c.closed && c.phase !== 'disconnected',
+  );
+  const otherLive = matchingConnections.filter(
+    (c) => c.kind !== 'bridge' && c.isAlive && !c.closed && c.phase !== 'disconnected',
   );
 
   let chosen: ConnectionRecord;
@@ -446,18 +696,30 @@ export async function readProjectState(
       return (b.seq || 0) - (a.seq || 0);
     });
     chosen = liveBridges[0];
+  } else if (otherLive.length > 0) {
+    otherLive.sort((a, b) => {
+      const diff = (b.startedAt || 0) - (a.startedAt || 0);
+      if (diff !== 0) return diff;
+      return (b.seq || 0) - (a.seq || 0);
+    });
+    chosen = otherLive[0];
   } else {
     matchingConnections.sort((a, b) => {
       const diff = (b.updatedAt || b.startedAt || 0) - (a.updatedAt || a.startedAt || 0);
       if (diff !== 0) return diff;
+      if (a.kind === 'bridge' && b.kind !== 'bridge') return -1;
+      if (b.kind === 'bridge' && a.kind !== 'bridge') return 1;
       return (b.seq || 0) - (a.seq || 0);
     });
     chosen = matchingConnections[0];
   }
 
   const live = Boolean(chosen.isAlive && !chosen.closed && chosen.phase !== 'disconnected');
+  const failure = chosen.failure ? (chosen.failure as FailureDetail) : undefined;
+  const license: LicenseSummary =
+    live && chosen.license ? (chosen.license as LicenseSummary) : { status: 'unknown' };
 
-  return {
+  const outbound: ProjectStateResult = {
     phase: chosen.phase || 'not-started',
     live,
     detail: chosen.detail || '',
@@ -469,5 +731,9 @@ export async function readProjectState(
     canonicalPath: chosen.canonicalPath,
     pid: chosen.pid,
     seq: chosen.seq,
+    failure,
+    license,
   };
+
+  return sanitizeStatus(outbound) as ProjectStateResult;
 }

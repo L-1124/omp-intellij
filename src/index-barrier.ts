@@ -1,5 +1,6 @@
 import { reduceConnectionState, type StateRecord } from './connection-state.js';
 import { encode } from './protocol.js';
+import { type FailureDetail, sanitizeStatus, sanitizeString } from './runtime-status.js';
 
 export { reduceConnectionState };
 
@@ -21,6 +22,7 @@ export class IndexBarrier {
   onStateChange: ((state: StateRecord) => void) | null;
   ready: boolean;
   failure: string | null;
+  failureKind?: string;
   pending: Map<unknown, PendingEntry>;
   queuedBytes: number;
   root: string | null;
@@ -44,6 +46,7 @@ export class IndexBarrier {
     this.onStateChange = options.onStateChange ?? null;
     this.ready = false;
     this.failure = null;
+    this.failureKind = undefined;
     this.pending = new Map();
     this.queuedBytes = 0;
     this.root = null;
@@ -75,6 +78,7 @@ export class IndexBarrier {
     } else if (next.phase === 'failed') {
       this.ready = false;
       this.failure = next.detail;
+      this.failureKind = next.failure?.kind;
     } else {
       this.ready = false;
     }
@@ -85,12 +89,16 @@ export class IndexBarrier {
         prev.detail !== next.detail ||
         prev.progress !== next.progress ||
         prev.rootUri !== next.rootUri ||
-        prev.generation !== next.generation)
+        prev.generation !== next.generation ||
+        prev.failure !== next.failure ||
+        prev.license !== next.license)
     ) {
       try {
         this.onStateChange({ ...this.state });
       } catch (err) {
-        console.error('IndexBarrier onStateChange error:', err);
+        const safeErrMsg =
+          err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
+        console.error('IndexBarrier onStateChange error: ' + safeErrMsg);
       }
     }
   }
@@ -104,21 +112,32 @@ export class IndexBarrier {
     return entry;
   }
 
-  reject(message: { id: unknown }, code: number, reason: string): void {
+  reject(message: { id: unknown }, code: number, reason: string, failure?: FailureDetail): void {
+    const safeReason = sanitizeString(reason);
+    const safeRootUri = typeof this.root === 'string' ? sanitizeString(this.root) : this.root;
+    const errorData: Record<string, unknown> = {
+      reason: 'intellij-index-not-ready',
+      rootUri: safeRootUri,
+    };
+    const effectiveFailure = failure ?? this.state.failure;
+    if (effectiveFailure) {
+      errorData.failure = sanitizeStatus(effectiveFailure);
+    }
     this.sendClient(
       encode({
         jsonrpc: '2.0',
         id: message.id,
         error: {
           code,
-          message: reason,
-          data: { reason: 'intellij-index-not-ready', rootUri: this.root },
+          message: safeReason,
+          data: errorData,
         },
       }),
     );
   }
 
   rejectTimeout(message: { id: unknown }, elapsed: number): void {
+    const safeRootUri = typeof this.root === 'string' ? sanitizeString(this.root) : this.root;
     this.sendClient(
       encode({
         jsonrpc: '2.0',
@@ -128,7 +147,7 @@ export class IndexBarrier {
           message: `IntelliJ project index was not ready within ${this.requestWaitTimeoutMs}ms; retry after indexing completes`,
           data: {
             reason: 'request-wait-timeout',
-            rootUri: this.root,
+            rootUri: safeRootUri,
             phase: this.state.phase,
             elapsed,
             projectStillIndexing: true,
@@ -138,22 +157,34 @@ export class IndexBarrier {
     );
   }
 
-  fail(reason: string): void {
+  fail(reason: string, failure?: FailureDetail): void {
     this.ready = false;
     this.failure = reason;
+    const effectiveFailure = failure ?? this.state.failure;
+    this.failureKind = effectiveFailure?.kind;
+
     if (this.state.phase !== 'disconnected') {
-      this.state.phase = 'failed';
+      if (!effectiveFailure || effectiveFailure.kind !== 'authorization') {
+        this.state.phase = 'failed';
+      }
       this.state.detail = reason;
+      if (effectiveFailure) {
+        this.state.failure = effectiveFailure;
+      }
       if (this.onStateChange) {
         try {
           this.onStateChange({ ...this.state });
-        } catch {}
+        } catch (err) {
+          const safeErrMsg =
+            err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
+          console.error('IndexBarrier onStateChange error: ' + safeErrMsg);
+        }
       }
     }
     for (const id of Array.from(this.pending.keys())) {
       const entry = this.take(id);
       if (entry) {
-        this.reject(entry.message, REQUEST_FAILED, reason);
+        this.reject(entry.message, REQUEST_FAILED, reason, effectiveFailure);
       }
     }
   }
@@ -167,6 +198,7 @@ export class IndexBarrier {
       this.initializeRequestId = message.id ?? null;
       this.ready = false;
       this.failure = null;
+      this.failureKind = undefined;
       this._applyState(message, 'client');
       this.sendServer(frame);
       return;
@@ -209,6 +241,7 @@ export class IndexBarrier {
     if (message.method === 'workspace/didChangeWorkspaceFolders') {
       this.fail('Workspace folders changed during index-readiness wait; retry after import');
       this.failure = null;
+      this.failureKind = undefined;
       this._applyState(message, 'client');
     }
     if (!message.method || message.id === undefined || this.ready) {
@@ -216,7 +249,7 @@ export class IndexBarrier {
       return;
     }
     if (this.failure) {
-      this.reject(message as { id: unknown }, REQUEST_FAILED, this.failure);
+      this.reject(message as { id: unknown }, REQUEST_FAILED, this.failure, this.state.failure);
       return;
     }
     if (this.pending.size >= 128 || this.queuedBytes + frame.length > 16 * 1024 * 1024) {
@@ -250,18 +283,63 @@ export class IndexBarrier {
   fromServer(message: Record<string, unknown>, frame: Buffer): void {
     this.sendClient(frame);
     this._applyState(message, 'server');
+
+    const isInitResponse =
+      this.initializeRequestId !== undefined &&
+      this.initializeRequestId !== null &&
+      message.id === this.initializeRequestId &&
+      !message.method;
+
+    if (isInitResponse && message.error) {
+      this.fail(this.state.detail, this.state.failure);
+      return;
+    }
+
     if (message.method === 'intellij/workspaceImportState') {
-      const params = message.params as
-        | { folders?: Array<{ status: string }>; phase?: string }
-        | undefined;
-      const folders = params?.folders ?? [];
-      if (folders.some((folder) => ['FAILURE', 'FAILED', 'ERROR'].includes(folder.status))) {
-        this.fail('IntelliJ project import failed; inspect the server import log');
-      } else if (params?.phase !== 'FINISHED') {
+      if (this.state.phase === 'failed') {
+        this.fail(this.state.detail, this.state.failure);
+        return;
+      } else if (this.state.phase === 'indexing') {
+        if (this.failureKind === 'import' || this.failureKind === 'cancelled') {
+          this.failure = null;
+          this.failureKind = undefined;
+        }
+      } else if (this.state.phase !== 'ready') {
         this.ready = false;
-        this.failure = null;
+        if (this.failureKind === 'import' || this.failureKind === 'cancelled') {
+          this.failure = null;
+          this.failureKind = undefined;
+        }
       }
     }
+
+    if (message.method === 'jetbrains/licensing/state') {
+      if (
+        this.state.license?.featuresDeclined ||
+        this.state.license?.status === 'needs-activation' ||
+        this.state.license?.status === 'expired'
+      ) {
+        const authReason =
+          this.state.failure?.kind === 'authorization'
+            ? this.state.failure.message
+            : this.state.license?.reason || 'IntelliJ authorization denied';
+        this.fail(
+          this.state.failure?.message || authReason,
+          this.state.failure ?? {
+            kind: 'authorization',
+            stage: 'initialize',
+            message: authReason,
+          },
+        );
+        return;
+      } else if (this.state.license?.status === 'valid') {
+        if (this.failureKind === 'authorization') {
+          this.failure = null;
+          this.failureKind = undefined;
+        }
+      }
+    }
+
     if (this.ready && !this.failure) {
       this.ready = true;
       for (const id of Array.from(this.pending.keys())) {
