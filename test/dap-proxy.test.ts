@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
@@ -92,6 +95,65 @@ test('resolveSourceFile resolves existing paths and candidate extensions', () =>
   const candidate = resolveSourceFile(process.cwd(), 'com.example.NonExistentClass');
   assert.ok(candidate);
 });
+
+for (const mode of ['module', 'explicit', 'project'] as const) {
+  test(`launch resolves relative resources from ${mode} working directory`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'omp-launch-cwd-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const moduleDir = join(root, 'module');
+    const explicitDir = join(root, 'override');
+    await mkdir(moduleDir);
+    await mkdir(explicitDir);
+    await writeFile(join(root, 'pom.xml'), '<project/>');
+    const program = join(root, 'Main.java');
+    await writeFile(program, 'class Main { public static void main(String[] args) {} }');
+    for (const [dir, value] of [
+      [root, 'project-resource'],
+      [moduleDir, 'module-resource'],
+      [explicitDir, 'explicit-resource'],
+    ]) {
+      await writeFile(join(dir, 'launch-resource.txt'), value);
+    }
+    let resource: string | undefined;
+    let launched: SpawnSyncReturns<string> | undefined;
+    const harness = await createDapTestHarness(t, {
+      fakeJavaExec: process.execPath,
+      onLspRequest(method, params) {
+        if (
+          method === 'workspace/executeCommand' &&
+          (params as { command?: string }).command === 'intellij.java.resolveLaunch'
+        ) {
+          return {
+            javaExec: process.execPath,
+            classpath: [],
+            ...(mode === 'project' ? {} : { workingDirectory: moduleDir }),
+          };
+        }
+        return undefined;
+      },
+      onDapRequest(request) {
+        if (request.command !== 'launch') return;
+        launched = spawnSync(
+          process.execPath,
+          ['-e', "process.stdout.write(require('node:fs').readFileSync('launch-resource.txt'))"],
+          { cwd: String(request.arguments?.cwd), encoding: 'utf8', windowsHide: true },
+        );
+        resource = String(launched.stdout);
+        return undefined;
+      },
+    });
+    await harness.request('initialize');
+    const result = await harness.request('launch', {
+      program,
+      build: false,
+      stopOnEntry: false,
+      ...(mode === 'explicit' ? { cwd: explicitDir } : {}),
+    });
+    assert.equal(result.success, true, result.message);
+    assert.equal(launched?.status, 0, String(launched?.stderr));
+    assert.equal(resource, `${mode}-resource`);
+  });
+}
 
 test('isDirectExecution distinguishes direct CLI execution vs imported module', () => {
   const currentFile = fileURLToPath(import.meta.url);

@@ -850,8 +850,8 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         respond(request, false, undefined, 'Debug session already starting or active');
         return;
       }
-      const targetCwd =
-        typeof args.cwd === 'string' && args.cwd ? resolve(args.cwd) : process.cwd();
+      const explicitCwd = typeof args.cwd === 'string' && args.cwd ? resolve(args.cwd) : undefined;
+      const targetCwd = explicitCwd ?? process.cwd();
       let resolvedFile: string | null = null;
       let hostName = '127.0.0.1';
       let attachTimeout = 30000;
@@ -1107,7 +1107,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             args: applicationArgs,
             env:
               args.env && typeof args.env === 'object' && !Array.isArray(args.env) ? args.env : {},
-            cwd: targetCwd || paths.workingDirectory || projectRoot,
+            cwd: explicitCwd ?? paths.workingDirectory ?? projectRoot,
             console: 'internalConsole',
             noDebug: args.noDebug === true,
             stopOnEntry,
