@@ -7,7 +7,6 @@ import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   canonicalizeProject,
-  createLease,
   type LeaseHandle,
   recordConnection,
   recordReadiness,
@@ -26,7 +25,7 @@ import {
   RpcResponseError,
   sanitizeString,
 } from './runtime-status.js';
-import { ensureServer, settings } from './service.js';
+import { connectWithLease, settings } from './service.js';
 import { applyWorkspaceOptions, getWorkspaceInfo } from './workspace.js';
 
 export function findMainMethodLine(fileContent: string): number | null {
@@ -307,16 +306,18 @@ export async function createLspSession(
     throw signal.reason instanceof Error ? signal.reason : new Error('LSP session aborted');
   }
 
-  const socket = options.socket ?? (await ensureServer());
+  const { socket, lease } = await connectWithLease({
+    systemPath,
+    kind: 'runner',
+    projectPath: nativePath,
+    socket: options.socket,
+  });
   const connState = createConnectionState({
     systemPath,
     kind: 'runner',
   });
-  let leaseHandle: LeaseHandle | null = null;
-  try {
-    leaseHandle = await createLease(systemPath, { kind: 'runner', projectPath: nativePath });
-    await recordConnection(systemPath, nativePath, Date.now());
-  } catch {}
+  let leaseHandle: LeaseHandle | null = lease;
+  recordConnection(systemPath, nativePath, Date.now()).catch(() => {});
 
   let nextId = 1;
   const pending = new Map<

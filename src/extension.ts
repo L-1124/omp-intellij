@@ -8,8 +8,8 @@ import {
 } from './cache-manager.js';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
 import { listDebugSessions, recoverDebugSession } from './debug-control.js';
+import { acceptServerEula, type EulaDocument, readEulaAcceptance, readServerEula } from './eula.js';
 import type { ExtensionContext, ExtensionPluginInstance } from './extension-types.js';
-import { registerIntellij } from './intellij-tool.js';
 import {
   formatInstallDescription,
   formatInstallStatusText,
@@ -17,13 +17,13 @@ import {
   isInstallActive,
   parseInstallArgs,
 } from './install-status.js';
-import { acceptServerEula, type EulaDocument, readEulaAcceptance, readServerEula } from './eula.js';
+import { registerIntellij } from './intellij-tool.js';
 import { recordConnection } from './metadata.js';
 import { failureContentKey, findProjectRoot, licenseContentKey, watchIndex } from './readiness.js';
 import {
   type FailureDetail,
-  type LicenseSummary,
   LICENSE_RECOVERY_GUIDANCE,
+  type LicenseSummary,
   sanitizeStatus,
   sanitizeString,
 } from './runtime-status.js';
@@ -43,8 +43,10 @@ import {
   endpoint,
   ensureServer,
   isServerAlive,
+  restartServer,
   settings,
   status,
+  stopServer,
   withLifecycleLock,
 } from './service.js';
 import type { DiscoveredJdkItem } from './workspace.js';
@@ -154,6 +156,10 @@ export interface ExtensionOverrides {
     listDebugSessions: typeof listDebugSessions;
     recoverDebugSession: typeof recoverDebugSession;
   }>;
+  lifecycleApi?: Partial<{
+    stopServer: typeof stopServer;
+    restartServer: typeof restartServer;
+  }>;
   systemPath?: string;
 }
 
@@ -178,6 +184,10 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
   const debugApi = {
     listDebugSessions: overrides.debugControlApi?.listDebugSessions ?? listDebugSessions,
     recoverDebugSession: overrides.debugControlApi?.recoverDebugSession ?? recoverDebugSession,
+  };
+  const lifecycleApi = {
+    stopServer: overrides.lifecycleApi?.stopServer ?? stopServer,
+    restartServer: overrides.lifecycleApi?.restartServer ?? restartServer,
   };
   const activeSystemPath = overrides.systemPath ?? settings.systemPath;
   async function resolveSelectedExecutable(): Promise<{
@@ -470,6 +480,34 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         const socket = await ensureServer();
         socket.destroy();
         startObserver(ctx);
+      } else if (sub === 'stop' || sub === 'restart') {
+        if (parts.length !== 1) {
+          ctx.ui?.notify(`Usage: /intellij ${sub}`, 'warning');
+          return;
+        }
+        try {
+          if (sub === 'stop') {
+            const result = await lifecycleApi.stopServer({ systemPath: activeSystemPath });
+            ctx.ui?.notify(
+              result.stopped
+                ? `IntelliJ shared server stopped (PID ${result.pid}); caches and workspace configuration retained.`
+                : result.detail || 'IntelliJ shared server is not running.',
+              'info',
+            );
+          } else {
+            const result = await lifecycleApi.restartServer({ systemPath: activeSystemPath });
+            ctx.ui?.notify(
+              `IntelliJ shared server restarted: ${result.endpoint.host}:${result.endpoint.port} (PID ${result.pid}); caches and workspace configuration retained.`,
+              'info',
+            );
+          }
+          startObserver(ctx);
+        } catch (error: unknown) {
+          ctx.ui?.notify(
+            `IntelliJ ${sub} refused: ${sanitizeString(getErrorMessage(error))}`,
+            'warning',
+          );
+        }
       } else if (sub === 'status') {
         const projectRoot = findProjectRootFn(ctx.cwd);
         const current = await readProjectState(activeSystemPath, projectRoot);

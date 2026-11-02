@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { withLifecycleLock } from './lifecycle-lock.js';
 
 export interface CanonicalProject {
   canonicalPath: string;
@@ -156,7 +157,7 @@ export async function recordPinned(
   return appendLedgerEvent(systemPath, projectPath, { kind: 'pin', pinned: pinned === true });
 }
 
-export async function createLease(
+export async function createLeaseUnlocked(
   systemPath: string,
   options: { kind?: string; projectPath?: string; pid?: number } = {},
 ): Promise<LeaseHandle> {
@@ -199,6 +200,33 @@ export async function createLease(
   };
 }
 
+export async function createLease(
+  systemPath: string,
+  options: { kind?: string; projectPath?: string; pid?: number } = {},
+): Promise<LeaseHandle> {
+  return withLifecycleLock(() => createLeaseUnlocked(systemPath, options), {
+    systemPath,
+    timeoutMs: 5000,
+  });
+}
+
+export async function replaceLease(
+  systemPath: string,
+  oldLease: LeaseHandle | null,
+  options: { kind?: string; projectPath?: string; pid?: number } = {},
+): Promise<LeaseHandle> {
+  return withLifecycleLock(
+    async () => {
+      const newLease = await createLeaseUnlocked(systemPath, options);
+      if (oldLease) {
+        await oldLease.release().catch(() => {});
+      }
+      return newLease;
+    },
+    { systemPath, timeoutMs: 5000 },
+  );
+}
+
 export async function getActiveLeases(systemPath: string): Promise<LeaseRecord[]> {
   const dirs = getMetadataDirs(systemPath);
   const active: LeaseRecord[] = [];
@@ -212,24 +240,50 @@ export async function getActiveLeases(systemPath: string): Promise<LeaseRecord[]
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue;
     const file = join(dirs.leases, entry);
+    let raw: string;
     try {
-      const lease = JSON.parse(await readFile(file, 'utf8')) as LeaseRecord;
-      if (!Number.isSafeInteger(lease.pid) || lease.pid < 1) continue;
-      let alive = false;
+      raw = await readFile(file, 'utf8');
+    } catch (e: unknown) {
+      if ((e as { code?: string }).code === 'ENOENT') continue;
+      throw new Error(
+        `Failed to read lease file at ${file}: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e: unknown) {
+      throw new Error(`Corrupt lease file (malformed JSON) at ${file}`, { cause: e });
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`Corrupt lease file (root is not an object) at ${file}`);
+    }
+
+    const lease = parsed as LeaseRecord;
+    if (!Number.isSafeInteger(lease.pid) || lease.pid < 1) {
+      throw new Error(`Invalid PID ${String(lease.pid)} in lease file at ${file}`);
+    }
+
+    let alive = false;
+    try {
+      process.kill(lease.pid, 0);
+      alive = true;
+    } catch (err: unknown) {
+      if ((err as { code?: string }).code !== 'ESRCH') alive = true;
+    }
+
+    if (alive) {
+      active.push(lease);
+    } else {
       try {
-        process.kill(lease.pid, 0);
-        alive = true;
+        await unlink(file);
       } catch (err: unknown) {
-        if ((err as { code?: string }).code !== 'ESRCH') alive = true;
+        if ((err as { code?: string }).code !== 'ENOENT') throw err;
       }
-      if (alive) {
-        active.push(lease);
-      } else {
-        try {
-          await unlink(file);
-        } catch {}
-      }
-    } catch {}
+    }
   }
   return active;
 }

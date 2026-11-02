@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
+import type net from 'node:net';
 import { join, resolve } from 'node:path';
 import { Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -12,17 +13,17 @@ import {
 import { IndexBarrier } from './index-barrier.js';
 import {
   canonicalizeProject,
-  createLease,
   type LeaseHandle,
   recordConnection,
   recordReadiness,
 } from './metadata.js';
 import { asyncFramedStream, encode, frameParser } from './protocol.js';
 import { type FailureDetail, sanitizeStatus, sanitizeString } from './runtime-status.js';
-import { ensureServer, settings } from './service.js';
+import { connectWithLease, settings } from './service.js';
 import { applyWorkspaceOptions } from './workspace.js';
 
 export async function saveInitializeParams(params: unknown): Promise<void> {
+  replaceLease,
   const p = params as {
     rootUri?: string;
     rootPath?: string;
@@ -56,7 +57,23 @@ export async function startBridge(): Promise<void> {
     kind: 'bridge',
   });
 
-  const socket = await ensureServer().catch(async (error: unknown) => {
+  let closing = false;
+  let barrier: IndexBarrier;
+  let leaseHandle: LeaseHandle | null = null;
+  let projectPath = process.cwd();
+  let initializeTimer: NodeJS.Timeout | null = null;
+
+
+  let socket: net.Socket;
+  try {
+    const session = await connectWithLease({
+      systemPath: settings.systemPath,
+      kind: 'bridge',
+      projectPath,
+    });
+    socket = session.socket;
+    leaseHandle = session.lease;
+  } catch (error: unknown) {
     await connState.update({ root: process.cwd() });
     await connState.close(
       connectionCloseState(error instanceof Error ? error : new Error(String(error)), {
@@ -65,16 +82,7 @@ export async function startBridge(): Promise<void> {
       }),
     );
     throw error;
-  });
-  let closing = false;
-  let barrier: IndexBarrier;
-  let leaseHandle: LeaseHandle | null = null;
-  let projectPath = process.cwd();
-  let initializeTimer: NodeJS.Timeout | null = null;
-
-  try {
-    leaseHandle = await createLease(settings.systemPath, { kind: 'bridge', projectPath });
-  } catch {}
+  }
 
   function framedStream(receive: (msg: Record<string, unknown>, frame: Buffer) => void) {
     const parse = frameParser((message, frame) => {
@@ -108,13 +116,12 @@ export async function startBridge(): Promise<void> {
           .update({ root: projectPath, phase: 'connecting', detail: 'Initializing connection' })
           .catch(() => {});
         recordConnection(settings.systemPath, projectPath, Date.now()).catch(() => {});
-        createLease(settings.systemPath, { kind: 'bridge', projectPath })
+        replaceLease(settings.systemPath, leaseHandle, { kind: 'bridge', projectPath })
           .then((newLease) => {
             if (closing) {
               void newLease.release().catch(() => {});
               return;
             }
-            leaseHandle?.release().catch(() => {});
             leaseHandle = newLease;
           })
           .catch(() => {});
