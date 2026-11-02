@@ -1,0 +1,281 @@
+import { reduceConnectionState, type StateRecord } from './connection-state.js';
+import { encode } from './protocol.js';
+
+export { reduceConnectionState };
+
+const REQUEST_FAILED = -32803;
+const REQUEST_CANCELLED = -32800;
+const CONTENT_MODIFIED = -32801;
+
+interface PendingEntry {
+  message: { id: unknown; method?: string; params?: Record<string, unknown> };
+  frame: Buffer;
+  timer: NodeJS.Timeout;
+  startTime: number;
+}
+
+export class IndexBarrier {
+  sendServer: (frame: Buffer) => void;
+  sendClient: (frame: Buffer) => void;
+  requestWaitTimeoutMs: number;
+  onStateChange: ((state: StateRecord) => void) | null;
+  ready: boolean;
+  failure: string | null;
+  pending: Map<unknown, PendingEntry>;
+  queuedBytes: number;
+  root: string | null;
+  initializeRequestId: unknown;
+  state: StateRecord;
+
+  constructor(options: {
+    sendServer: (frame: Buffer) => void;
+    sendClient: (frame: Buffer) => void;
+    requestWaitTimeoutMs?: number;
+    waitMs?: number;
+    onStateChange?: (state: StateRecord) => void;
+  }) {
+    const timeout = options.requestWaitTimeoutMs ?? options.waitMs ?? 300000;
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new Error('requestWaitTimeoutMs must be positive');
+    }
+    this.sendServer = options.sendServer;
+    this.sendClient = options.sendClient;
+    this.requestWaitTimeoutMs = timeout;
+    this.onStateChange = options.onStateChange ?? null;
+    this.ready = false;
+    this.failure = null;
+    this.pending = new Map();
+    this.queuedBytes = 0;
+    this.root = null;
+    this.initializeRequestId = null;
+    this.state = {
+      phase: 'connecting',
+      detail: '',
+      progress: null,
+      rootUri: null,
+      initializeRequestId: null,
+      generation: 0,
+    };
+  }
+
+  getState(): StateRecord {
+    return { ...this.state };
+  }
+
+  _applyState(
+    message: Record<string, unknown> | null | undefined,
+    direction: 'client' | 'server',
+  ): void {
+    const prev = this.state;
+    const next = reduceConnectionState(prev, message, direction);
+    this.state = next;
+
+    if (next.phase === 'ready') {
+      this.ready = true;
+    } else if (next.phase === 'failed') {
+      this.ready = false;
+      this.failure = next.detail;
+    } else {
+      this.ready = false;
+    }
+
+    if (
+      this.onStateChange &&
+      (prev.phase !== next.phase ||
+        prev.detail !== next.detail ||
+        prev.progress !== next.progress ||
+        prev.rootUri !== next.rootUri ||
+        prev.generation !== next.generation)
+    ) {
+      try {
+        this.onStateChange({ ...this.state });
+      } catch (err) {
+        console.error('IndexBarrier onStateChange error:', err);
+      }
+    }
+  }
+
+  take(id: unknown): PendingEntry | null {
+    const entry = this.pending.get(id);
+    if (!entry) return null;
+    this.pending.delete(id);
+    this.queuedBytes -= entry.frame.length;
+    clearTimeout(entry.timer);
+    return entry;
+  }
+
+  reject(message: { id: unknown }, code: number, reason: string): void {
+    this.sendClient(
+      encode({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: {
+          code,
+          message: reason,
+          data: { reason: 'intellij-index-not-ready', rootUri: this.root },
+        },
+      }),
+    );
+  }
+
+  rejectTimeout(message: { id: unknown }, elapsed: number): void {
+    this.sendClient(
+      encode({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: {
+          code: REQUEST_FAILED,
+          message: `IntelliJ project index was not ready within ${this.requestWaitTimeoutMs}ms; retry after indexing completes`,
+          data: {
+            reason: 'request-wait-timeout',
+            rootUri: this.root,
+            phase: this.state.phase,
+            elapsed,
+            projectStillIndexing: true,
+          },
+        },
+      }),
+    );
+  }
+
+  fail(reason: string): void {
+    this.ready = false;
+    this.failure = reason;
+    if (this.state.phase !== 'disconnected') {
+      this.state.phase = 'failed';
+      this.state.detail = reason;
+      if (this.onStateChange) {
+        try {
+          this.onStateChange({ ...this.state });
+        } catch {}
+      }
+    }
+    for (const id of Array.from(this.pending.keys())) {
+      const entry = this.take(id);
+      if (entry) {
+        this.reject(entry.message, REQUEST_FAILED, reason);
+      }
+    }
+  }
+
+  fromClient(message: Record<string, unknown>, frame: Buffer): void {
+    if (message.method === 'initialize') {
+      const params = message.params as
+        | { rootUri?: string; rootPath?: string; workspaceFolders?: Array<{ uri: string }> }
+        | undefined;
+      this.root = params?.rootUri || params?.workspaceFolders?.[0]?.uri || params?.rootPath || null;
+      this.initializeRequestId = message.id ?? null;
+      this.ready = false;
+      this.failure = null;
+      this._applyState(message, 'client');
+      this.sendServer(frame);
+      return;
+    }
+    if (message.method === 'shutdown' || message.method === 'exit') {
+      this.fail('IntelliJ connection is shutting down');
+      this._applyState(message, 'client');
+      this.sendServer(frame);
+      return;
+    }
+    if (message.method === '$/cancelRequest') {
+      const params = message.params as { id?: unknown } | undefined;
+      if (params?.id !== undefined && this.pending.has(params.id)) {
+        const entry = this.take(params.id);
+        if (entry) {
+          this.reject(
+            entry.message,
+            REQUEST_CANCELLED,
+            'Request cancelled while waiting for IntelliJ index readiness',
+          );
+        }
+        return;
+      }
+    }
+    if (message.method === 'textDocument/didChange' || message.method === 'textDocument/didClose') {
+      const params = message.params as { textDocument?: { uri: string } } | undefined;
+      const uri = params?.textDocument?.uri;
+      for (const [id, entry] of Array.from(this.pending.entries())) {
+        const entryParams = entry.message.params as { textDocument?: { uri: string } } | undefined;
+        if (!entryParams?.textDocument || entryParams.textDocument.uri === uri) {
+          this.take(id);
+          this.reject(
+            entry.message,
+            CONTENT_MODIFIED,
+            'Document changed while the request was waiting for IntelliJ indexing; retry with the current document',
+          );
+        }
+      }
+    }
+    if (message.method === 'workspace/didChangeWorkspaceFolders') {
+      this.fail('Workspace folders changed during index-readiness wait; retry after import');
+      this.failure = null;
+      this._applyState(message, 'client');
+    }
+    if (!message.method || message.id === undefined || this.ready) {
+      this.sendServer(frame);
+      return;
+    }
+    if (this.failure) {
+      this.reject(message as { id: unknown }, REQUEST_FAILED, this.failure);
+      return;
+    }
+    if (this.pending.size >= 128 || this.queuedBytes + frame.length > 16 * 1024 * 1024) {
+      this.reject(
+        message as { id: unknown },
+        REQUEST_FAILED,
+        'Too many requests waiting for IntelliJ index readiness',
+      );
+      return;
+    }
+    if (this.pending.has(message.id)) throw new Error('Duplicate pending JSON-RPC request id');
+
+    const startTime = Date.now();
+    const timer = setTimeout(() => {
+      const entry = this.take(message.id);
+      if (entry) {
+        const elapsed = Date.now() - entry.startTime;
+        this.rejectTimeout(entry.message, elapsed);
+      }
+    }, this.requestWaitTimeoutMs);
+    timer.unref();
+    this.pending.set(message.id, {
+      message: message as { id: unknown; method?: string; params?: Record<string, unknown> },
+      frame,
+      timer,
+      startTime,
+    });
+    this.queuedBytes += frame.length;
+  }
+
+  fromServer(message: Record<string, unknown>, frame: Buffer): void {
+    this.sendClient(frame);
+    this._applyState(message, 'server');
+    if (message.method === 'intellij/workspaceImportState') {
+      const params = message.params as
+        | { folders?: Array<{ status: string }>; phase?: string }
+        | undefined;
+      const folders = params?.folders ?? [];
+      if (folders.some((folder) => ['FAILURE', 'FAILED', 'ERROR'].includes(folder.status))) {
+        this.fail('IntelliJ project import failed; inspect the server import log');
+      } else if (params?.phase !== 'FINISHED') {
+        this.ready = false;
+        this.failure = null;
+      }
+    }
+    if (this.ready && !this.failure) {
+      this.ready = true;
+      for (const id of Array.from(this.pending.keys())) {
+        const entry = this.take(id);
+        if (entry) {
+          this.sendServer(entry.frame);
+        }
+      }
+    }
+  }
+
+  dispose(): void {
+    for (const entry of this.pending.values()) clearTimeout(entry.timer);
+    this.pending.clear();
+    this.queuedBytes = 0;
+  }
+}

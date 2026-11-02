@@ -1,0 +1,918 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  applyPrune,
+  computePruneCandidates,
+  formatBytes,
+  getCacheInventory,
+} from './cache-manager.js';
+import { type ProjectStateResult, readProjectState } from './connection-state.js';
+import { listDebugSessions, recoverDebugSession } from './debug-control.js';
+import type { ExtensionContext, ExtensionPluginInstance } from './extension-types.js';
+import { registerIntellijIndex } from './index-tool.js';
+import {
+  formatInstallDescription,
+  formatInstallStatusText,
+  formatStatusText,
+  isInstallActive,
+  parseInstallArgs,
+} from './install-status.js';
+import { recordConnection } from './metadata.js';
+import { findProjectRoot, watchIndex } from './readiness.js';
+import {
+  defaultInstallDir as defaultDefaultInstallDir,
+  readObservedInstallState as defaultReadObservedInstallState,
+  readServerConfig as defaultReadServerConfig,
+  saveServerConfig as defaultSaveServerConfig,
+  trackInstallation as defaultTrackInstallation,
+} from './server-config.js';
+import {
+  ensureInstalled as defaultEnsureInstalled,
+  readInstallState as defaultReadInstallState,
+  type InstallState,
+} from './server-install.js';
+import {
+  endpoint,
+  ensureServer,
+  isServerAlive,
+  settings,
+  status,
+  withLifecycleLock,
+} from './service.js';
+import type { DiscoveredJdkItem } from './workspace.js';
+import * as defaultWorkspaceApi from './workspace.js';
+export function parseJdkPath(input: unknown): string {
+  if (typeof input !== 'string') return '';
+  let s = input.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+const STATUS_KEY = 'intellij-index';
+
+function projectLabel(state: ProjectStateResult, fallbackRoot?: string, cwd?: string): string {
+  if (state?.canonicalPath) return state.canonicalPath;
+  return fallbackRoot || cwd || '';
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (typeof err === 'object' && err !== null) {
+    const code = 'code' in err ? err.code : undefined;
+    const message = 'message' in err ? err.message : undefined;
+    return code === 'ETIMEDOUT' || (typeof message === 'string' && message.includes('timed out'));
+  }
+  return false;
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    return String(err.message);
+  }
+  return String(err);
+}
+
+export interface ExtensionOverrides {
+  workspaceApi?: typeof defaultWorkspaceApi | Partial<typeof defaultWorkspaceApi>;
+  readinessApi?: Partial<{
+    watchIndex: typeof watchIndex;
+    findProjectRoot: typeof findProjectRoot;
+  }>;
+  serverConfigApi?: Partial<{
+    readServerConfig: typeof defaultReadServerConfig;
+    saveServerConfig: typeof defaultSaveServerConfig;
+    defaultInstallDir: typeof defaultDefaultInstallDir;
+    trackInstallation: typeof defaultTrackInstallation;
+    readObservedInstallState: typeof defaultReadObservedInstallState;
+  }>;
+  serverInstallApi?: Partial<{
+    ensureInstalled: typeof defaultEnsureInstalled;
+    readInstallState: typeof defaultReadInstallState;
+  }>;
+  pollIntervalMs?: number;
+  configFile?: string;
+  debugControlApi?: Partial<{
+    listDebugSessions: typeof listDebugSessions;
+    recoverDebugSession: typeof recoverDebugSession;
+  }>;
+  systemPath?: string;
+}
+
+export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverrides = {}) {
+  const wsApi = { ...defaultWorkspaceApi, ...overrides.workspaceApi };
+  const watchIndexFn = overrides.readinessApi?.watchIndex ?? watchIndex;
+  const findProjectRootFn = overrides.readinessApi?.findProjectRoot ?? findProjectRoot;
+  const configApi = {
+    readServerConfig: overrides.serverConfigApi?.readServerConfig ?? defaultReadServerConfig,
+    saveServerConfig: overrides.serverConfigApi?.saveServerConfig ?? defaultSaveServerConfig,
+    defaultInstallDir: overrides.serverConfigApi?.defaultInstallDir ?? defaultDefaultInstallDir,
+    trackInstallation: overrides.serverConfigApi?.trackInstallation ?? defaultTrackInstallation,
+    readObservedInstallState:
+      overrides.serverConfigApi?.readObservedInstallState ?? defaultReadObservedInstallState,
+  };
+  const installApi = {
+    ensureInstalled: overrides.serverInstallApi?.ensureInstalled ?? defaultEnsureInstalled,
+    readInstallState: overrides.serverInstallApi?.readInstallState ?? defaultReadInstallState,
+  };
+  const pollIntervalMs = overrides.pollIntervalMs ?? 500;
+  const configOptions = overrides.configFile ? { configFile: overrides.configFile } : {};
+  const debugApi = {
+    listDebugSessions: overrides.debugControlApi?.listDebugSessions ?? listDebugSessions,
+    recoverDebugSession: overrides.debugControlApi?.recoverDebugSession ?? recoverDebugSession,
+  };
+  const activeSystemPath = overrides.systemPath ?? settings.systemPath;
+
+  pi.setLabel?.('IntelliJ LSP');
+  registerIntellijIndex(pi);
+
+  let statusVisible = false;
+  let statusText = '';
+
+  function clearStatus(ctx?: ExtensionContext | null): void {
+    if (!ctx?.ui?.setStatus) return;
+    if (!statusVisible) return;
+    statusVisible = false;
+    statusText = '';
+    try {
+      ctx.ui.setStatus(STATUS_KEY, '');
+    } catch {}
+  }
+
+  function setStatusText(ctx: ExtensionContext | undefined | null, text: string): void {
+    if (!ctx?.ui?.setStatus) return;
+    if (statusVisible && statusText === text) return;
+    statusVisible = true;
+    statusText = text;
+    ctx.ui.setStatus(STATUS_KEY, text);
+  }
+
+  let stopObserver: (() => void) | null = null;
+  let installPollTimer: NodeJS.Timeout | null = null;
+  let activeCommandAbort: AbortController | null = null;
+  let state: ProjectStateResult = { phase: 'not-started', detail: '' };
+  let activeInstallState: InstallState | null = null;
+  let disposed = false;
+  let generation = 0;
+  let activeCtx: ExtensionContext | null = null;
+  const notifiedReady = new Set<string>();
+  const notifiedInstalls = new Set<string>();
+  let observationStart = Date.now();
+
+  function renderStatus(ctx: ExtensionContext | null | undefined): void {
+    if (disposed || !ctx) {
+      clearStatus(ctx);
+      return;
+    }
+
+    if (activeInstallState && isInstallActive(activeInstallState)) {
+      setStatusText(ctx, formatInstallStatusText(activeInstallState));
+      return;
+    }
+
+    const phase = state?.phase;
+    if (
+      state?.live !== false &&
+      (phase === 'connecting' || phase === 'importing' || phase === 'indexing')
+    ) {
+      setStatusText(ctx, formatStatusText(phase, state.detail, state.progress));
+      return;
+    }
+
+    clearStatus(ctx);
+  }
+
+  function applyInstallState(
+    observed: InstallState | null,
+    ctx: ExtensionContext | null,
+    currentGen: number,
+    isPoll: boolean = false,
+  ): void {
+    if (disposed || generation !== currentGen) return;
+
+    if (isPoll) {
+      if (!observed) {
+        if (activeCommandAbort && isInstallActive(activeInstallState)) {
+          return;
+        }
+        activeInstallState = null;
+        renderStatus(ctx);
+        return;
+      }
+
+      if (
+        activeInstallState &&
+        observed.installId &&
+        observed.installId === activeInstallState.installId &&
+        (observed.updatedAt ?? 0) < (activeInstallState.updatedAt ?? 0)
+      ) {
+        return;
+      }
+    }
+
+    activeInstallState = observed;
+    renderStatus(ctx);
+
+    if (!observed || activeCommandAbort) return;
+
+    if (observed.phase === 'ready' || observed.phase === 'failed') {
+      const isStale = (observed.updatedAt ?? 0) < observationStart;
+      if (!isStale) {
+        const notifKey = `${observed.installId || observed.installDir || 'unknown'}:${observed.phase}`;
+        if (!notifiedInstalls.has(notifKey)) {
+          notifiedInstalls.add(notifKey);
+          if (observed.phase === 'ready') {
+            const version = observed.version || 'unknown';
+            const location = observed.executable || observed.installDir;
+            ctx?.ui?.notify(`IntelliJ server installed: ${version} at ${location}`, 'info');
+          } else {
+            ctx?.ui?.notify(
+              `IntelliJ server installation failed: ${observed.error || 'unknown error'}.`,
+              'warning',
+            );
+          }
+        }
+      }
+    }
+  }
+
+  function startObserver(ctx: ExtensionContext): void {
+    activeCtx = ctx;
+    const currentGeneration = ++generation;
+    stopObserver?.();
+    stopObserver = null;
+    if (installPollTimer !== null) {
+      clearTimeout(installPollTimer);
+      installPollTimer = null;
+    }
+    if (activeCommandAbort) {
+      activeCommandAbort.abort();
+      activeCommandAbort = null;
+    }
+    disposed = false;
+    observationStart = Date.now();
+    renderStatus(ctx);
+
+    const projectRoot = findProjectRootFn(ctx.cwd);
+    const markers = [
+      'pom.xml',
+      'build.gradle',
+      'build.gradle.kts',
+      'settings.gradle',
+      'settings.gradle.kts',
+      '.idea',
+    ];
+    const isJava = markers.some((marker) => existsSync(join(projectRoot, marker)));
+
+    let stopWatchIndex: (() => void) | null = null;
+    if (isJava) {
+      stopWatchIndex = watchIndexFn(projectRoot, (next) => {
+        if (disposed || generation !== currentGeneration) return;
+        const previous = state;
+        state = next;
+        renderStatus(ctx);
+
+        if (next.phase === 'ready' && next.live !== false) {
+          const readyKey = next.connectionId || `gen-${currentGeneration}`;
+          if (!notifiedReady.has(readyKey)) {
+            notifiedReady.add(readyKey);
+            ctx.ui?.notify(
+              `IntelliJ index ready: ${projectLabel(next, projectRoot, ctx.cwd)}`,
+              'info',
+            );
+          }
+        } else if (next.phase === 'failed' || next.phase === 'disconnected') {
+          const stale = (next.updatedAt ?? 0) < observationStart;
+          if (!stale && (previous.phase !== next.phase || previous.detail !== next.detail)) {
+            if (next.phase === 'disconnected') {
+              ctx.ui?.notify(
+                `IntelliJ connection lost: ${next.detail || 'server disconnected'}.`,
+                'warning',
+              );
+            } else {
+              ctx.ui?.notify(
+                `IntelliJ index failed: ${next.detail || ''}. Use /intellij start to retry.`,
+                'warning',
+              );
+            }
+          }
+        }
+      });
+    }
+
+    async function checkInstallState() {
+      if (disposed || generation !== currentGeneration) return;
+      try {
+        const observed = await configApi.readObservedInstallState(configOptions);
+        if (disposed || generation !== currentGeneration) return;
+        applyInstallState(observed, ctx, currentGeneration, true);
+      } catch {}
+    }
+
+    function scheduleInstallPoll() {
+      if (disposed || generation !== currentGeneration) return;
+      installPollTimer = setTimeout(async () => {
+        if (disposed || generation !== currentGeneration) return;
+        await checkInstallState();
+        scheduleInstallPoll();
+      }, pollIntervalMs);
+      installPollTimer.unref?.();
+    }
+
+    void checkInstallState();
+    scheduleInstallPoll();
+
+    stopObserver = () => {
+      if (stopWatchIndex) {
+        stopWatchIndex();
+        stopWatchIndex = null;
+      }
+      if (installPollTimer !== null) {
+        clearTimeout(installPollTimer);
+        installPollTimer = null;
+      }
+      if (activeCommandAbort) {
+        activeCommandAbort.abort();
+        activeCommandAbort = null;
+      }
+    };
+  }
+
+  pi.registerCommand('intellij', {
+    description:
+      'IntelliJ language server, project index, cache, pruning, workspace and debug management',
+    handler: async (rawArgs: string, ctx: ExtensionContext) => {
+      const args = rawArgs.trim();
+      const parts = args.split(/\s+/).filter(Boolean);
+      const sub = parts[0] || 'status';
+
+      if (sub === 'start') {
+        const socket = await ensureServer();
+        socket.destroy();
+        startObserver(ctx);
+      } else if (sub === 'status') {
+        const projectRoot = findProjectRootFn(ctx.cwd);
+        const current = await readProjectState(settings.systemPath, projectRoot);
+        state = current;
+
+        const configuration = await configApi.readServerConfig(settings.executable, configOptions);
+        const configDesc =
+          configuration.mode === 'managed'
+            ? `server (managed): ${configuration.installDir}`
+            : `server (external): ${configuration.executable}`;
+
+        const observed =
+          (await configApi.readObservedInstallState(configOptions).catch(() => null)) ??
+          activeInstallState;
+        const installDesc = observed ? formatInstallDescription(observed) : '';
+
+        let serverDesc: string;
+        if (await status()) {
+          const { host, port } = await endpoint();
+          serverDesc = `IntelliJ ${host}:${port}`;
+        } else {
+          serverDesc = 'IntelliJ shared server stopped';
+        }
+
+        const indexDesc = `project index: ${state.phase}${state.detail ? ` (${state.detail})` : ''}`;
+
+        const parts = [serverDesc, configDesc];
+        if (installDesc) {
+          parts.push(installDesc);
+        }
+        parts.push(indexDesc);
+
+        const debugSessions = await debugApi
+          .listDebugSessions({
+            systemPath: activeSystemPath,
+            projectRoot,
+          })
+          .catch(() => []);
+        if (debugSessions.length > 0) {
+          const liveCount = debugSessions.filter((s) => s.live).length;
+          parts.push(`debug: ${liveCount} active / ${debugSessions.length} total`);
+        }
+        ctx.ui?.notify(parts.join('; '), 'info');
+      } else if (sub === 'install') {
+        startObserver(ctx);
+        const commandGen = generation;
+        const remainder = rawArgs.trim().slice('install'.length);
+        const { dir, error } = parseInstallArgs(remainder);
+        if (error) {
+          ctx.ui?.notify(error, 'warning');
+          return;
+        }
+
+        const ownedAbort = new AbortController();
+        activeCommandAbort = ownedAbort;
+        let targetDir = dir;
+
+        try {
+          if (!targetDir) {
+            const currentConfig = await configApi.readServerConfig(
+              settings.executable,
+              configOptions,
+            );
+            if (currentConfig.mode === 'managed') {
+              targetDir = currentConfig.installDir;
+            } else {
+              targetDir = configApi.defaultInstallDir();
+            }
+          }
+
+          await configApi.trackInstallation(targetDir, configOptions);
+          const result = await installApi.ensureInstalled(targetDir, {
+            signal: ownedAbort.signal,
+            onProgress: (prog) => {
+              applyInstallState(prog, ctx, commandGen, false);
+            },
+          });
+          if (disposed || generation !== commandGen) {
+            return;
+          }
+          await configApi.saveServerConfig(
+            { mode: 'managed', installDir: result.installDir },
+            configOptions,
+          );
+          if (disposed || generation !== commandGen) {
+            return;
+          }
+          const realState = await installApi.readInstallState(result.installDir);
+          if (disposed || generation !== commandGen) return;
+          const readyKey = `${realState?.installId || result.installDir}:ready`;
+          notifiedInstalls.add(readyKey);
+          if (realState) {
+            applyInstallState(realState, ctx, commandGen, false);
+          } else {
+            activeInstallState = null;
+            renderStatus(ctx);
+          }
+          ctx.ui?.notify(
+            `IntelliJ server installed: ${result.version} at ${result.executable}`,
+            'info',
+          );
+        } catch (err: unknown) {
+          if (disposed || generation !== commandGen) {
+            return;
+          }
+          const errorMsg = getErrorMessage(err);
+          const failedState = targetDir
+            ? await installApi.readInstallState(targetDir).catch(() => null)
+            : null;
+          if (disposed || generation !== commandGen) return;
+          const failKey = `${failedState?.installId || targetDir || 'command'}:failed`;
+          notifiedInstalls.add(failKey);
+          if (failedState) {
+            applyInstallState(failedState, ctx, commandGen, false);
+          } else {
+            activeInstallState = null;
+            renderStatus(ctx);
+          }
+          ctx.ui?.notify(`IntelliJ installation failed: ${errorMsg}`, 'error');
+        } finally {
+          if (activeCommandAbort === ownedAbort) {
+            activeCommandAbort = null;
+          }
+        }
+      } else if (sub === 'cache') {
+        try {
+          const inv = await getCacheInventory(settings.systemPath);
+          const count = inv.workspaces.length;
+          const confirmed = inv.workspaces.filter((w) => w.mapping.status === 'confirmed').length;
+          const unknown = count - confirmed;
+          const serverNote = inv.serverAlive
+            ? 'Server running (PID ' + inv.serverPid + ')'
+            : 'Server stopped';
+          const leaseNote = inv.activeLeases.length + ' active lease(s)';
+
+          const details = inv.workspaces
+            .map((w) => {
+              const name =
+                w.mapping.status === 'confirmed'
+                  ? w.mapping.projectPath || w.hash
+                  : 'Unknown (' + w.hash.slice(0, 8) + ')';
+              const used = w.lastUsed
+                ? new Date(w.lastUsed).toISOString().replace('T', ' ').slice(0, 16)
+                : 'never';
+              const lease = w.hasActiveLease ? ' [active lease]' : '';
+              return (
+                name + ': ' + formatBytes(w.logicalBytes) + ' (last used: ' + used + ')' + lease
+              );
+            })
+            .join('; ');
+
+          const summary =
+            'IntelliJ cache: ' +
+            formatBytes(inv.totalLogicalBytes) +
+            ' across ' +
+            count +
+            ' workspace(s) (' +
+            confirmed +
+            ' confirmed, ' +
+            unknown +
+            ' unknown). ' +
+            serverNote +
+            '; ' +
+            leaseNote +
+            '.' +
+            (unknown > 0
+              ? ' (Note: Unknown workspaces cannot be pruned because native ownership cannot be verified.)'
+              : '') +
+            (details ? ' Breakdown: ' + details : '');
+
+          ctx.ui?.notify(summary, 'info');
+
+          const warnGiB = settings.cachePolicy?.warnAboveGiB ?? 5;
+          if (inv.totalLogicalBytes > warnGiB * 1024 * 1024 * 1024) {
+            ctx.ui?.notify(
+              'IntelliJ cache total (' +
+                formatBytes(inv.totalLogicalBytes) +
+                ') exceeds policy limit of ' +
+                warnGiB +
+                ' GiB. Use /intellij prune to inspect pruning candidates.',
+              'warning',
+            );
+          }
+        } catch (err: unknown) {
+          ctx.ui?.notify('Failed to inspect cache: ' + getErrorMessage(err), 'warning');
+        }
+      } else if (sub === 'prune') {
+        const applyMode = parts[1] === '--apply';
+        try {
+          const inv = await getCacheInventory(settings.systemPath);
+          const plan = computePruneCandidates(inv, settings.cachePolicy);
+
+          if (!applyMode) {
+            if (plan.candidates.length === 0) {
+              ctx.ui?.notify(
+                'IntelliJ prune preview: 0 workspaces eligible (retention: ' +
+                  plan.retentionDays +
+                  'd). All cached data is currently retained, active, or protected unknown.',
+                'info',
+              );
+              return;
+            }
+            const candList = plan.candidates
+              .map(
+                (c) =>
+                  c.hash.slice(0, 8) +
+                  ' (' +
+                  c.projectPath +
+                  ', ' +
+                  formatBytes(c.logicalBytes) +
+                  ')',
+              )
+              .join(', ');
+            ctx.ui?.notify(
+              'IntelliJ prune preview: ' +
+                plan.candidates.length +
+                ' candidate(s) totaling ' +
+                formatBytes(plan.candidateBytes) +
+                ' eligible for pruning (retention: ' +
+                plan.retentionDays +
+                'd): ' +
+                candList +
+                '. To delete, run /intellij prune --apply.',
+              'info',
+            );
+          } else {
+            if (plan.candidates.length === 0) {
+              ctx.ui?.notify('No cache candidates eligible for pruning.', 'info');
+              return;
+            }
+            if (typeof ctx.ui?.confirm !== 'function') {
+              ctx.ui?.notify('Prune apply cancelled: confirmation UI unavailable.', 'warning');
+              return;
+            }
+            const summaryList = plan.candidates
+              .map(
+                (c) =>
+                  c.hash.slice(0, 8) +
+                  ' (' +
+                  c.projectPath +
+                  ', ' +
+                  formatBytes(c.logicalBytes) +
+                  ')',
+              )
+              .join(', ');
+            const ok = await ctx.ui.confirm(
+              'Prune ' +
+                plan.candidates.length +
+                ' workspace(s) (' +
+                formatBytes(plan.candidateBytes) +
+                ')? Candidates: ' +
+                summaryList,
+            );
+            if (!ok) {
+              ctx.ui?.notify('Prune cancelled by user.', 'info');
+              return;
+            }
+
+            await withLifecycleLock(async () => {
+              const liveServer = await isServerAlive(settings.systemPath);
+              if (liveServer.alive) {
+                ctx.ui?.notify(
+                  'Cannot prune cache while shared IntelliJ server is running (PID ' +
+                    liveServer.pid +
+                    '). Stop server before pruning.',
+                  'warning',
+                );
+                return;
+              }
+              const freshInv = await getCacheInventory(settings.systemPath);
+              const freshPlan = computePruneCandidates(freshInv, settings.cachePolicy);
+
+              const prevHashes = plan.candidates
+                .map((c) => c.hash)
+                .sort()
+                .join(',');
+              const freshHashes = freshPlan.candidates
+                .map((c) => c.hash)
+                .sort()
+                .join(',');
+              if (prevHashes !== freshHashes) {
+                ctx.ui?.notify(
+                  'Cache state changed during confirmation. Prune cancelled; please re-run /intellij prune to preview.',
+                  'warning',
+                );
+                return;
+              }
+
+              const result = await applyPrune(freshPlan.candidates, settings.systemPath);
+              ctx.ui?.notify(
+                'IntelliJ cache pruned: deleted ' +
+                  formatBytes(result.deletedLogicalBytes) +
+                  ' logical (' +
+                  formatBytes(result.freeSpaceDelta) +
+                  ' OS free-space delta across ' +
+                  result.pruned.length +
+                  ' workspaces).',
+                'info',
+              );
+            });
+          }
+        } catch (err: unknown) {
+          ctx.ui?.notify('Prune failed: ' + getErrorMessage(err), 'warning');
+        }
+      } else if (sub === 'workspace') {
+        const wsSub = (parts[1] || 'status').toLowerCase();
+        if (wsSub === 'status') {
+          try {
+            const projectRoot = findProjectRoot(ctx.cwd);
+            const info = await wsApi.getWorkspaceInfo(projectRoot, {
+              systemPath: settings.systemPath,
+            });
+            const jdkPart = info.savedJdk
+              ? `${info.savedJdk}${info.savedVersion ? ` (Java ${info.savedVersion})` : ''} ${info.isApplied ? '[applied]' : '[saved, not applied - run /intellij workspace reload]'}`
+              : info.appliedJdk
+                ? `${info.appliedJdk} [applied runtime default]`
+                : 'system default (none configured)';
+            const typePart =
+              info.projectType && info.projectType !== 'unknown' ? ` (${info.projectType})` : '';
+            ctx.ui?.notify(
+              `IntelliJ workspace: ${info.canonicalPath}${typePart}; JDK: ${jdkPart}.`,
+              'info',
+            );
+          } catch (err: unknown) {
+            ctx.ui?.notify('Failed to get workspace info: ' + getErrorMessage(err), 'warning');
+          }
+        } else if (wsSub === 'list') {
+          try {
+            const list = await wsApi.listWorkspaces({ systemPath: settings.systemPath });
+            if (!list || list.length === 0) {
+              ctx.ui?.notify('No configured IntelliJ workspaces found.', 'info');
+              return;
+            }
+            const entries = list
+              .map((w) => {
+                const jdk = w.savedJdk
+                  ? `${w.savedJdk} ${w.isApplied ? '[applied]' : '[pending]'}`
+                  : w.appliedJdk
+                    ? `${w.appliedJdk} [runtime]`
+                    : 'default';
+                const type =
+                  w.projectType && w.projectType !== 'unknown' ? `${w.projectType}, ` : '';
+                return `${w.canonicalPath} (${type}JDK: ${jdk})`;
+              })
+              .join('; ');
+            ctx.ui?.notify(`IntelliJ workspaces (${list.length}): ${entries}`, 'info');
+          } catch (err: unknown) {
+            ctx.ui?.notify('Failed to list workspaces: ' + getErrorMessage(err), 'warning');
+          }
+        } else if (wsSub === 'jdks') {
+          try {
+            const projectRoot = findProjectRoot(ctx.cwd);
+            const candidates = await wsApi.discoverJdks(projectRoot, {
+              systemPath: settings.systemPath,
+            });
+            if (!candidates || candidates.length === 0) {
+              ctx.ui?.notify(
+                'No installed JDKs discovered. You can specify a custom JDK path using /intellij workspace jdk <path>.',
+                'warning',
+              );
+              return;
+            }
+            const items = candidates
+              .map((c) => {
+                const ver = c.version ? `v${c.version}` : 'JDK';
+                const vendor = c.vendor ? ` (${c.vendor})` : '';
+                return `${ver}${vendor}: ${c.javaHome}`.trim();
+              })
+              .join('; ');
+            ctx.ui?.notify(`Discovered JDKs (${candidates.length}): ${items}`, 'info');
+          } catch (err: unknown) {
+            ctx.ui?.notify('Failed to discover JDKs: ' + getErrorMessage(err), 'warning');
+          }
+        } else if (wsSub === 'jdk') {
+          const match = args.match(/^workspace\s+jdk(?:\s+([\s\S]+))?$/i);
+          const rawPath = match ? match[1] : null;
+          const explicitPath = rawPath ? parseJdkPath(rawPath) : '';
+          let targetPath = explicitPath;
+
+          if (!targetPath) {
+            if (typeof ctx.ui?.select !== 'function') {
+              ctx.ui?.notify(
+                'No interactive UI available. Run /intellij workspace jdks to view candidates or specify path: /intellij workspace jdk <path>',
+                'warning',
+              );
+              return;
+            }
+            const projectRoot = findProjectRoot(ctx.cwd);
+            let candidates: DiscoveredJdkItem[] = [];
+            try {
+              candidates = await wsApi.discoverJdks(projectRoot, {
+                systemPath: settings.systemPath,
+              });
+            } catch (err: unknown) {
+              ctx.ui.notify('Failed to discover JDKs: ' + getErrorMessage(err), 'warning');
+              return;
+            }
+            if (!candidates || candidates.length === 0) {
+              ctx.ui.notify(
+                'No installed JDKs discovered. Specify a custom JDK path: /intellij workspace jdk <path>',
+                'warning',
+              );
+              return;
+            }
+            const items = candidates.map((c) => ({
+              label: `${c.version ? `Java ${c.version}` : 'JDK'}${c.vendor ? ` (${c.vendor})` : ''} - ${c.javaHome}`,
+              value: c.javaHome,
+              description: c.javaHome,
+            }));
+            const selected = await ctx.ui.select('Select JDK for workspace:', items);
+            if (!selected) {
+              ctx.ui.notify('JDK selection cancelled.', 'info');
+              return;
+            }
+            targetPath =
+              typeof selected === 'object' && selected !== null && 'value' in selected
+                ? selected.value
+                : String(selected);
+          }
+
+          const projectRoot = findProjectRoot(ctx.cwd);
+          let saved: { javaHome?: string } | undefined;
+          try {
+            saved = await wsApi.setWorkspaceJdk(projectRoot, targetPath, {
+              systemPath: settings.systemPath,
+            });
+          } catch (err: unknown) {
+            ctx.ui?.notify('Failed to save workspace JDK: ' + getErrorMessage(err), 'warning');
+            return;
+          }
+
+          try {
+            const reimport = await wsApi.reimportWorkspace(projectRoot, {
+              systemPath: settings.systemPath,
+            });
+            const timeNote =
+              reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+            ctx.ui?.notify(
+              'Workspace JDK saved and applied: ' +
+                (saved?.javaHome || targetPath) +
+                timeNote +
+                '.',
+              'info',
+            );
+          } catch (err: unknown) {
+            const msg = getErrorMessage(err);
+            if (isTimeoutError(err)) {
+              ctx.ui?.notify(
+                'Workspace JDK saved (' +
+                  (saved?.javaHome || targetPath) +
+                  '), but reimport timed out: ' +
+                  msg +
+                  '. Settings are saved but not yet fully applied.',
+                'warning',
+              );
+            } else {
+              ctx.ui?.notify(
+                'Workspace JDK saved (' +
+                  (saved?.javaHome || targetPath) +
+                  '), but reimport failed: ' +
+                  msg +
+                  '. Settings are saved but not applied to active session.',
+                'warning',
+              );
+            }
+          }
+        } else if (wsSub === 'reload') {
+          const projectRoot = findProjectRoot(ctx.cwd);
+          try {
+            const reimport = await wsApi.reimportWorkspace(projectRoot, {
+              systemPath: settings.systemPath,
+            });
+            const timeNote =
+              reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+            ctx.ui?.notify(
+              'Workspace reimported successfully: index ready' + timeNote + '.',
+              'info',
+            );
+          } catch (err: unknown) {
+            const msg = getErrorMessage(err);
+            if (isTimeoutError(err)) {
+              ctx.ui?.notify('Workspace reimport timed out: ' + msg + '.', 'warning');
+            } else {
+              ctx.ui?.notify('Workspace reimport failed: ' + msg + '.', 'warning');
+            }
+          }
+        } else {
+          ctx.ui?.notify(
+            'Usage: /intellij workspace [status|list|jdks|jdk [path]|reload]',
+            'warning',
+          );
+        }
+      } else if (sub === 'debug') {
+        const debugSub = (parts[1] || 'status').toLowerCase();
+        const targetId = parts[2];
+        const projectRoot = findProjectRootFn(ctx.cwd);
+
+        if (debugSub === 'status') {
+          const sessions = await debugApi.listDebugSessions({
+            systemPath: activeSystemPath,
+            projectRoot,
+          });
+          if (sessions.length === 0) {
+            ctx.ui?.notify('No active IntelliJ debug session found for current project.', 'info');
+            return;
+          }
+          const formatted = sessions
+            .map((s) => `[${s.id.slice(0, 8)}] PID ${s.pid}: ${s.detail}`)
+            .join('; ');
+          const level = sessions.some((s) => s.live) ? 'info' : 'warning';
+          ctx.ui?.notify(
+            `IntelliJ debug (${sessions.length} session${sessions.length > 1 ? 's' : ''}): ${formatted}`,
+            level,
+          );
+        } else if (debugSub === 'recover') {
+          try {
+            const snap = await debugApi.recoverDebugSession({
+              systemPath: activeSystemPath,
+              projectRoot,
+              id: targetId,
+            });
+            ctx.ui?.notify(
+              `IntelliJ debug session recovered (${snap.mode}: ${snap.phase}; pending requests: ${snap.pendingRequests}).`,
+              'info',
+            );
+          } catch (err: unknown) {
+            ctx.ui?.notify(`IntelliJ debug recover: ${getErrorMessage(err)}`, 'warning');
+          }
+        } else {
+          ctx.ui?.notify('Usage: /intellij debug [status|recover [id]]', 'warning');
+        }
+      } else {
+        ctx.ui?.notify(
+          'Usage: /intellij [status|start|install [--dir <path>]|cache|prune [--apply]|workspace [status|list|jdks|jdk [path]|reload]|debug [status|recover [id]]]',
+          'warning',
+        );
+      }
+    },
+  });
+
+  pi.on?.('session_start', (_event: unknown, ctx: ExtensionContext) => {
+    if (ctx.agent?.kind === 'sub') return;
+    const projectRoot = findProjectRoot(ctx.cwd);
+    const markers = [
+      'pom.xml',
+      'build.gradle',
+      'build.gradle.kts',
+      'settings.gradle',
+      'settings.gradle.kts',
+      '.idea',
+    ];
+    if (!markers.some((marker) => existsSync(join(projectRoot, marker)))) return;
+    recordConnection(settings.systemPath, projectRoot, Date.now()).catch(() => {});
+    startObserver(ctx);
+  });
+
+  pi.on?.('session_shutdown', () => {
+    disposed = true;
+    generation++;
+    stopObserver?.();
+    stopObserver = null;
+    activeInstallState = null;
+    clearStatus(activeCtx);
+  });
+}
