@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
+import type { FailureDetail, LicenseSummary } from './runtime-status.js';
 import { settings } from './service.js';
 
 export function findProjectRoot(startPath?: string): string {
@@ -41,6 +42,14 @@ export function findProjectRoot(startPath?: string): string {
   return candidate || current;
 }
 
+export function failureContentKey(failure?: FailureDetail): string {
+  return JSON.stringify(failure ?? null);
+}
+
+export function licenseContentKey(license?: LicenseSummary): string {
+  return JSON.stringify(license ?? null);
+}
+
 export function watchIndex(
   root: string,
   onState: (snapshot: ProjectStateResult) => void,
@@ -66,6 +75,8 @@ export function watchIndex(
   let lastPercentage: number | undefined;
   let lastMessage: string | undefined;
   let lastConnectionId: string | undefined;
+  let lastFailureKey: string | null = null;
+  let lastLicenseKey: string | null = null;
 
   async function poll() {
     if (stopped) return;
@@ -77,12 +88,17 @@ export function watchIndex(
       const currentPercentage = snapshot.progress?.percentage;
       const currentMessage = snapshot.progress?.message;
 
+      const currentFailureKey = failureContentKey(snapshot.failure);
+      const currentLicenseKey = licenseContentKey(snapshot.license);
+
       const isChanged =
         snapshot.phase !== lastPhase ||
         snapshot.detail !== lastDetail ||
         currentPercentage !== lastPercentage ||
         currentMessage !== lastMessage ||
-        snapshot.connectionId !== lastConnectionId;
+        snapshot.connectionId !== lastConnectionId ||
+        currentFailureKey !== lastFailureKey ||
+        currentLicenseKey !== lastLicenseKey;
 
       if (isChanged) {
         lastPhase = snapshot.phase;
@@ -90,7 +106,8 @@ export function watchIndex(
         lastPercentage = currentPercentage;
         lastMessage = currentMessage;
         lastConnectionId = snapshot.connectionId;
-
+        lastFailureKey = currentFailureKey;
+        lastLicenseKey = currentLicenseKey;
         try {
           onState(snapshot);
         } catch (error: unknown) {

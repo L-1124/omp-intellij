@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { canonicalizeProject } from '../src/metadata.js';
 import extension, { parseJdkPath } from '../src/extension.js';
 import type { SelectItem } from '../src/extension-types.js';
 import type { DiscoveredJdkItem, WorkspaceInfo } from '../src/workspace.js';
@@ -469,4 +473,104 @@ test('/intellij workspace reload triggers reimport and reports outcome', async (
     ctx.notifications[0].msg,
     /Workspace reimported successfully: index ready \(88ms\)\./,
   );
+});
+
+test('/intellij workspace status surfaces sanitized failure and license state along with workspace info without starting LSP', async () => {
+  const tempSystemPath = join(tmpdir(), 'omp-ws-status-sys-' + Math.random().toString(36).slice(2));
+  const connDir = join(tempSystemPath, 'plugin-metadata', 'connections');
+  await mkdir(connDir, { recursive: true });
+
+  const projectRoot = 'F:/projects/app';
+  const { canonicalPath } = canonicalizeProject(projectRoot);
+
+  const connRecord = {
+    connectionId: 'conn-ws-test',
+    kind: 'bridge',
+    pid: process.pid,
+    startedAt: Date.now() - 5000,
+    updatedAt: Date.now(),
+    seq: 1,
+    phase: 'indexing',
+    detail: 'Syncing Gradle model',
+    canonicalPath,
+    closed: false,
+    license: {
+      status: 'needs-activation',
+      featuresDeclined: true,
+      reason: 'License expired token=secret-tok-999',
+    },
+    failure: {
+      kind: 'import',
+      stage: 'import',
+      message: 'Failed to fetch https://user:secretpass@repo.example.com/lib',
+      code: -32001,
+      folders: [
+        {
+          uri: 'file:///projects/app',
+          tool: 'gradle',
+          status: 'FAILED',
+          message: 'token=mykey',
+        },
+      ],
+      logPath: join(tempSystemPath, 'launcher.log'),
+    },
+  };
+  await writeFile(join(connDir, 'conn-ws-test.json'), JSON.stringify(connRecord), 'utf8');
+
+  try {
+    const pi = createMockPi();
+    const mockApi = {
+      async getWorkspaceInfo(root: string) {
+        return {
+          projectRoot: root,
+          canonicalPath: 'f:/projects/app',
+          nativePath: root,
+          rootUri: `file:///${root}`,
+          lastReady: null,
+          lastConnected: null,
+          hasLspRecorded: false,
+          projectType: 'gradle',
+          savedJdk: 'F:/toolchains/jvms/store/21.0.4',
+          savedVersion: '21.0.4',
+          appliedJdk: 'F:/toolchains/jvms/store/21.0.4',
+          isApplied: true,
+        };
+      },
+    };
+
+    extension(pi, {
+      workspaceApi: mockApi,
+      systemPath: tempSystemPath,
+      readinessApi: {
+        findProjectRoot: () => projectRoot,
+      },
+    });
+
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx(projectRoot);
+
+    await cmd.handler('workspace status', ctx);
+    assert.equal(ctx.notifications.length, 1);
+    const msg = ctx.notifications[0].msg;
+
+    assert.match(
+      msg,
+      /IntelliJ workspace: f:\/projects\/app \(gradle\); JDK: F:\/toolchains\/jvms\/store\/21\.0\.4/,
+    );
+    assert.match(msg, /index: indexing \(Syncing Gradle model\)/);
+    assert.match(msg, /license: needs-activation; features declined/);
+    assert.match(msg, /failure: import \(import\) - Failed to fetch/);
+    assert.match(msg, /code: -32001/);
+    assert.match(msg, /file:\/\/\/projects\/app\[FAILED\]/);
+    assert.match(msg, /recovery: 在受支持的 JetBrains 客户端中显式完成授权/);
+
+    // Ensure credentials were not leaked
+    assert.equal(msg.includes('secretpass'), false);
+    assert.equal(msg.includes('secret-tok-999'), false);
+    assert.equal(msg.includes('mykey'), false);
+    assert.match(msg, /\[REDACTED\]/);
+  } finally {
+    await rm(tempSystemPath, { recursive: true, force: true });
+  }
 });

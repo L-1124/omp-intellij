@@ -17,8 +17,16 @@ import {
   isInstallActive,
   parseInstallArgs,
 } from './install-status.js';
+import { acceptServerEula, type EulaDocument, readEulaAcceptance, readServerEula } from './eula.js';
 import { recordConnection } from './metadata.js';
-import { findProjectRoot, watchIndex } from './readiness.js';
+import { failureContentKey, findProjectRoot, licenseContentKey, watchIndex } from './readiness.js';
+import {
+  type FailureDetail,
+  type LicenseSummary,
+  LICENSE_RECOVERY_GUIDANCE,
+  sanitizeStatus,
+  sanitizeString,
+} from './runtime-status.js';
 import {
   defaultInstallDir as defaultDefaultInstallDir,
   readObservedInstallState as defaultReadObservedInstallState,
@@ -74,6 +82,55 @@ function getErrorMessage(err: unknown): string {
   return String(err);
 }
 
+export function isAuthDenied(license?: LicenseSummary): boolean {
+  if (!license) return false;
+  return (
+    license.status === 'needs-activation' ||
+    license.status === 'expired' ||
+    Boolean(license.featuresDeclined)
+  );
+}
+
+export function formatFailureSummary(failure?: FailureDetail, systemPath?: string): string {
+  if (!failure) return '';
+  const sanitized = sanitizeStatus(failure) as FailureDetail;
+  const parts = [
+    `failure: ${sanitized.kind} (${sanitized.stage}) - ${sanitizeString(sanitized.message)}`,
+  ];
+  if (sanitized.code !== undefined && sanitized.code !== '') {
+    parts.push(`code: ${sanitized.code}`);
+  }
+  if (sanitized.folders && sanitized.folders.length > 0) {
+    parts.push(
+      'folders: ' +
+        sanitized.folders
+          .map((f) => `${sanitizeString(f.uri || f.tool || 'folder')}[${f.status}]`)
+          .join(', '),
+    );
+  }
+  const logPath = sanitized.logPath || (systemPath ? join(systemPath, 'launcher.log') : undefined);
+  if (logPath) {
+    parts.push(`log: ${sanitizeString(logPath)}`);
+  }
+  return parts.join('; ');
+}
+
+export function formatLicenseSummary(license?: LicenseSummary): string {
+  if (!license) return '';
+  const sanitized = sanitizeStatus(license) as LicenseSummary;
+  const parts = [`license: ${sanitized.status || 'unknown'}`];
+  if (sanitized.featuresDeclined) {
+    parts.push('features declined');
+  }
+  if (sanitized.reason) {
+    parts.push(`reason: ${sanitizeString(sanitized.reason)}`);
+  }
+  if (sanitized.source) {
+    parts.push(`source: ${sanitizeString(sanitized.source)}`);
+  }
+  return parts.join('; ');
+}
+
 export interface ExtensionOverrides {
   workspaceApi?: typeof defaultWorkspaceApi | Partial<typeof defaultWorkspaceApi>;
   readinessApi?: Partial<{
@@ -123,6 +180,27 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     recoverDebugSession: overrides.debugControlApi?.recoverDebugSession ?? recoverDebugSession,
   };
   const activeSystemPath = overrides.systemPath ?? settings.systemPath;
+  async function resolveSelectedExecutable(): Promise<{
+    executable?: string;
+    mode: 'managed' | 'external';
+    installDir?: string;
+    error?: string;
+  }> {
+    const configuration = await configApi.readServerConfig(settings.executable, configOptions);
+    if (configuration.mode === 'external') {
+      return { mode: 'external', executable: configuration.executable };
+    }
+    const installDir = configuration.installDir;
+    const state = await installApi.readInstallState(installDir).catch(() => null);
+    if (state?.phase === 'ready' && state.executable && existsSync(state.executable)) {
+      return { mode: 'managed', executable: state.executable, installDir };
+    }
+    return {
+      mode: 'managed',
+      installDir,
+      error: 'Managed IntelliJ server is not installed. Run /intellij install to install it first.',
+    };
+  }
 
   pi.setLabel?.('IntelliJ LSP');
   registerIntellijIndex(pi);
@@ -266,39 +344,80 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     const isJava = markers.some((marker) => existsSync(join(projectRoot, marker)));
 
     let stopWatchIndex: (() => void) | null = null;
-    if (isJava) {
-      stopWatchIndex = watchIndexFn(projectRoot, (next) => {
-        if (disposed || generation !== currentGeneration) return;
-        const previous = state;
-        state = next;
-        renderStatus(ctx);
+    let lastNotifiedLicenseKey: string | null = null;
+    let lastNotifiedFailureKey: string | null = null;
+    let wasAuthDenied = false;
 
-        if (next.phase === 'ready' && next.live !== false) {
-          const readyKey = next.connectionId || `gen-${currentGeneration}`;
-          if (!notifiedReady.has(readyKey)) {
-            notifiedReady.add(readyKey);
-            ctx.ui?.notify(
-              `IntelliJ index ready: ${projectLabel(next, projectRoot, ctx.cwd)}`,
-              'info',
-            );
-          }
-        } else if (next.phase === 'failed' || next.phase === 'disconnected') {
-          const stale = (next.updatedAt ?? 0) < observationStart;
-          if (!stale && (previous.phase !== next.phase || previous.detail !== next.detail)) {
-            if (next.phase === 'disconnected') {
+    if (isJava) {
+      stopWatchIndex = watchIndexFn(
+        projectRoot,
+        (next) => {
+          if (disposed || generation !== currentGeneration) return;
+          const previous = state;
+          state = next;
+          renderStatus(ctx);
+
+          if (next.phase === 'ready' && next.live !== false && !isAuthDenied(next.license)) {
+            const readyKey = next.connectionId || `gen-${currentGeneration}`;
+            if (!notifiedReady.has(readyKey)) {
+              notifiedReady.add(readyKey);
               ctx.ui?.notify(
-                `IntelliJ connection lost: ${next.detail || 'server disconnected'}.`,
-                'warning',
+                `IntelliJ index ready: ${projectLabel(next, projectRoot, ctx.cwd)}`,
+                'info',
               );
-            } else {
+            }
+          } else if (next.phase === 'failed' || next.phase === 'disconnected') {
+            const stale = (next.updatedAt ?? 0) < observationStart;
+            const currentFailKey = failureContentKey(next.failure);
+            const failChanged =
+              previous.phase !== next.phase ||
+              previous.detail !== next.detail ||
+              currentFailKey !== lastNotifiedFailureKey;
+            if (!stale && failChanged) {
+              lastNotifiedFailureKey = currentFailKey;
+              if (next.phase === 'disconnected') {
+                ctx.ui?.notify(
+                  `IntelliJ connection lost: ${next.detail || 'server disconnected'}.`,
+                  'warning',
+                );
+              } else {
+                const failDetail = next.failure?.message || next.detail || '';
+                ctx.ui?.notify(
+                  `IntelliJ index failed: ${failDetail}. Use /intellij start to retry.`,
+                  'warning',
+                );
+              }
+            }
+          }
+
+          const currentLicKey = licenseContentKey(next.license);
+          const authDeniedNow = isAuthDenied(next.license);
+
+          if (authDeniedNow) {
+            if (currentLicKey !== lastNotifiedLicenseKey) {
+              lastNotifiedLicenseKey = currentLicKey;
+              wasAuthDenied = true;
+              const reason =
+                next.license?.reason || next.license?.status || 'authorization required';
               ctx.ui?.notify(
-                `IntelliJ index failed: ${next.detail || ''}. Use /intellij start to retry.`,
+                `IntelliJ authorization required: ${reason}. ${LICENSE_RECOVERY_GUIDANCE}`,
                 'warning',
               );
             }
+          } else if (
+            wasAuthDenied &&
+            next.license?.status === 'valid' &&
+            !next.license?.featuresDeclined
+          ) {
+            wasAuthDenied = false;
+            lastNotifiedLicenseKey = currentLicKey;
+            ctx.ui?.notify('IntelliJ authorization restored.', 'info');
+          } else {
+            lastNotifiedLicenseKey = currentLicKey;
           }
-        }
-      });
+        },
+        { systemPath: activeSystemPath },
+      );
     }
 
     async function checkInstallState() {
@@ -353,7 +472,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         startObserver(ctx);
       } else if (sub === 'status') {
         const projectRoot = findProjectRootFn(ctx.cwd);
-        const current = await readProjectState(settings.systemPath, projectRoot);
+        const current = await readProjectState(activeSystemPath, projectRoot);
         state = current;
 
         const configuration = await configApi.readServerConfig(settings.executable, configOptions);
@@ -382,7 +501,17 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           parts.push(installDesc);
         }
         parts.push(indexDesc);
-
+        const licSummary = formatLicenseSummary(state.license);
+        if (licSummary) {
+          parts.push(licSummary);
+        }
+        const failSummary = formatFailureSummary(state.failure, activeSystemPath);
+        if (failSummary) {
+          parts.push(failSummary);
+        }
+        if (isAuthDenied(state.license)) {
+          parts.push(`recovery: ${LICENSE_RECOVERY_GUIDANCE}`);
+        }
         const debugSessions = await debugApi
           .listDebugSessions({
             systemPath: activeSystemPath,
@@ -659,10 +788,12 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         const wsSub = (parts[1] || 'status').toLowerCase();
         if (wsSub === 'status') {
           try {
-            const projectRoot = findProjectRoot(ctx.cwd);
+            const projectRoot = findProjectRootFn(ctx.cwd);
             const info = await wsApi.getWorkspaceInfo(projectRoot, {
-              systemPath: settings.systemPath,
+              systemPath: activeSystemPath,
             });
+            const projectState = await readProjectState(activeSystemPath, projectRoot);
+            state = projectState;
             const jdkPart = info.savedJdk
               ? `${info.savedJdk}${info.savedVersion ? ` (Java ${info.savedVersion})` : ''} ${info.isApplied ? '[applied]' : '[saved, not applied - run /intellij workspace reload]'}`
               : info.appliedJdk
@@ -670,10 +801,18 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 : 'system default (none configured)';
             const typePart =
               info.projectType && info.projectType !== 'unknown' ? ` (${info.projectType})` : '';
-            ctx.ui?.notify(
-              `IntelliJ workspace: ${info.canonicalPath}${typePart}; JDK: ${jdkPart}.`,
-              'info',
-            );
+            const statusParts = [
+              `IntelliJ workspace: ${info.canonicalPath}${typePart}; JDK: ${jdkPart}`,
+              `index: ${projectState.phase}${projectState.detail ? ` (${projectState.detail})` : ''}`,
+            ];
+            const licPart = formatLicenseSummary(projectState.license);
+            if (licPart) statusParts.push(licPart);
+            const failPart = formatFailureSummary(projectState.failure, activeSystemPath);
+            if (failPart) statusParts.push(failPart);
+            if (isAuthDenied(projectState.license)) {
+              statusParts.push(`recovery: ${LICENSE_RECOVERY_GUIDANCE}`);
+            }
+            ctx.ui?.notify(statusParts.join('; ') + '.', 'info');
           } catch (err: unknown) {
             ctx.ui?.notify('Failed to get workspace info: ' + getErrorMessage(err), 'warning');
           }
@@ -882,9 +1021,136 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         } else {
           ctx.ui?.notify('Usage: /intellij debug [status|recover [id]]', 'warning');
         }
+      } else if (sub === 'eula') {
+        const eulaSub = (parts[1] || 'status').toLowerCase();
+        const rawHash = parts[2] ? parts[2].trim() : '';
+
+        if (eulaSub === 'status') {
+          const resolved = await resolveSelectedExecutable();
+          if (resolved.error || !resolved.executable) {
+            ctx.ui?.notify(
+              resolved.error ||
+                'Managed IntelliJ server is not installed. Run /intellij install to install it first.',
+              'warning',
+            );
+            return;
+          }
+          try {
+            const doc = await readServerEula(resolved.executable);
+            const acceptance = await readEulaAcceptance(configOptions);
+            const isAccepted = acceptance.acceptedHashes.includes(doc.hash);
+            const statusLabel = isAccepted ? 'accepted' : 'not accepted';
+            const actionPrompt = isAccepted
+              ? ''
+              : ` Run /intellij eula accept ${doc.hash} to accept.`;
+            ctx.ui?.notify(
+              `IntelliJ EULA: ${statusLabel}; hash: ${doc.hash}; path: ${doc.path}.${actionPrompt}`,
+              'info',
+            );
+          } catch (err: unknown) {
+            ctx.ui?.notify(`Failed to read IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
+          }
+        } else if (eulaSub === 'view') {
+          const resolved = await resolveSelectedExecutable();
+          if (resolved.error || !resolved.executable) {
+            ctx.ui?.notify(
+              resolved.error ||
+                'Managed IntelliJ server is not installed. Run /intellij install to install it first.',
+              'warning',
+            );
+            return;
+          }
+          try {
+            const doc = await readServerEula(resolved.executable);
+            ctx.ui?.notify(
+              `IntelliJ EULA (hash: ${doc.hash}, path: ${doc.path}):\n\n${doc.text}`,
+              'info',
+            );
+          } catch (err: unknown) {
+            ctx.ui?.notify(`Failed to read IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
+          }
+        } else if (eulaSub === 'accept') {
+          const hashCandidate = rawHash;
+          if (!/^[0-9a-f]{16}$/.test(hashCandidate)) {
+            ctx.ui?.notify(
+              'Usage: /intellij eula accept <16-character lowercase hex hash>',
+              'warning',
+            );
+            return;
+          }
+          const resolved = await resolveSelectedExecutable();
+          if (resolved.error || !resolved.executable) {
+            ctx.ui?.notify(
+              resolved.error ||
+                'Managed IntelliJ server is not installed. Run /intellij install to install it first.',
+              'warning',
+            );
+            return;
+          }
+          let doc: EulaDocument;
+          try {
+            doc = await readServerEula(resolved.executable);
+          } catch (err: unknown) {
+            ctx.ui?.notify(`Failed to read IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
+            return;
+          }
+          if (doc.hash !== hashCandidate) {
+            ctx.ui?.notify(
+              `EULA hash mismatch: requested ${hashCandidate}, but current EULA hash is ${doc.hash} (${doc.path}).`,
+              'warning',
+            );
+            return;
+          }
+          if (typeof ctx.ui?.confirm !== 'function') {
+            ctx.ui?.notify(
+              'EULA acceptance cancelled: interactive confirmation UI unavailable.',
+              'warning',
+            );
+            return;
+          }
+          const ok = await ctx.ui.confirm(
+            `Accept IntelliJ Language Server EULA?\nPath: ${doc.path}\nHash: ${doc.hash}\nBy accepting, you agree to JetBrains EULA terms.`,
+          );
+          if (!ok) {
+            ctx.ui?.notify('EULA acceptance cancelled by user.', 'info');
+            return;
+          }
+          try {
+            await withLifecycleLock(
+              async () => {
+                const freshResolved = await resolveSelectedExecutable();
+                if (freshResolved.error || !freshResolved.executable) {
+                  ctx.ui?.notify(
+                    `EULA acceptance cancelled: ${freshResolved.error || 'server executable unavailable.'}`,
+                    'warning',
+                  );
+                  return;
+                }
+                const freshDoc = await readServerEula(freshResolved.executable);
+                if (freshDoc.hash !== hashCandidate || freshDoc.path !== doc.path) {
+                  ctx.ui?.notify(
+                    `EULA document changed during confirmation (current hash: ${freshDoc.hash}). Acceptance cancelled; please review the updated EULA.`,
+                    'warning',
+                  );
+                  return;
+                }
+                await acceptServerEula(freshDoc, configOptions);
+                ctx.ui?.notify(
+                  `IntelliJ EULA accepted: hash ${freshDoc.hash} at ${freshDoc.path}.`,
+                  'info',
+                );
+              },
+              { systemPath: activeSystemPath },
+            );
+          } catch (err: unknown) {
+            ctx.ui?.notify(`Failed to accept IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
+          }
+        } else {
+          ctx.ui?.notify('Usage: /intellij eula [status|view|accept <16-lowerhex>]', 'warning');
+        }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|install [--dir <path>]|cache|prune [--apply]|workspace [status|list|jdks|jdk [path]|reload]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|install [--dir <path>]|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload]|debug [status|recover [id]]]',
           'warning',
         );
       }

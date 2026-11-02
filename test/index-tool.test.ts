@@ -399,3 +399,250 @@ for (const phase of ['indexing', 'ready']) {
     assert.equal(result.isError, false);
   });
 }
+
+test('status action surfaces sanitized failure and license details at surface boundary', async () => {
+  const readProjectState = async (): Promise<ProjectStateResult> => ({
+    phase: 'indexing',
+    detail: 'Analyzing modules',
+    license: {
+      status: 'needs-activation',
+      featuresDeclined: true,
+      reason: 'Token expired: Bearer secret-tok-123',
+    },
+    failure: {
+      kind: 'import',
+      stage: 'import',
+      message: 'Failed to resolve https://user:secretpass@maven.example.com/repo',
+      code: -32001,
+      folders: [
+        {
+          uri: 'file:///project/app',
+          tool: 'gradle',
+          status: 'FAILED',
+          message: 'password=supersecret',
+        },
+      ],
+      logPath: '/fake/sys/launcher.log',
+    },
+  });
+
+  const result = await executeIntellijIndex(
+    { action: 'status' },
+    undefined,
+    undefined,
+    { cwd: '/test/proj' },
+    {
+      readProjectState,
+      systemPath: '/fake/sys',
+    },
+  );
+
+  assert.equal(result.isError, true, 'status with auth denied featuresDeclined must mark isError');
+  const text = result.content[0].text;
+  assert.match(text, /License status: needs-activation/);
+  assert.match(text, /License features declined: true/);
+  assert.match(text, /Failure kind: import/);
+  assert.match(text, /Failure stage: import/);
+  assert.match(text, /Failure code: -32001/);
+  assert.match(text, /Launcher log: \/fake\/sys\/launcher\.log/);
+  assert.match(text, /file:\/\/\/project\/app \[FAILED\]/);
+
+  // Verify credentials were redacted at the surface
+  assert.equal(text.includes('secretpass'), false);
+  assert.equal(text.includes('secret-tok-123'), false);
+  assert.equal(text.includes('supersecret'), false);
+  assert.match(text, /\[REDACTED\]/);
+
+  // Verify details object is sanitized
+  const detailsStr = JSON.stringify(result.details);
+  assert.equal(detailsStr.includes('secretpass'), false);
+  assert.equal(detailsStr.includes('supersecret'), false);
+});
+
+for (const authDeniedCase of [
+  {
+    label: 'needs-activation',
+    license: { status: 'needs-activation' as const, reason: 'License not found' },
+  },
+  {
+    label: 'expired',
+    license: { status: 'expired' as const, reason: 'Trial period expired' },
+  },
+  {
+    label: 'featuresDeclined',
+    license: { status: 'unknown' as const, featuresDeclined: true, reason: 'Feature declined' },
+  },
+]) {
+  test(`wait action fails immediately (isError: true) when license is ${authDeniedCase.label} without polling`, async () => {
+    let sleepCalls = 0;
+    let readCalls = 0;
+    const readProjectState = async (): Promise<ProjectStateResult> => {
+      readCalls++;
+      return {
+        phase: 'indexing',
+        detail: 'Starting index',
+        license: authDeniedCase.license,
+      };
+    };
+
+    const result = await executeIntellijIndex(
+      { action: 'wait', timeout: 30 },
+      undefined,
+      undefined,
+      { cwd: '/test/proj' },
+      {
+        readProjectState,
+        sleep: async () => {
+          sleepCalls++;
+        },
+        systemPath: '/fake/sys',
+      },
+    );
+
+    assert.equal(readCalls, 1);
+    assert.equal(sleepCalls, 0, 'must not sleep or poll on active auth denial');
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /IntelliJ authorization required/);
+    assert.match(result.content[0].text, /在受支持的 JetBrains 客户端中显式完成授权/);
+  });
+}
+
+test('wait action with valid license alone does not bypass indexing until ready', async () => {
+  const states: ProjectStateResult[] = [
+    { phase: 'indexing', detail: 'Parsing files', license: { status: 'valid' } },
+    { phase: 'indexing', detail: 'Resolving types', license: { status: 'valid' } },
+    { phase: 'ready', detail: '', license: { status: 'valid' } },
+  ];
+  let callIndex = 0;
+  let sleepCalls = 0;
+  const readProjectState = async (): Promise<ProjectStateResult> => {
+    const s = states[callIndex] || states[states.length - 1];
+    callIndex++;
+    return s;
+  };
+
+  const result = await executeIntellijIndex(
+    { action: 'wait', timeout: 10 },
+    undefined,
+    undefined,
+    { cwd: '/test/proj' },
+    {
+      readProjectState,
+      sleep: async () => {
+        sleepCalls++;
+      },
+      pollIntervalMs: 1,
+      systemPath: '/fake/sys',
+    },
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details?.phase, 'ready');
+  assert.ok(
+    sleepCalls >= 2,
+    'valid license alone must not treat indexing phase as immediately ready',
+  );
+});
+
+test('wait action with non-auth ordinary request failure in indexing phase does not fail wait', async () => {
+  const states: ProjectStateResult[] = [
+    {
+      phase: 'indexing',
+      detail: 'Indexing source roots',
+      license: { status: 'valid' },
+      failure: {
+        kind: 'rpc',
+        stage: 'request',
+        message: 'Non-fatal request failed',
+      },
+    },
+    {
+      phase: 'ready',
+      detail: 'Done',
+      license: { status: 'valid' },
+    },
+  ];
+  let callIdx = 0;
+  const readProjectState = async (): Promise<ProjectStateResult> => {
+    const s = states[callIdx] || states[states.length - 1];
+    callIdx++;
+    return s;
+  };
+
+  const result = await executeIntellijIndex(
+    { action: 'wait', timeout: 10 },
+    undefined,
+    undefined,
+    { cwd: '/test/proj' },
+    {
+      readProjectState,
+      sleep: async () => {},
+      pollIntervalMs: 1,
+      systemPath: '/fake/sys',
+    },
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details?.phase, 'ready');
+});
+
+test('wait action times out and reports stillIndexing with sanitized failure and license details', async () => {
+  const readProjectState = async (): Promise<ProjectStateResult> => ({
+    phase: 'indexing',
+    detail: 'Heavy index',
+    license: { status: 'valid' },
+    failure: {
+      kind: 'rpc',
+      stage: 'request',
+      message: 'token=secret-token-wait',
+    },
+  });
+
+  let currentTime = 1000;
+  const result = await executeIntellijIndex(
+    { action: 'wait', timeout: 5 },
+    undefined,
+    undefined,
+    { cwd: '/test/proj' },
+    {
+      readProjectState,
+      sleep: async () => {
+        currentTime += 6000;
+      },
+      now: () => currentTime,
+      pollIntervalMs: 500,
+      systemPath: '/fake/sys',
+    },
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details?.stillIndexing, true);
+  assert.equal(result.details?.timeout, 5);
+  assert.match(result.content[0].text, /timed out after 5s/);
+  assert.match(result.content[0].text, /still indexing: Heavy index/);
+  assert.equal(result.content[0].text.includes('secret-token-wait'), false);
+  assert.match(result.content[0].text, /\[REDACTED\]/);
+});
+
+test('wait action aborts on signal throwing AbortError', async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    executeIntellijIndex(
+      { action: 'wait' },
+      controller.signal,
+      undefined,
+      { cwd: '/test/proj' },
+      {
+        readProjectState: async () => ({ phase: 'indexing', detail: 'Running' }),
+        sleep: async () => {},
+      },
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.name, 'AbortError');
+      return true;
+    },
+  );
+});

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { ProjectStateResult } from '../src/connection-state.js';
@@ -933,5 +935,69 @@ test('/intellij status displays selected mode, path, install info with percent o
     assert.match(msg, /install: downloading \(50% - 60\.0 MiB \/ 120\.0 MiB\)/);
   } finally {
     pi.emit('session_shutdown');
+  }
+});
+
+test('/intellij install never implicitly accepts EULA or writes eula acceptance file', async () => {
+  const confDir = join(tmpdir(), 'omp-install-no-eula-conf-' + Math.random().toString(36).slice(2));
+  const installDir = join(
+    tmpdir(),
+    'omp-install-no-eula-target-' + Math.random().toString(36).slice(2),
+  );
+  await mkdir(confDir, { recursive: true });
+  await mkdir(installDir, { recursive: true });
+  const configFile = join(confDir, 'intellij.json');
+  await writeFile(
+    configFile,
+    JSON.stringify({
+      mode: 'managed',
+      installDir,
+    }),
+    'utf8',
+  );
+  const eulaStoreFile = join(confDir, 'intellij-eula.json');
+
+  const fakeResult: InstallResult = {
+    executable: join(installDir, 'bin', 'intellij-server.exe'),
+    version: '263.7084.0',
+    installDir,
+  };
+  const fakeState: InstallState = {
+    installId: 'inst-never-eula',
+    pid: process.pid,
+    installDir,
+    version: '263.7084.0',
+    phase: 'ready',
+    downloadedBytes: 100,
+    executable: fakeResult.executable,
+    updatedAt: Date.now(),
+  };
+
+  try {
+    const pi = createMockPi();
+    extension(pi, {
+      configFile,
+      serverInstallApi: {
+        async ensureInstalled(): Promise<InstallResult> {
+          return fakeResult;
+        },
+        async readInstallState(): Promise<InstallState> {
+          return fakeState;
+        },
+      },
+    });
+
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler('install', ctx);
+    assert.ok(ctx.notifications.some((n) => n.msg.includes('IntelliJ server installed')));
+
+    // Crucial check: intellij-eula.json must NOT exist or be created by install
+    await assert.rejects(readFile(eulaStoreFile, 'utf8'), { code: 'ENOENT' });
+  } finally {
+    await rm(confDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   }
 });

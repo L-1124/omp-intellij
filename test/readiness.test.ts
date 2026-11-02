@@ -184,3 +184,104 @@ test('watchIndex stops polling on AbortSignal', async (t) => {
 
   assert.equal(calls, callsAtAbort);
 });
+
+test('watchIndex fires onState when failure or license changes in stable phase', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const snapshots: ProjectStateResult[] = [
+    {
+      phase: 'ready',
+      detail: '',
+      connectionId: 'c1',
+      license: { status: 'valid' },
+    },
+    {
+      phase: 'ready',
+      detail: '',
+      connectionId: 'c1',
+      license: { status: 'needs-activation', featuresDeclined: true, reason: 'License expired' },
+    },
+    {
+      phase: 'ready',
+      detail: '',
+      connectionId: 'c1',
+      license: { status: 'valid' },
+      failure: {
+        kind: 'rpc',
+        stage: 'request',
+        message: 'Compilation warning',
+      },
+    },
+  ];
+  let callCount = 0;
+  const receivedLicenses: Array<string | undefined> = [];
+  const receivedFailures: Array<string | undefined> = [];
+
+  const readState = async (): Promise<ProjectStateResult> => {
+    const s = snapshots[callCount] || snapshots[snapshots.length - 1];
+    callCount++;
+    return s;
+  };
+
+  const stop = watchIndex(
+    '/fake/project',
+    (s) => {
+      receivedLicenses.push(s.license?.status);
+      receivedFailures.push(s.failure?.message);
+    },
+    {
+      readState,
+      intervalMs: 10,
+      systemPath: '/fake/system',
+    },
+  );
+
+  await Promise.resolve();
+  t.mock.timers.tick(10);
+  await Promise.resolve();
+  t.mock.timers.tick(10);
+  await Promise.resolve();
+  stop();
+
+  assert.equal(receivedLicenses.length, 3);
+  assert.deepEqual(receivedLicenses, ['valid', 'needs-activation', 'valid']);
+  assert.equal(receivedFailures[2], 'Compilation warning');
+});
+
+test('watchIndex dedups identical failure and license updates without repeated onState calls', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fixedSnapshot: ProjectStateResult = {
+    phase: 'indexing',
+    detail: 'Building index',
+    connectionId: 'c1',
+    license: { status: 'needs-activation', featuresDeclined: true },
+    failure: {
+      kind: 'authorization',
+      stage: 'initialize',
+      message: 'Features declined',
+    },
+  };
+  let onStateCalls = 0;
+
+  const readState = async (): Promise<ProjectStateResult> => fixedSnapshot;
+
+  const stop = watchIndex(
+    '/fake/project',
+    () => {
+      onStateCalls++;
+    },
+    {
+      readState,
+      intervalMs: 10,
+      systemPath: '/fake/system',
+    },
+  );
+
+  await Promise.resolve();
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(10);
+    await Promise.resolve();
+  }
+  stop();
+
+  assert.equal(onStateCalls, 1, 'identical failure and license updates must be deduped');
+});

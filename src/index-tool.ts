@@ -1,5 +1,12 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
+import {
+  type FailureDetail,
+  type LicenseSummary,
+  LICENSE_RECOVERY_GUIDANCE,
+  sanitizeStatus,
+  sanitizeString,
+} from './runtime-status.js';
 import type {
   ExtensionContext,
   ExtensionPluginInstance,
@@ -29,6 +36,65 @@ export function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   }, ms);
   signal?.addEventListener('abort', onAbort, { once: true });
   return promise;
+}
+
+export function isAuthDenied(license?: LicenseSummary): boolean {
+  if (!license) return false;
+  return (
+    license.status === 'needs-activation' ||
+    license.status === 'expired' ||
+    Boolean(license.featuresDeclined)
+  );
+}
+
+export function formatFailureLines(failure?: FailureDetail, fallbackSystemPath?: string): string[] {
+  if (!failure) return [];
+  const sanitized = sanitizeStatus(failure) as FailureDetail;
+  const lines = [
+    `Failure kind: ${sanitized.kind}`,
+    `Failure stage: ${sanitized.stage}`,
+    `Failure message: ${sanitizeString(sanitized.message)}`,
+  ];
+  if (sanitized.code !== undefined && sanitized.code !== '') {
+    lines.push(`Failure code: ${sanitized.code}`);
+  }
+  if (sanitized.folders && sanitized.folders.length > 0) {
+    lines.push(
+      'Failure folders: ' +
+        sanitized.folders
+          .map(
+            (f) =>
+              `${sanitizeString(f.uri || f.tool || 'folder')} [${f.status}]: ${sanitizeString(f.message || '')}`,
+          )
+          .join(', '),
+    );
+  }
+  const logPath =
+    sanitized.logPath ||
+    (fallbackSystemPath ? join(fallbackSystemPath, 'launcher.log') : undefined);
+  if (logPath) {
+    lines.push(`Launcher log: ${sanitizeString(logPath)}`);
+  }
+  return lines;
+}
+
+export function formatLicenseLines(license?: LicenseSummary): string[] {
+  if (!license) return [];
+  const sanitized = sanitizeStatus(license) as LicenseSummary;
+  const lines = [`License status: ${sanitized.status || 'unknown'}`];
+  if (sanitized.featuresDeclined) {
+    lines.push('License features declined: true');
+  }
+  if (sanitized.reason) {
+    lines.push(`License reason: ${sanitizeString(sanitized.reason)}`);
+  }
+  if (sanitized.source) {
+    lines.push(`License source: ${sanitizeString(sanitized.source)}`);
+  }
+  if (isAuthDenied(sanitized)) {
+    lines.push(`License recovery guidance: ${LICENSE_RECOVERY_GUIDANCE}`);
+  }
+  return lines;
 }
 
 export interface IntellijIndexParams {
@@ -68,43 +134,67 @@ export async function executeIntellijIndex(
   const action = params.action || 'status';
 
   if (action === 'status') {
-    const snapshot = await readState(systemPath, projectRoot);
+    const rawSnapshot = await readState(systemPath, projectRoot);
+    const snapshot = sanitizeStatus(rawSnapshot) as ProjectStateResult;
+    const authDenied = isAuthDenied(snapshot.license);
     if (snapshot.phase === 'not-started') {
+      const textLines = [
+        `IntelliJ index status: not-started for project ${projectRoot}.`,
+        'No active IntelliJ connection found. Use /intellij start to start the service, then run an LSP query to connect.',
+        ...formatLicenseLines(snapshot.license),
+        ...formatFailureLines(snapshot.failure, systemPath),
+      ];
       return {
         content: [
           {
             type: 'text',
-            text: `IntelliJ index status: not-started for project ${projectRoot}.\nNo active IntelliJ connection found. Use /intellij start to start the service, then run an LSP query to connect.`,
+            text: sanitizeString(textLines.join('\n')),
           },
         ],
-        details: { project: projectRoot, ...snapshot },
-        isError: false,
+        details: sanitizeStatus({ project: projectRoot, ...snapshot }) as IntellijIndexDetails,
+        isError: authDenied,
       };
     }
 
     const lines = [`IntelliJ index phase: ${snapshot.phase}`, `Project: ${projectRoot}`];
-    if (snapshot.detail) lines.push(`Detail: ${snapshot.detail}`);
+    if (snapshot.detail) lines.push(`Detail: ${sanitizeString(snapshot.detail)}`);
     if (snapshot.progress?.percentage !== undefined && snapshot.progress.percentage >= 0) {
       lines.push(`Progress: ${Math.round(snapshot.progress.percentage)}%`);
     }
     if (snapshot.progress?.message) {
-      lines.push(`Progress message: ${snapshot.progress.message}`);
+      lines.push(`Progress message: ${sanitizeString(snapshot.progress.message)}`);
     }
     if (snapshot.live === false) lines.push('Connection: none (last session ended)');
     if (snapshot.connectionId) lines.push(`Connection ID: ${snapshot.connectionId}`);
+    lines.push(...formatLicenseLines(snapshot.license));
+    lines.push(...formatFailureLines(snapshot.failure, systemPath));
 
     return {
-      content: [{ type: 'text', text: lines.join('\n') }],
-      details: {
+      content: [{ type: 'text', text: sanitizeString(lines.join('\n')) }],
+      details: sanitizeStatus({
         project: projectRoot,
         ...snapshot,
-      },
-      isError: snapshot.phase === 'failed',
+      }) as IntellijIndexDetails,
+      isError: snapshot.phase === 'failed' || authDenied,
     };
   }
 
   if (action === 'wait') {
-    let current = await readState(systemPath, projectRoot);
+    const rawCurrent = await readState(systemPath, projectRoot);
+    let current = sanitizeStatus(rawCurrent) as ProjectStateResult;
+    if (isAuthDenied(current.license)) {
+      const authLines = [
+        `IntelliJ authorization required for project ${projectRoot}: ${current.license?.reason || current.license?.status || 'features declined'}.`,
+        `Guidance: ${LICENSE_RECOVERY_GUIDANCE}`,
+        ...formatLicenseLines(current.license),
+        ...formatFailureLines(current.failure, systemPath),
+      ];
+      return {
+        content: [{ type: 'text', text: sanitizeString(authLines.join('\n')) }],
+        details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
+        isError: true,
+      };
+    }
 
     if (current.phase === 'not-started') {
       return {
@@ -127,20 +217,25 @@ export async function executeIntellijIndex(
             text: `IntelliJ index is ready for project ${projectRoot}.`,
           },
         ],
-        details: { project: projectRoot, ...current },
+        details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
         isError: false,
       };
     }
 
     if (current.phase === 'failed' || current.phase === 'disconnected') {
+      const failLines = [
+        `IntelliJ index is in ${current.phase} state for project ${projectRoot}: ${current.detail || 'Connection stopped'}.`,
+        ...formatLicenseLines(current.license),
+        ...formatFailureLines(current.failure, systemPath),
+      ];
       return {
         content: [
           {
             type: 'text',
-            text: `IntelliJ index is in ${current.phase} state for project ${projectRoot}: ${current.detail || 'Connection stopped'}.`,
+            text: sanitizeString(failLines.join('\n')),
           },
         ],
-        details: { project: projectRoot, ...current },
+        details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
         isError: true,
       };
     }
@@ -152,7 +247,11 @@ export async function executeIntellijIndex(
             text: `No active IntelliJ connection for ${projectRoot}; the last session ended in phase ${current.phase}. Cannot wait without a live bridge. Run an LSP query to reconnect; if the service is stopped, use /intellij start first.`,
           },
         ],
-        details: { live: false, project: projectRoot, ...current },
+        details: sanitizeStatus({
+          live: false,
+          project: projectRoot,
+          ...current,
+        }) as IntellijIndexDetails,
         isError: false,
       };
     }
@@ -195,7 +294,22 @@ export async function executeIntellijIndex(
         throw err;
       }
 
-      current = await readState(systemPath, projectRoot);
+      const loopRawCurrent = await readState(systemPath, projectRoot);
+      current = sanitizeStatus(loopRawCurrent) as ProjectStateResult;
+
+      if (isAuthDenied(current.license)) {
+        const authLines = [
+          `IntelliJ authorization required for project ${projectRoot}: ${current.license?.reason || current.license?.status || 'features declined'}.`,
+          `Guidance: ${LICENSE_RECOVERY_GUIDANCE}`,
+          ...formatLicenseLines(current.license),
+          ...formatFailureLines(current.failure, systemPath),
+        ];
+        return {
+          content: [{ type: 'text', text: sanitizeString(authLines.join('\n')) }],
+          details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
+          isError: true,
+        };
+      }
 
       if (current.phase === 'ready' && current.live !== false) {
         return {
@@ -205,20 +319,25 @@ export async function executeIntellijIndex(
               text: `IntelliJ index is ready for project ${projectRoot}.`,
             },
           ],
-          details: { project: projectRoot, ...current },
+          details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
           isError: false,
         };
       }
 
       if (current.phase === 'failed' || current.phase === 'disconnected') {
+        const failLines = [
+          `IntelliJ index failed for project ${projectRoot}: ${current.detail || current.phase}.`,
+          ...formatLicenseLines(current.license),
+          ...formatFailureLines(current.failure, systemPath),
+        ];
         return {
           content: [
             {
               type: 'text',
-              text: `IntelliJ index failed for project ${projectRoot}: ${current.detail || current.phase}.`,
+              text: sanitizeString(failLines.join('\n')),
             },
           ],
-          details: { project: projectRoot, ...current },
+          details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
           isError: true,
         };
       }
@@ -231,21 +350,31 @@ export async function executeIntellijIndex(
               text: `No active IntelliJ connection for project ${projectRoot}; current phase: ${current.phase}. Run an LSP query to reconnect.`,
             },
           ],
-          details: { project: projectRoot, ...current },
+          details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijIndexDetails,
           isError: false,
         };
       }
     }
 
     // Timeout reached without failure: return still-indexing status
+    const timeoutLines = [
+      `IntelliJ index wait timed out after ${timeoutSec}s for project ${projectRoot}; project is still ${current.phase}${current.detail ? `: ${current.detail}` : ''}.`,
+      ...formatLicenseLines(current.license),
+      ...formatFailureLines(current.failure, systemPath),
+    ];
     return {
       content: [
         {
           type: 'text',
-          text: `IntelliJ index wait timed out after ${timeoutSec}s for project ${projectRoot}; project is still ${current.phase}${current.detail ? `: ${current.detail}` : ''}.`,
+          text: sanitizeString(timeoutLines.join('\n')),
         },
       ],
-      details: { project: projectRoot, timeout: timeoutSec, stillIndexing: true, ...current },
+      details: sanitizeStatus({
+        project: projectRoot,
+        timeout: timeoutSec,
+        stillIndexing: true,
+        ...current,
+      }) as IntellijIndexDetails,
       isError: false,
     };
   }
