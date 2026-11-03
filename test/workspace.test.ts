@@ -3,8 +3,7 @@ import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { asyncFramedStream, encode } from '../src/protocol.js';
-import { executeBuild } from '../src/run-core.js';
+import { executeBuild } from '../src/debug/run-core.js';
 import {
   applyWorkspaceOptions,
   cleanPath,
@@ -18,7 +17,8 @@ import {
   unsetWorkspaceEnvVar,
   validateEnvMap,
   validateJdk,
-} from '../src/workspace.js';
+} from '../src/project/workspace.js';
+import { asyncFramedStream, encode } from '../src/shared/protocol.js';
 
 async function createMockJdk(
   dir: string,
@@ -184,7 +184,7 @@ test('getWorkspaceInfo distinguishes savedJdk from verified runtime receipt', as
 
     await setWorkspaceJdk(projDir, jdk21, { configDir, systemPath });
 
-    const { canonicalizeProject } = await import('../src/metadata.js');
+    const { canonicalizeProject } = await import('../src/project/metadata.js');
     const { id } = canonicalizeProject(projDir);
     const receiptDir = join(systemPath, 'plugin-metadata', 'receipts');
     await mkdir(receiptDir, { recursive: true });
@@ -763,7 +763,7 @@ test('getWorkspaceInfo accurately tracks persistent importStatus receipt and mar
     // 2. Simulate successful reload receipt matching config revision
     const receiptsDir = join(systemPath, 'plugin-metadata', 'receipts');
     await mkdir(receiptsDir, { recursive: true });
-    const { canonicalizeProject } = await import('../src/metadata.js');
+    const { canonicalizeProject } = await import('../src/project/metadata.js');
     const { id } = canonicalizeProject(projDir);
     const importReceiptPath = join(receiptsDir, `${id}.import-status.json`);
 

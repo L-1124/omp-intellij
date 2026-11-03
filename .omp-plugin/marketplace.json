@@ -44,7 +44,7 @@
       "dapAdapters": {
         "intellij": {
           "command": "node",
-          "args": ["${OMP_PLUGIN_ROOT}/dist/dap-proxy.js"],
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
           "languages": ["java", "kotlin"],
           "fileTypes": [".java", ".kt", ".kts"],
           "rootMarkers": [
@@ -61,7 +61,7 @@
         },
         "intellij-gradle": {
           "command": "node",
-          "args": ["${OMP_PLUGIN_ROOT}/dist/dap-proxy.js"],
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
           "languages": ["java", "kotlin"],
           "connectMode": "stdio",
           "launchDefaults": {
@@ -72,7 +72,7 @@
         },
         "intellij-test": {
           "command": "node",
-          "args": ["${OMP_PLUGIN_ROOT}/dist/dap-proxy.js"],
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
           "languages": ["java", "kotlin"],
           "connectMode": "stdio",
           "launchDefaults": {

@@ -2,8 +2,6 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import type { Socket } from 'node:net';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { canonicalizeProject } from './metadata.js';
-import { findProjectRoot } from './readiness.js';
 import {
   type CreateLspSessionOptions,
   createLspSession,
@@ -11,8 +9,10 @@ import {
   resolveBuildCommand,
   resolveLaunch,
   toLspFileUri,
-} from './run-core.js';
-import { sanitizeStatus, sanitizeString } from './runtime-status.js';
+} from '../debug/run-core.js';
+import { sanitizeStatus, sanitizeString } from '../shared/runtime-status.js';
+import { canonicalizeProject } from './metadata.js';
+import { findProjectRoot } from './readiness.js';
 import { getWorkspaceConfigDir, maskConfiguredSecrets, validateEnvMap } from './workspace.js';
 
 export interface WorkspaceModelReport {

@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { promisify } from 'node:util';
-import type { ServerBundle } from '../src/server-bundles.js';
-import { readInstallState } from '../src/server-install.js';
+import type { ServerBundle } from '../src/server/bundles.js';
+import { readInstallState } from '../src/server/install.js';
 
 interface WorkerEvent {
   type: string;
@@ -82,7 +82,7 @@ async function installFixture(t: TestContext) {
 }
 
 function installWorker(dir: string, bundle: ServerBundle, workers: InstallerWorker[]) {
-  const module = new URL('../src/server-install.js', import.meta.url).href;
+  const module = new URL('../src/server/install.js', import.meta.url).href;
   const child = spawn(
     process.execPath,
     [

@@ -1,33 +1,33 @@
 import { join, resolve } from 'node:path';
-import { type ProjectStateResult, readProjectState } from './connection-state.js';
-import { type DoctorReport, formatDoctorReport, inspectDoctor } from './doctor.js';
+import { type ProjectStateResult, readProjectState } from '../project/connection-state.js';
+import { findProjectRoot } from '../project/readiness.js';
+import {
+  getWorkspaceInfo as defaultGetWorkspaceInfo,
+  reimportWorkspace as defaultReimportWorkspace,
+  type ReimportWorkspaceResult,
+  type WorkspaceInfo,
+} from '../project/workspace.js';
+import {
+  formatModelLines,
+  inspectWorkspaceModel,
+  serializeWorkspaceModelError,
+  type WorkspaceModelReport,
+} from '../project/workspace-model.js';
+import { settings } from '../server/service.js';
 import type {
   ExtensionContext,
   ExtensionPluginInstance,
   ToolResult,
   ToolUpdate,
-} from './extension-types.js';
-import { findProjectRoot } from './readiness.js';
+} from '../shared/extension-types.js';
 import {
   type FailureDetail,
   LICENSE_RECOVERY_GUIDANCE,
   type LicenseSummary,
   sanitizeStatus,
   sanitizeString,
-} from './runtime-status.js';
-import { settings } from './service.js';
-import {
-  getWorkspaceInfo as defaultGetWorkspaceInfo,
-  reimportWorkspace as defaultReimportWorkspace,
-  type ReimportWorkspaceResult,
-  type WorkspaceInfo,
-} from './workspace.js';
-import {
-  formatModelLines,
-  inspectWorkspaceModel,
-  serializeWorkspaceModelError,
-  type WorkspaceModelReport,
-} from './workspace-model.js';
+} from '../shared/runtime-status.js';
+import { type DoctorReport, formatDoctorReport, inspectDoctor } from './doctor.js';
 
 export interface IntellijWorkspaceContext {
   projectType?: 'maven' | 'gradle' | 'unknown';

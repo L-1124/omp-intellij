@@ -11,9 +11,9 @@ import {
   getDebugSessionsDir,
   listDebugSessions,
   recoverDebugSession,
-} from '../src/debug-control.js';
-import extension from '../src/extension.js';
-import { canonicalizeProject } from '../src/metadata.js';
+} from '../src/debug/control.js';
+import extension from '../src/extension/extension.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
 function createTempDir(prefix: string): string {

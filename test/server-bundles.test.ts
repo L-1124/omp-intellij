@@ -9,7 +9,7 @@ import {
   resolveServerBundle,
   serverBundle,
   validateServerVersion,
-} from '../src/server-bundles.js';
+} from '../src/server/bundles.js';
 
 test('validateServerVersion accepts 3 or 4 dot-separated numeric segments', () => {
   assert.equal(validateServerVersion('263.7084.0'), '263.7084.0');

@@ -7,7 +7,7 @@ import {
   connectionCloseState,
   createConnectionState,
   readProjectState,
-} from '../src/connection-state.js';
+} from '../src/project/connection-state.js';
 
 test('connection reset preserves the cause without marking project import failed', async () => {
   const systemPath = await mkdtemp(join(tmpdir(), 'intellij-reset-'));

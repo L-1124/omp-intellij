@@ -1,6 +1,7 @@
 import type { Dirent } from 'node:fs';
 import { lstat, readdir, readFile, rm, statfs } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isServerAlive, settings } from '../server/service.js';
 import {
   canonicalizeProject,
   getActiveLeases,
@@ -8,7 +9,6 @@ import {
   type LeaseRecord,
   type ProjectRecord,
 } from './metadata.js';
-import { isServerAlive, settings } from './service.js';
 
 export async function computeDirectorySize(dirPath: string): Promise<number> {
   let totalBytes = 0;

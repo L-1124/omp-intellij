@@ -2,26 +2,26 @@ import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type ProjectStateResult, readProjectState } from './connection-state.js';
-import { readEulaAcceptance, readServerEula } from './eula.js';
-import { canonicalizeProject } from './metadata.js';
-import { sanitizeString } from './runtime-status.js';
-import { DEFAULT_SERVER_VERSION } from './server-bundles.js';
-import { readServerConfig, type ServerConfiguration, serverConfigFile } from './server-config.js';
-import { findInstalled } from './server-install.js';
+import { type ProjectStateResult, readProjectState } from '../project/connection-state.js';
+import { canonicalizeProject } from '../project/metadata.js';
+import {
+  getWorkspaceConfigDir,
+  getWorkspaceInfo,
+  maskConfiguredSecrets,
+  validateJdk,
+} from '../project/workspace.js';
+import { DEFAULT_SERVER_VERSION } from '../server/bundles.js';
+import { readServerConfig, type ServerConfiguration, serverConfigFile } from '../server/config.js';
+import { readEulaAcceptance, readServerEula } from '../server/eula.js';
+import { findInstalled } from '../server/install.js';
 import {
   endpoint,
   type ServerOwnershipVerification,
   settings,
   status,
   verifyServerOwnership,
-} from './service.js';
-import {
-  getWorkspaceConfigDir,
-  getWorkspaceInfo,
-  maskConfiguredSecrets,
-  validateJdk,
-} from './workspace.js';
+} from '../server/service.js';
+import { sanitizeString } from '../shared/runtime-status.js';
 
 export type DoctorSeverity = 'ok' | 'warning' | 'error' | 'unknown';
 

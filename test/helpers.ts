@@ -12,7 +12,7 @@ import type {
   ZodObjectLike,
   ZodRecordLike,
   ZodStringLike,
-} from '../src/extension-types.js';
+} from '../src/shared/extension-types.js';
 
 export interface MockNotification {
   msg: string;

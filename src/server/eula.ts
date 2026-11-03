@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { serverConfigFile } from './server-config.js';
+import { serverConfigFile } from './config.js';
 
 export interface EulaDocument {
   executable: string;

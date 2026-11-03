@@ -5,6 +5,9 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promise
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import type { LspSession } from '../debug/run-core.js';
+import { settings } from '../server/service.js';
+import { sanitizeString } from '../shared/runtime-status.js';
 import { getHostInitializationOptions } from './configuration.js';
 import {
   canonicalizeProject,
@@ -12,9 +15,6 @@ import {
   getProjectLedger,
   type ProjectRecord,
 } from './metadata.js';
-import type { LspSession } from './run-core.js';
-import { sanitizeString } from './runtime-status.js';
-import { settings } from './service.js';
 
 export function cleanPath(input: unknown): string {
   if (typeof input !== 'string') return String(input ?? '');
@@ -957,7 +957,7 @@ export async function reimportWorkspace(
   try {
     try {
       // Dynamic import to avoid circular dependency: run-core.ts imports workspace.ts
-      const { createLspSession } = await import('./run-core.js');
+      const { createLspSession } = await import('../debug/run-core.js');
       session = await createLspSession(nativePath, {
         signal: options.signal,
         requestWaitTimeoutMs: waitTimeout,
@@ -989,7 +989,7 @@ export async function reimportWorkspace(
     const sourceFile = await findFirstSourceFile(nativePath);
     if (sourceFile && appliedJdk) {
       try {
-        const { resolveLaunch, toLspFileUri } = await import('./run-core.js');
+        const { resolveLaunch, toLspFileUri } = await import('../debug/run-core.js');
         const sourceFileUri = toLspFileUri(sourceFile, rootUri);
         const launch = await resolveLaunch(session, sourceFileUri);
         if (!launch?.javaExec) {

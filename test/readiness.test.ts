@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
-import type { ProjectStateResult } from '../src/connection-state.js';
-import { findProjectRoot, watchIndex } from '../src/readiness.js';
-import { detectProjectRoot } from '../src/run-core.js';
+import { detectProjectRoot } from '../src/debug/run-core.js';
+import type { ProjectStateResult } from '../src/project/connection-state.js';
+import { findProjectRoot, watchIndex } from '../src/project/readiness.js';
 
 test('findProjectRoot searches upward for project markers', async () => {
   const base = join(tmpdir(), 'omp-test-find-root-' + Math.random().toString(36).slice(2));

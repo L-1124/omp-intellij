@@ -8,29 +8,29 @@ import {
   getHostInitializationOptions,
   resolveConfigurationItems,
   stripRedactedPlaceholders,
-} from './configuration.js';
+} from '../project/configuration.js';
 import {
   connectionCloseState,
   createConnectionState,
   reduceConnectionState,
   type StateRecord,
-} from './connection-state.js';
+} from '../project/connection-state.js';
 import {
   canonicalizeProject,
   type LeaseHandle,
   recordConnection,
   recordReadiness,
-} from './metadata.js';
-import { encode, frameParser } from './protocol.js';
-import { findProjectRoot } from './readiness.js';
+} from '../project/metadata.js';
+import { findProjectRoot } from '../project/readiness.js';
+import { applyWorkspaceOptions, getWorkspaceInfo } from '../project/workspace.js';
+import { connectWithLease, settings } from '../server/service.js';
+import { encode, frameParser } from '../shared/protocol.js';
 import {
   type FailureDetail,
   LICENSE_RECOVERY_GUIDANCE,
   RpcResponseError,
   sanitizeString,
-} from './runtime-status.js';
-import { connectWithLease, settings } from './service.js';
-import { applyWorkspaceOptions, getWorkspaceInfo } from './workspace.js';
+} from '../shared/runtime-status.js';
 
 export function findMainMethodLine(fileContent: string): number | null {
   const lines = fileContent.split(/\r?\n/);

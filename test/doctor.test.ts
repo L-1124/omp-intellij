@@ -4,9 +4,9 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { formatDoctorReport, inspectDoctor } from '../src/doctor.js';
-import extension from '../src/extension.js';
-import { canonicalizeProject } from '../src/metadata.js';
+import { formatDoctorReport, inspectDoctor } from '../src/extension/doctor.js';
+import extension from '../src/extension/extension.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
 interface TestFixtureEnv {

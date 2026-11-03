@@ -4,29 +4,29 @@ import { mkdir, open, readdir, readFile, readlink, rm, writeFile } from 'node:fs
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from '../project/metadata.js';
+import { DEFAULT_SERVER_VERSION } from './bundles.js';
+import { readServerConfig, trackInstallation } from './config.js';
 import { requireAcceptedEula } from './eula.js';
+import { findInstalled } from './install.js';
 import {
   type LockHandle,
   acquireLifecycleLock as rawAcquireLifecycleLock,
   withLifecycleLock as rawWithLifecycleLock,
   releaseLifecycleLock,
 } from './lifecycle-lock.js';
-import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from './metadata.js';
-import { DEFAULT_SERVER_VERSION } from './server-bundles.js';
-import { readServerConfig, trackInstallation } from './server-config.js';
-import { findInstalled } from './server-install.js';
 
 export { type LockHandle, releaseLifecycleLock };
 
-import type { PluginSettings } from './types.js';
+import type { PluginSettings } from '../shared/types.js';
 
 async function loadSettings(): Promise<PluginSettings> {
   const configuredPath = process.env.OMP_INTELLIJ_SETTINGS;
   const candidates: Array<URL | string> = configuredPath
     ? [configuredPath]
     : [
-        new URL('../settings.json', import.meta.url),
         new URL('../../settings.json', import.meta.url),
+        new URL('../../../settings.json', import.meta.url),
       ];
   for (const url of candidates) {
     try {

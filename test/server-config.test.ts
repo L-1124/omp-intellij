@@ -9,7 +9,7 @@ import {
   readServerConfig,
   saveServerConfig,
   trackInstallation,
-} from '../src/server-config.js';
+} from '../src/server/config.js';
 
 async function temporaryConfig(t: { after(fn: () => Promise<void>): void }) {
   const root = await mkdtemp(join(tmpdir(), 'omp server config '));

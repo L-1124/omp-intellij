@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import {
-  EulaNotAcceptedError,
   acceptServerEula,
+  EulaNotAcceptedError,
   readEulaAcceptance,
   readServerEula,
   requireAcceptedEula,
-} from '../src/eula.js';
+} from '../src/server/eula.js';
 
 interface TestEnv {
   root: string;

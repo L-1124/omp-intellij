@@ -363,10 +363,9 @@ export async function resolveConfigurationItems(
 }
 
 export async function loadDefaultPluginSettings(): Promise<Record<string, unknown>> {
-  // Support both src/ and dist/ / dist-test/ directory layouts without duplicating manifest
   const candidates: URL[] = [
-    new URL('../.omp-plugin/marketplace.json', import.meta.url),
     new URL('../../.omp-plugin/marketplace.json', import.meta.url),
+    new URL('../../../.omp-plugin/marketplace.json', import.meta.url),
   ];
 
   for (const url of candidates) {

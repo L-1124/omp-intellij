@@ -7,8 +7,8 @@ import {
   createConnectionState,
   readProjectState,
   reduceConnectionState,
-} from '../src/connection-state.js';
-import { canonicalizeProject } from '../src/metadata.js';
+} from '../src/project/connection-state.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
 
 test('concurrent status reads preserve the final closed record and leave no temporary files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'omp-record-read-close-'));

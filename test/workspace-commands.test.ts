@@ -3,10 +3,10 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import extension, { parseJdkPath } from '../src/extension.js';
-import type { SelectItem } from '../src/extension-types.js';
-import { canonicalizeProject } from '../src/metadata.js';
-import type { DiscoveredJdkItem, WorkspaceInfo } from '../src/workspace.js';
+import extension, { parseJdkPath } from '../src/extension/extension.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
+import type { DiscoveredJdkItem, WorkspaceInfo } from '../src/project/workspace.js';
+import type { SelectItem } from '../src/shared/extension-types.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
 test('parseJdkPath handles unquoted and quoted paths with spaces', () => {

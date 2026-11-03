@@ -3,15 +3,23 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { applyPrune, computePruneCandidates, getCacheInventory } from '../src/cache-manager.js';
+import {
+  applyPrune,
+  computePruneCandidates,
+  getCacheInventory,
+} from '../src/project/cache-manager.js';
 import {
   createLease,
   getActiveLeases,
   getProjectLedger,
   recordConnection,
   recordReadiness,
-} from '../src/metadata.js';
-import { acquireLifecycleLock, isServerAlive, releaseLifecycleLock } from '../src/service.js';
+} from '../src/project/metadata.js';
+import {
+  acquireLifecycleLock,
+  isServerAlive,
+  releaseLifecycleLock,
+} from '../src/server/service.js';
 
 test('lifecycle lock: stale observer with invalid token cannot delete new owner lock (ABA prevention)', async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lock-test-'));

@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { TestContext } from 'node:test';
-import { type DapProxySession, startDapProxy } from '../src/dap-proxy.js';
-import { encode, frameParser } from '../src/protocol.js';
+import { type DapProxySession, startDapProxy } from '../src/debug/dap-proxy.js';
 import {
   type CreateLspSessionOptions,
   type LspSession,
   createLspSession as runCoreCreateLspSession,
-} from '../src/run-core.js';
+} from '../src/debug/run-core.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 
 export interface DapRequest {
   seq: number;

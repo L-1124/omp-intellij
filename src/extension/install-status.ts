@@ -1,5 +1,5 @@
-import { formatBytes } from './cache-manager.js';
-import type { InstallPhase, InstallState } from './server-install.js';
+import { formatBytes } from '../project/cache-manager.js';
+import type { InstallPhase, InstallState } from '../server/install.js';
 
 export function sanitizeDetail(detail: unknown, maxLength: number = 60): string {
   if (!detail || typeof detail !== 'string') return '';

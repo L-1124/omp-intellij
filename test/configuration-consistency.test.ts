@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createLspSession } from '../src/debug/run-core.js';
 import {
   findProjectIdForScope,
   getHostInitializationOptions,
@@ -19,10 +20,9 @@ import {
   saveProjectConfiguration,
   stripRedactedPlaceholders,
   updateProjectSettings,
-} from '../src/configuration.js';
-import { canonicalizeProject } from '../src/metadata.js';
-import { encode, frameParser } from '../src/protocol.js';
-import { createLspSession } from '../src/run-core.js';
+} from '../src/project/configuration.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 
 test('resolveConfigurationSection: exact literal keys and dotted traversal', () => {
   const settings = {

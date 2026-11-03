@@ -6,11 +6,11 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { acceptServerEula, type EulaDocument, readServerEula } from '../../src/eula.js';
-import { getActiveLeases } from '../../src/metadata.js';
-import { encode, frameParser } from '../../src/protocol.js';
-import { terminateMarkedProcess } from '../../src/run-core.js';
-import { sanitizeString } from '../../src/runtime-status.js';
+import { terminateMarkedProcess } from '../../src/debug/run-core.js';
+import { getActiveLeases } from '../../src/project/metadata.js';
+import { acceptServerEula, type EulaDocument, readServerEula } from '../../src/server/eula.js';
+import { encode, frameParser } from '../../src/shared/protocol.js';
+import { sanitizeString } from '../../src/shared/runtime-status.js';
 
 export { readServerEula };
 
@@ -432,8 +432,9 @@ export async function generateBigTree(targetDir: string, classCount = 5000): Pro
 }
 
 function resolveScript(name: 'bridge' | 'dap-proxy'): string {
-  const testDist = resolve('dist-test', 'src', `${name}.js`);
-  return existsSync(testDist) ? testDist : resolve('dist', `${name}.js`);
+  const script = name === 'dap-proxy' ? join('debug', `${name}.js`) : `${name}.js`;
+  const testDist = resolve('dist-test', 'src', script);
+  return existsSync(testDist) ? testDist : resolve('dist', script);
 }
 
 export interface LspMessage {

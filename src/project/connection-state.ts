@@ -1,16 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { canonicalizeProject } from './metadata.js';
+import { replaceFile } from '../shared/atomic-file.js';
 import {
   type FailureDetail,
-  type LicenseSummary,
   LICENSE_RECOVERY_GUIDANCE,
+  type LicenseSummary,
   projectLicenseState,
   sanitizeStatus,
   sanitizeString,
-} from './runtime-status.js';
+} from '../shared/runtime-status.js';
+import { canonicalizeProject } from './metadata.js';
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -401,25 +401,7 @@ export function createConnectionState(options: {
         await mkdir(dir, { recursive: true });
         const sanitizedSnapshot = sanitizeStatus(snapshot);
         await writeFile(tempPath, JSON.stringify(sanitizedSnapshot, null, 2), 'utf8');
-        const deadline = Date.now() + 1000;
-        for (;;) {
-          try {
-            await rename(tempPath, filePath);
-            break;
-          } catch (error: unknown) {
-            // Windows readers can briefly deny replacement of an otherwise writable record.
-            if (
-              process.platform !== 'win32' ||
-              Date.now() >= deadline ||
-              !error ||
-              typeof error !== 'object' ||
-              !('code' in error) ||
-              (error.code !== 'EPERM' && error.code !== 'EACCES')
-            )
-              throw error;
-            await sleep(10);
-          }
-        }
+        await replaceFile(tempPath, filePath);
       } catch (err: unknown) {
         const rawMsg = err instanceof Error ? err.message : String(err);
         const message = sanitizeString(rawMsg);

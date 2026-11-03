@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { withLifecycleLock } from './lifecycle-lock.js';
+import { withLifecycleLock } from '../server/lifecycle-lock.js';
 
 export interface CanonicalProject {
   canonicalPath: string;

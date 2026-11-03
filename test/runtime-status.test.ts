@@ -3,11 +3,11 @@ import test from 'node:test';
 import {
   type FailureDetail,
   LICENSE_RECOVERY_GUIDANCE,
-  RpcResponseError,
   projectLicenseState,
+  RpcResponseError,
   sanitizeStatus,
   sanitizeString,
-} from '../src/runtime-status.js';
+} from '../src/shared/runtime-status.js';
 
 test('sanitizeStatus: named sensitive keys are redacted case-insensitively', () => {
   const input = {

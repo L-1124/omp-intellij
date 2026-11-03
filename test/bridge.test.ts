@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { encode, frameParser } from '../src/protocol.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 
 test('bridge executable answers initialize and forwards semantic requests', {
   timeout: 15000,

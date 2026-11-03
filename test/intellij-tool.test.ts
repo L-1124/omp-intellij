@@ -5,12 +5,12 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import type { ProjectStateResult } from '../src/connection-state.js';
-import type { ToolUpdate } from '../src/extension-types.js';
-import { executeIntellij, registerIntellij } from '../src/intellij-tool.js';
-import { encode, frameParser } from '../src/protocol.js';
-import { createLspSession } from '../src/run-core.js';
-import type { WorkspaceInfo } from '../src/workspace.js';
+import { createLspSession } from '../src/debug/run-core.js';
+import { executeIntellij, registerIntellij } from '../src/extension/intellij-tool.js';
+import type { ProjectStateResult } from '../src/project/connection-state.js';
+import type { WorkspaceInfo } from '../src/project/workspace.js';
+import type { ToolUpdate } from '../src/shared/extension-types.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 import { createMockPi } from './helpers.js';
 
 test('status action on not-started returns clear next step without initiating connection', async () => {

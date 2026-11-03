@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { acceptServerEula, readServerEula } from '../src/eula.js';
+import { acceptServerEula, readServerEula } from '../src/server/eula.js';
 
 for (const invalid of [
   { host: '0.0.0.0' },
@@ -37,7 +37,7 @@ for (const invalid of [
         [
           '--input-type=module',
           '-e',
-          `await import(${JSON.stringify(new URL('../src/service.js', import.meta.url).href)})`,
+          `await import(${JSON.stringify(new URL('../src/server/service.js', import.meta.url).href)})`,
         ],
         {
           env: { ...process.env, OMP_INTELLIJ_SETTINGS: config },
@@ -71,8 +71,8 @@ test('portable settings default to user storage and managed installation without
       [
         '--input-type=module',
         '-e',
-        `import { settings } from ${JSON.stringify(new URL('../src/service.js', import.meta.url).href)};
-         import { readServerConfig } from ${JSON.stringify(new URL('../src/server-config.js', import.meta.url).href)};
+        `import { settings } from ${JSON.stringify(new URL('../src/server/service.js', import.meta.url).href)};
+         import { readServerConfig } from ${JSON.stringify(new URL('../src/server/config.js', import.meta.url).href)};
          console.log(JSON.stringify({
            systemPath: settings.systemPath,
            server: await readServerConfig(settings.executable, { configFile: ${JSON.stringify(join(root, 'new-user.json'))} }),
@@ -120,7 +120,7 @@ test('starting an absent managed server gives explicit installation guidance wit
       [
         '--input-type=module',
         '-e',
-        `import { ensureServer } from ${JSON.stringify(new URL('../src/service.js', import.meta.url).href)};
+        `import { ensureServer } from ${JSON.stringify(new URL('../src/server/service.js', import.meta.url).href)};
          let downloads = 0;
          globalThis.fetch = () => { downloads++; throw new Error('Unexpected download'); };
          try { await ensureServer(); process.exitCode = 1; }
@@ -180,7 +180,7 @@ test('ensureServer rejects spawn when EULA is not accepted for executable', asyn
       [
         '--input-type=module',
         '-e',
-        `import { ensureServer } from ${JSON.stringify(new URL('../src/service.js', import.meta.url).href)};
+        `import { ensureServer } from ${JSON.stringify(new URL('../src/server/service.js', import.meta.url).href)};
          try {
            await ensureServer();
            process.exit(0);

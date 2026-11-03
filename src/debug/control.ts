@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { canonicalizeProject } from './metadata.js';
+import { canonicalizeProject } from '../project/metadata.js';
 
 export type DebugPhase =
   | 'connecting-lsp'

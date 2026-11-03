@@ -64,4 +64,4 @@ for (const [filename, wrapper, declaration] of [
   }
 }
 
-export { default } from './extension.js';
+export { default } from './extension/extension.js';

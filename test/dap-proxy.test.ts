@@ -8,27 +8,27 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  type DebugSnapshot,
+  listDebugSessions,
+  recoverDebugSession,
+} from '../src/debug/control.js';
+import {
   type DapResponseMessage,
   isDirectExecution,
   normalizeSourcePaths,
   resolveSourceFile,
-} from '../src/dap-proxy.js';
-import {
-  type DebugSnapshot,
-  listDebugSessions,
-  recoverDebugSession,
-} from '../src/debug-control.js';
-import { encode, frameParser } from '../src/protocol.js';
+} from '../src/debug/dap-proxy.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 import { createDapTestHarness, type DapRequest, type DapTestHarness } from './dap-fixture.js';
 
 function getProxyScriptPath(): string {
-  const compiledPath = fileURLToPath(new URL('../src/dap-proxy.js', import.meta.url));
-  const sourcePath = fileURLToPath(new URL('../../src/dap-proxy.ts', import.meta.url));
+  const compiledPath = fileURLToPath(new URL('../src/debug/dap-proxy.js', import.meta.url));
+  const sourcePath = fileURLToPath(new URL('../../src/debug/dap-proxy.ts', import.meta.url));
   return existsSync(compiledPath) ? compiledPath : sourcePath;
 }
 
 test('importing dap-proxy preserves stdin and signal listeners and exits cleanly', () => {
-  const moduleUrl = new URL('../src/dap-proxy.js', import.meta.url).href;
+  const moduleUrl = new URL('../src/debug/dap-proxy.js', import.meta.url).href;
   const child = spawnSync(
     process.execPath,
     [

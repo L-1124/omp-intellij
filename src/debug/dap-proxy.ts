@@ -6,13 +6,14 @@ import net from 'node:net';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { settings } from '../server/service.js';
+import { encode, frameParser } from '../shared/protocol.js';
 import {
   createDebugControl,
   type DebugControlHandle,
   type DebugPhase,
   type DebugSnapshot,
-} from './debug-control.js';
-import { encode, frameParser } from './protocol.js';
+} from './control.js';
 import {
   createLspSession,
   detectProjectRoot,
@@ -28,7 +29,6 @@ import {
   terminateMarkedProcess,
   toLspFileUri,
 } from './run-core.js';
-import { settings } from './service.js';
 import { resolveTestTarget } from './test-launch.js';
 
 export interface DapBaseMessage {

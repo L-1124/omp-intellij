@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { LaunchPaths, LspSession } from '../src/run-core.js';
-import { discoverTestsInFile, resolveTestLaunch, resolveTestTarget } from '../src/test-launch.js';
+import type { LaunchPaths, LspSession } from '../src/debug/run-core.js';
+import {
+  discoverTestsInFile,
+  resolveTestLaunch,
+  resolveTestTarget,
+} from '../src/debug/test-launch.js';
 
 function createMockLspSession(
   handler: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>,

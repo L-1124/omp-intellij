@@ -1,9 +1,9 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { settings } from '../server/service.js';
+import type { FailureDetail, LicenseSummary } from '../shared/runtime-status.js';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
-import type { FailureDetail, LicenseSummary } from './runtime-status.js';
-import { settings } from './service.js';
 
 export const PROJECT_ROOT_MARKERS = [
   'pom.xml',

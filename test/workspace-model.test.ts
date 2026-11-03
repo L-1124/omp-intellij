@@ -5,14 +5,14 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { canonicalizeProject } from '../src/metadata.js';
-import { encode, frameParser } from '../src/protocol.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
 import {
   inspectWorkspaceModel,
   isPathContained,
   serializeWorkspaceModelError,
   validateSourceFile,
-} from '../src/workspace-model.js';
+} from '../src/project/workspace-model.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 
 interface TestServerFixture {
   server: net.Server;

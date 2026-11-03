@@ -6,11 +6,11 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { createDebugControl } from '../src/debug-control.js';
-import { createLease } from '../src/metadata.js';
-import { readServerConfig, saveServerConfig } from '../src/server-config.js';
-import { findInstalled, listInstalledVersions } from '../src/server-install.js';
-import { selectServerVersion } from '../src/server-versions.js';
+import { createDebugControl } from '../src/debug/control.js';
+import { createLease } from '../src/project/metadata.js';
+import { readServerConfig, saveServerConfig } from '../src/server/config.js';
+import { findInstalled, listInstalledVersions } from '../src/server/install.js';
+import { selectServerVersion } from '../src/server/versions.js';
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'omp-version-'));
@@ -116,7 +116,7 @@ test('selecting and rolling back versions preserves unrelated config, other inst
       '--input-type=module',
       '-e',
       `
-    import { ensureServer } from ${JSON.stringify(new URL('../src/service.js', import.meta.url).href)};
+    import { ensureServer } from ${JSON.stringify(new URL('../src/server/service.js', import.meta.url).href)};
     try { await ensureServer({ systemPath: ${JSON.stringify(options.systemPath)} }); process.exitCode = 1; }
     catch (error) { console.log(JSON.stringify({ code: error.code, executable: error.document?.executable })); }
   `,

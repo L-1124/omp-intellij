@@ -5,9 +5,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { createDebugControl } from '../src/debug-control.js';
-import { acceptServerEula, readServerEula } from '../src/eula.js';
-import { createLease, getActiveLeases } from '../src/metadata.js';
+import { createDebugControl } from '../src/debug/control.js';
+import { createLease, getActiveLeases } from '../src/project/metadata.js';
+import { acceptServerEula, readServerEula } from '../src/server/eula.js';
 import {
   acquireLifecycleLock,
   connectWithLease,
@@ -19,7 +19,7 @@ import {
   status,
   stopServer,
   verifyServerOwnership,
-} from '../src/service.js';
+} from '../src/server/service.js';
 
 async function startFakeServer(systemPath: string): Promise<{
   child: ChildProcess;

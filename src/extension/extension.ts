@@ -1,55 +1,49 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { listDebugSessions, recoverDebugSession } from '../debug/control.js';
 import {
   applyPrune,
   computePruneCandidates,
   formatBytes,
   getCacheInventory,
-} from './cache-manager.js';
-import { type ProjectStateResult, readProjectState } from './connection-state.js';
-import { listDebugSessions, recoverDebugSession } from './debug-control.js';
-import { formatDoctorReport, inspectDoctor } from './doctor.js';
-import { acceptServerEula, type EulaDocument, readEulaAcceptance, readServerEula } from './eula.js';
-import type { ExtensionContext, ExtensionPluginInstance } from './extension-types.js';
+} from '../project/cache-manager.js';
+import { type ProjectStateResult, readProjectState } from '../project/connection-state.js';
+import { recordConnection } from '../project/metadata.js';
 import {
-  formatInstallDescription,
-  formatInstallStatusText,
-  formatStatusText,
-  isInstallActive,
-  parseInstallArgs,
-} from './install-status.js';
-import { registerIntellij } from './intellij-tool.js';
-import { recordConnection } from './metadata.js';
-import { failureContentKey, findProjectRoot, licenseContentKey, watchIndex } from './readiness.js';
-import {
-  type FailureDetail,
-  LICENSE_RECOVERY_GUIDANCE,
-  type LicenseSummary,
-  sanitizeStatus,
-  sanitizeString,
-} from './runtime-status.js';
+  failureContentKey,
+  findProjectRoot,
+  licenseContentKey,
+  watchIndex,
+} from '../project/readiness.js';
+import type { DiscoveredJdkItem } from '../project/workspace.js';
+import * as defaultWorkspaceApi from '../project/workspace.js';
 import {
   DEFAULT_SERVER_VERSION,
   latestServerVersion as defaultLatestServerVersion,
   resolveServerBundle as defaultResolveServerBundle,
   serverBundle,
   validateServerVersion,
-} from './server-bundles.js';
+} from '../server/bundles.js';
 import {
   defaultInstallDir as defaultDefaultInstallDir,
   readObservedInstallState as defaultReadObservedInstallState,
   readServerConfig as defaultReadServerConfig,
   saveServerConfig as defaultSaveServerConfig,
   trackInstallation as defaultTrackInstallation,
-} from './server-config.js';
+} from '../server/config.js';
+import {
+  acceptServerEula,
+  type EulaDocument,
+  readEulaAcceptance,
+  readServerEula,
+} from '../server/eula.js';
 import {
   ensureInstalled as defaultEnsureInstalled,
   findInstalled as defaultFindInstalled,
   listInstalledVersions as defaultListInstalledVersions,
   readInstallState as defaultReadInstallState,
   type InstallState,
-} from './server-install.js';
-import { selectServerVersion as defaultSelectServerVersion } from './server-versions.js';
+} from '../server/install.js';
 import {
   endpoint,
   ensureServer,
@@ -59,9 +53,25 @@ import {
   status,
   stopServer,
   withLifecycleLock,
-} from './service.js';
-import type { DiscoveredJdkItem } from './workspace.js';
-import * as defaultWorkspaceApi from './workspace.js';
+} from '../server/service.js';
+import { selectServerVersion as defaultSelectServerVersion } from '../server/versions.js';
+import type { ExtensionContext, ExtensionPluginInstance } from '../shared/extension-types.js';
+import {
+  type FailureDetail,
+  LICENSE_RECOVERY_GUIDANCE,
+  type LicenseSummary,
+  sanitizeStatus,
+  sanitizeString,
+} from '../shared/runtime-status.js';
+import { formatDoctorReport, inspectDoctor } from './doctor.js';
+import {
+  formatInstallDescription,
+  formatInstallStatusText,
+  formatStatusText,
+  isInstallActive,
+  parseInstallArgs,
+} from './install-status.js';
+import { registerIntellij } from './intellij-tool.js';
 export function parseJdkPath(input: unknown): string {
   if (typeof input !== 'string') return '';
   let s = input.trim();

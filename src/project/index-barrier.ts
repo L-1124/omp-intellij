@@ -1,6 +1,6 @@
+import { encode } from '../shared/protocol.js';
+import { type FailureDetail, sanitizeStatus, sanitizeString } from '../shared/runtime-status.js';
 import { reduceConnectionState, type StateRecord } from './connection-state.js';
-import { encode } from './protocol.js';
-import { type FailureDetail, sanitizeStatus, sanitizeString } from './runtime-status.js';
 
 export { reduceConnectionState };
 

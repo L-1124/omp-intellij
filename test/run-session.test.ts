@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { canonicalizeProject } from '../src/metadata.js';
-import { encode, frameParser } from '../src/protocol.js';
-import { createLspSession } from '../src/run-core.js';
-import { RpcResponseError } from '../src/runtime-status.js';
+import { createLspSession } from '../src/debug/run-core.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
+import { RpcResponseError } from '../src/shared/runtime-status.js';
 
 interface RpcMessage {
   id?: number;

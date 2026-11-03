@@ -11,24 +11,24 @@ import {
   recordConfigurationItems,
   saveProjectConfiguration,
   updateProjectSettings,
-} from './configuration.js';
+} from './project/configuration.js';
 import {
   connectionCloseState,
   createConnectionState,
   type StateRecord,
-} from './connection-state.js';
-import { IndexBarrier } from './index-barrier.js';
+} from './project/connection-state.js';
+import { IndexBarrier } from './project/index-barrier.js';
 import {
   canonicalizeProject,
   type LeaseHandle,
   recordConnection,
   recordReadiness,
   replaceLease,
-} from './metadata.js';
-import { asyncFramedStream, encode, frameParser } from './protocol.js';
-import { type FailureDetail, sanitizeStatus, sanitizeString } from './runtime-status.js';
-import { connectWithLease, settings } from './service.js';
-import { applyWorkspaceOptions } from './workspace.js';
+} from './project/metadata.js';
+import { applyWorkspaceOptions } from './project/workspace.js';
+import { connectWithLease, settings } from './server/service.js';
+import { asyncFramedStream, encode, frameParser } from './shared/protocol.js';
+import { type FailureDetail, sanitizeStatus, sanitizeString } from './shared/runtime-status.js';
 
 export async function saveInitializeParams(
   params: unknown,

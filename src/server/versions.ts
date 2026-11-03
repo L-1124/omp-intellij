@@ -1,7 +1,7 @@
-import { getActiveLeases } from './metadata.js';
-import { validateServerVersion } from './server-bundles.js';
-import { defaultInstallDir, readServerConfig, saveServerConfig } from './server-config.js';
-import { findInstalled, type InstallResult } from './server-install.js';
+import { getActiveLeases } from '../project/metadata.js';
+import { validateServerVersion } from './bundles.js';
+import { defaultInstallDir, readServerConfig, saveServerConfig } from './config.js';
+import { findInstalled, type InstallResult } from './install.js';
 import {
   listAllActiveDebugSessions,
   settings,

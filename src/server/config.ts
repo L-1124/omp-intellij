@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { validateServerVersion } from './server-bundles.js';
-import { type InstallState, readInstallState } from './server-install.js';
+import { validateServerVersion } from './bundles.js';
+import { type InstallState, readInstallState } from './install.js';
 
 export type ServerConfiguration =
   | { mode: 'managed'; installDir: string; version?: string }

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { promisify } from 'node:util';
-import type { ServerBundle } from '../src/server-bundles.js';
+import type { ServerBundle } from '../src/server/bundles.js';
 import {
   ensureInstalled,
   findInstalled,
@@ -15,7 +15,7 @@ import {
   listInstalledVersions,
   readInstallState,
   validateArchiveEntry,
-} from '../src/server-install.js';
+} from '../src/server/install.js';
 
 const execFileAsync = promisify(execFile);
 const LAUNCHER_NAME =
@@ -492,7 +492,7 @@ test('waiter cancellation in separate process exits cleanly without timer leak',
     'utf8',
   );
 
-  const moduleUrl = new URL('../src/server-install.js', import.meta.url).href;
+  const moduleUrl = new URL('../src/server/install.js', import.meta.url).href;
   const script = `
     import { ensureInstalled } from ${JSON.stringify(moduleUrl)};
     const controller = new AbortController();

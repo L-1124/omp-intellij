@@ -18,7 +18,8 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { promisify } from 'node:util';
-import { DEFAULT_SERVER_VERSION, type ServerBundle, serverBundle } from './server-bundles.js';
+import { replaceFile } from '../shared/atomic-file.js';
+import { DEFAULT_SERVER_VERSION, type ServerBundle, serverBundle } from './bundles.js';
 
 const execFileAsync = promisify(execFile);
 const MISSING_OWNER_GRACE_MS = 10_000;
@@ -208,7 +209,7 @@ async function writeStateAtomically(installDir: string, state: InstallState): Pr
   try {
     const json = JSON.stringify(state, null, 2);
     await writeFile(tmpFile, json, 'utf8');
-    await rename(tmpFile, targetFile);
+    await replaceFile(tmpFile, targetFile);
   } catch (err) {
     await rm(tmpFile, { force: true }).catch(() => {});
     throw err;

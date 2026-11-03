@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { IndexBarrier } from '../src/index-barrier.js';
-import { encode, frameParser } from '../src/protocol.js';
+import { IndexBarrier } from '../src/project/index-barrier.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 
 interface DecodedMessage {
   id?: unknown;

@@ -3,10 +3,10 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { ProjectStateResult } from '../src/connection-state.js';
-import { readServerEula } from '../src/eula.js';
-import extension from '../src/extension.js';
-import { formatStatusText, sanitizeDetail } from '../src/install-status.js';
+import extension from '../src/extension/extension.js';
+import { formatStatusText, sanitizeDetail } from '../src/extension/install-status.js';
+import type { ProjectStateResult } from '../src/project/connection-state.js';
+import { readServerEula } from '../src/server/eula.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
 test('session_start ignores subagents', async () => {

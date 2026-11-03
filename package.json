@@ -16,7 +16,7 @@
   ],
   "bin": {
     "omp-intellij-lsp": "./dist/bridge.js",
-    "omp-intellij-dap": "./dist/dap-proxy.js"
+    "omp-intellij-dap": "./dist/debug/dap-proxy.js"
   },
   "scripts": {
     "build": "tsc",

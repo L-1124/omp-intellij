@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import net from 'node:net';
 import test, { type TestContext } from 'node:test';
-import { encode, frameParser } from '../src/protocol.js';
-import { executeBuild, runViaDap } from '../src/run-core.js';
+import { executeBuild, runViaDap } from '../src/debug/run-core.js';
+import { encode, frameParser } from '../src/shared/protocol.js';
 
 test('build preserves argv containing spaces and shell metacharacters', async () => {
   const literal = 'argument with spaces & | < > % ! ^ ( )';
