@@ -1,3 +1,11 @@
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
 export interface ServerBundle {
   version: string;
   url: string;
@@ -122,62 +130,162 @@ function timeoutSignal(signal?: AbortSignal): AbortSignal {
     : AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
 }
 
-async function readBoundedText(
-  response: Response,
-  maxBytes: number = MAX_RESPONSE_BYTES,
-): Promise<string> {
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<Buffer> {
   const contentLength = response.headers.get('content-length');
   if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
     await response.body?.cancel();
     throw new Error(`Response exceeds maximum allowed size of ${maxBytes} bytes`);
   }
-  if (response.body) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8', { fatal: true });
-    let totalBytes = 0;
-    let result = '';
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        totalBytes += value.byteLength;
-        if (totalBytes > maxBytes) {
-          throw new Error(`Response exceeded maximum allowed size of ${maxBytes} bytes`);
-        }
-        result += decoder.decode(value, { stream: true });
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        throw new Error(`Response exceeded maximum allowed size of ${maxBytes} bytes`);
       }
-      result += decoder.decode();
-      return result;
-    } catch (error: unknown) {
-      await reader.cancel().catch(() => {});
-      throw error;
-    } finally {
-      reader.releaseLock();
+      chunks.push(value);
     }
+    return Buffer.concat(chunks, size);
+  } catch (error: unknown) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
-  return '';
+}
+
+async function readBoundedText(response: Response): Promise<string> {
+  return new TextDecoder('utf-8', { fatal: true }).decode(
+    await readBoundedBytes(response, MAX_RESPONSE_BYTES),
+  );
 }
 
 export interface LatestServerVersionOptions {
   signal?: AbortSignal;
   fetch?: typeof fetch;
+  platform?: string;
+  arch?: string;
+}
+
+async function latestLuaVersion(fetchFn: typeof fetch, signal: AbortSignal): Promise<string> {
+  const response = await fetchFn(LATEST_VERSION_URL, { signal });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`Lua manifest: HTTP ${response.status} ${response.statusText}`);
+  }
+  return validateServerVersion(parseLatestVersionFromLua(await readBoundedText(response)));
+}
+
+async function latestVsxVersion(
+  fetchFn: typeof fetch,
+  signal: AbortSignal,
+  platform: string,
+  arch: string,
+): Promise<string> {
+  const base = 'https://open-vsx.org/api/JetBrains/intellij-server';
+  const target = `${platform}-${arch}`;
+  const response = await fetchFn(`${base}/${target}/latest`, { signal, redirect: 'error' });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`Open VSX metadata: HTTP ${response.status} ${response.statusText}`);
+  }
+  const metadata = JSON.parse(await readBoundedText(response));
+  if (
+    metadata?.namespace !== 'JetBrains' ||
+    metadata?.name !== 'intellij-server' ||
+    metadata?.targetPlatform !== target ||
+    metadata?.preRelease === true ||
+    typeof metadata?.version !== 'string' ||
+    !/^\d+(?:\.\d+){1,3}$/.test(metadata.version)
+  ) {
+    throw new Error('Invalid Open VSX extension metadata');
+  }
+  const expectedUrl = `${base}/${target}/${metadata.version}/file/JetBrains.intellij-server-${metadata.version}@${target}.vsix`;
+  if (metadata.files?.download !== expectedUrl) {
+    throw new Error('Unexpected Open VSX download URL');
+  }
+  let archive = await fetchFn(expectedUrl, { signal, redirect: 'manual' });
+  if ([301, 302, 303, 307, 308].includes(archive.status)) {
+    const location = archive.headers.get('location');
+    await archive.body?.cancel();
+    const storageUrl = `https://openvsx.eclipsecontent.org/JetBrains/intellij-server/${target}/${metadata.version}/JetBrains.intellij-server-${metadata.version}@${target}.vsix`;
+    if (location !== storageUrl) throw new Error('Unexpected Open VSX storage redirect');
+    archive = await fetchFn(storageUrl, { signal, redirect: 'error' });
+  }
+  if (!archive.ok) {
+    await archive.body?.cancel();
+    throw new Error(`Open VSX archive: HTTP ${archive.status} ${archive.statusText}`);
+  }
+  const bytes = await readBoundedBytes(archive, 4 * 1024 * 1024);
+  signal.throwIfAborted();
+  const directory = await mkdtemp(join(tmpdir(), 'omp-intellij-vsx-'));
+  try {
+    const file = join(directory, 'extension.vsix');
+    await writeFile(file, bytes);
+    const entry = 'extension/server-bundle.json';
+    const { stdout } = await execFileAsync(
+      process.platform === 'linux' ? 'unzip' : 'tar',
+      process.platform === 'linux' ? ['-p', file, entry] : ['-xf', file, '-O', entry],
+      { signal, maxBuffer: MAX_RESPONSE_BYTES, encoding: 'utf8', windowsHide: true },
+    );
+    const bundle = JSON.parse(stdout);
+    const version = validateServerVersion(bundle?.version);
+    const suffix = arch === 'arm64' ? '-aarch64' : '';
+    const name = `intellij-server-${version}${suffix}.${platforms[platform].extension}`;
+    if (
+      bundle.archiveName !== name ||
+      bundle.url !==
+        `https://download.jetbrains.com/language-server/intellij-server/${version}/${name}` ||
+      typeof bundle.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/i.test(bundle.sha256)
+    ) {
+      throw new Error('Invalid Open VSX server bundle');
+    }
+    return version;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 export async function latestServerVersion(options?: LatestServerVersionOptions): Promise<string> {
   const fetchFn = options?.fetch ?? fetch;
+  const platform = options?.platform ?? process.platform;
+  const arch = options?.arch ?? process.arch;
+  if (!platforms[platform]?.hashes[arch]) {
+    throw new Error(`No IntelliJ server bundle for ${platform}/${arch}`);
+  }
   const signal = timeoutSignal(options?.signal);
-
-  const response = await fetchFn(LATEST_VERSION_URL, { signal });
-  if (!response.ok) {
-    await response.body?.cancel();
+  signal.throwIfAborted();
+  const results = await Promise.allSettled([
+    latestLuaVersion(fetchFn, signal),
+    latestVsxVersion(fetchFn, signal, platform, arch),
+  ]);
+  options?.signal?.throwIfAborted();
+  const versions = results.flatMap((result) =>
+    result.status === 'fulfilled' ? [result.value] : [],
+  );
+  if (!versions.length) {
     throw new Error(
-      `Failed to fetch latest server version from ${LATEST_VERSION_URL}: HTTP ${response.status} ${response.statusText}`,
+      `Remote version lookup failed: ${results
+        .map((result) => (result.status === 'rejected' ? String(result.reason) : ''))
+        .join('; ')}`,
     );
   }
-
-  const text = await readBoundedText(response);
-  const version = parseLatestVersionFromLua(text);
-  return validateServerVersion(version);
+  versions.sort((a, b) => {
+    const left = a.split('.').map(BigInt);
+    const right = b.split('.').map(BigInt);
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+      const delta = (right[i] ?? 0n) - (left[i] ?? 0n);
+      if (delta !== 0n) return delta > 0n ? 1 : -1;
+    }
+    return 0;
+  });
+  return versions[0];
 }
 
 export interface ResolveServerBundleOptions {
@@ -213,6 +321,8 @@ export async function resolveServerBundle(
       ? await latestServerVersion({
           signal: deadlineSignal,
           fetch: options?.fetch,
+          platform,
+          arch,
         })
       : validateServerVersion(version);
 
