@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { terminateMarkedProcess } from '../../src/debug/run-core.js';
@@ -14,7 +14,7 @@ import { sanitizeString } from '../../src/shared/runtime-status.js';
 
 export { readServerEula };
 
-export interface P0Prerequisites {
+export interface IntegrationPrerequisites {
   serverExecutable: string;
   jdk17Path: string;
   jdk21Path: string;
@@ -22,21 +22,21 @@ export interface P0Prerequisites {
   eulaDoc: EulaDocument;
 }
 
-export async function verifyPrerequisites(): Promise<P0Prerequisites> {
+export async function verifyPrerequisites(): Promise<IntegrationPrerequisites> {
   const missing: string[] = [];
-  const server = process.env.OMP_P0_SERVER;
-  const jdk17 = process.env.OMP_P0_JDK17;
-  const jdk21 = process.env.OMP_P0_JDK21;
-  const eulaHash = process.env.OMP_P0_ACCEPTED_EULA_HASH;
+  const server = process.env.OMP_INTELLIJ_TEST_SERVER;
+  const jdk17 = process.env.OMP_INTELLIJ_TEST_JDK17;
+  const jdk21 = process.env.OMP_INTELLIJ_TEST_JDK21;
+  const eulaHash = process.env.OMP_INTELLIJ_TEST_ACCEPTED_EULA_HASH;
 
-  if (!server) missing.push('OMP_P0_SERVER');
-  if (!jdk17) missing.push('OMP_P0_JDK17');
-  if (!jdk21) missing.push('OMP_P0_JDK21');
-  if (!eulaHash) missing.push('OMP_P0_ACCEPTED_EULA_HASH');
+  if (!server) missing.push('OMP_INTELLIJ_TEST_SERVER');
+  if (!jdk17) missing.push('OMP_INTELLIJ_TEST_JDK17');
+  if (!jdk21) missing.push('OMP_INTELLIJ_TEST_JDK21');
+  if (!eulaHash) missing.push('OMP_INTELLIJ_TEST_ACCEPTED_EULA_HASH');
 
   if (missing.length > 0 || !server || !jdk17 || !jdk21 || !eulaHash) {
     throw new Error(
-      `P0 real stability suite missing required environment prerequisites: ${missing.join(', ')}. ` +
+      `Integration suite missing required environment prerequisites: ${missing.join(', ')}. ` +
         'All 4 prerequisites must be provided; skipping is not permitted.',
     );
   }
@@ -46,13 +46,13 @@ export async function verifyPrerequisites(): Promise<P0Prerequisites> {
   const resolvedJdk21 = resolve(jdk21);
 
   if (!existsSync(resolvedServer)) {
-    throw new Error(`OMP_P0_SERVER executable not found on disk: ${resolvedServer}`);
+    throw new Error(`OMP_INTELLIJ_TEST_SERVER executable not found on disk: ${resolvedServer}`);
   }
   if (!existsSync(resolvedJdk17)) {
-    throw new Error(`OMP_P0_JDK17 directory not found on disk: ${resolvedJdk17}`);
+    throw new Error(`OMP_INTELLIJ_TEST_JDK17 directory not found on disk: ${resolvedJdk17}`);
   }
   if (!existsSync(resolvedJdk21)) {
-    throw new Error(`OMP_P0_JDK21 directory not found on disk: ${resolvedJdk21}`);
+    throw new Error(`OMP_INTELLIJ_TEST_JDK21 directory not found on disk: ${resolvedJdk21}`);
   }
 
   const eulaDoc = await readServerEula(resolvedServer);
@@ -72,7 +72,7 @@ export async function verifyPrerequisites(): Promise<P0Prerequisites> {
   };
 }
 
-export interface P0RealSandbox {
+export interface IntegrationSandbox {
   sandboxDir: string;
   systemPath: string;
   configDir: string;
@@ -82,7 +82,7 @@ export interface P0RealSandbox {
   configFile: string;
   settingsFile: string;
   env: NodeJS.ProcessEnv;
-  prereqs: P0Prerequisites;
+  prerequisites: IntegrationPrerequisites;
   ownedProcesses: Set<ChildProcess>;
   ownedSockets: Set<net.Socket>;
   ownedServers: Set<net.Server>;
@@ -141,8 +141,10 @@ function waitForMessage<T>(
   });
 }
 
-export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0RealSandbox> {
-  const sandboxDir = await mkdtemp(join(tmpdir(), 'omp-p0-real-'));
+export async function createIntegrationSandbox(
+  prerequisites: IntegrationPrerequisites,
+): Promise<IntegrationSandbox> {
+  const sandboxDir = await mkdtemp(join(tmpdir(), 'omp-intellij-integration-'));
 
   const systemPath = join(sandboxDir, 'system');
   const configDir = join(sandboxDir, 'config');
@@ -163,7 +165,11 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
 
   await writeFile(
     configFile,
-    JSON.stringify({ server: { mode: 'external', executable: prereqs.serverExecutable } }, null, 2),
+    JSON.stringify(
+      { server: { mode: 'external', executable: prerequisites.serverExecutable } },
+      null,
+      2,
+    ),
     'utf8',
   );
 
@@ -171,7 +177,7 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
     settingsFile,
     JSON.stringify(
       {
-        executable: prereqs.serverExecutable,
+        executable: prerequisites.serverExecutable,
         systemPath,
         host: '127.0.0.1',
         startupTimeoutMs: 60000,
@@ -191,16 +197,28 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
     'utf8',
   );
 
-  await acceptServerEula(prereqs.eulaDoc, { configFile });
+  await acceptServerEula(prerequisites.eulaDoc, { configFile });
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     OMP_INTELLIJ_CONFIG: configFile,
     OMP_INTELLIJ_SETTINGS: settingsFile,
     GRADLE_USER_HOME: gradleUserHome,
-    JAVA_HOME: prereqs.jdk21Path,
+    JAVA_HOME: prerequisites.jdk21Path,
     IJ_JAVA_OPTIONS: `-Dintellij.server.eula.persistence=false -Didea.config.path=${configDir} -Didea.log.path=${logDir}`,
   };
+  const previousEnvironment = {
+    OMP_INTELLIJ_CONFIG: process.env.OMP_INTELLIJ_CONFIG,
+    OMP_INTELLIJ_SETTINGS: process.env.OMP_INTELLIJ_SETTINGS,
+    GRADLE_USER_HOME: process.env.GRADLE_USER_HOME,
+    JAVA_HOME: process.env.JAVA_HOME,
+    IJ_JAVA_OPTIONS: process.env.IJ_JAVA_OPTIONS,
+  };
+  process.env.OMP_INTELLIJ_CONFIG = configFile;
+  process.env.OMP_INTELLIJ_SETTINGS = settingsFile;
+  process.env.GRADLE_USER_HOME = gradleUserHome;
+  process.env.JAVA_HOME = prerequisites.jdk21Path;
+  process.env.IJ_JAVA_OPTIONS = env.IJ_JAVA_OPTIONS;
 
   const ownedProcesses = new Set<ChildProcess>();
   const ownedSockets = new Set<net.Socket>();
@@ -232,7 +250,7 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
     for (const marker of ownedMarkers) {
       await terminateMarkedProcess(
         marker,
-        join(prereqs.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
+        join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
       );
     }
     for (const socket of ownedSockets) socket.destroy();
@@ -258,15 +276,15 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
     }
     if (existsSync(join(gradleUserHome, 'daemon'))) {
       const stopped = spawnSync(
-        join(prereqs.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
+        join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
         [
           '-cp',
-          resolve('test-fixtures/p0-concurrency/jdk21/gradle/wrapper/gradle-wrapper.jar'),
+          resolve('test-fixtures/concurrency/jdk21/gradle/wrapper/gradle-wrapper.jar'),
           'org.gradle.wrapper.GradleWrapperMain',
           '--stop',
         ],
         {
-          cwd: resolve('test-fixtures/p0-concurrency/jdk21'),
+          cwd: resolve('test-fixtures/concurrency/jdk21'),
           env,
           encoding: 'utf8',
           timeout: 30000,
@@ -281,9 +299,13 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
     if (existsSync(join(systemPath, 'omp-start.lock')))
       throw new Error('Sandbox lifecycle lock remains');
     await rm(sandboxDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+    for (const [key, val] of Object.entries(previousEnvironment)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
   };
 
-  const sandbox: P0RealSandbox = {
+  const sandbox: IntegrationSandbox = {
     sandboxDir,
     systemPath,
     configDir,
@@ -293,7 +315,7 @@ export async function createP0RealSandbox(prereqs: P0Prerequisites): Promise<P0R
     configFile,
     settingsFile,
     env,
-    prereqs,
+    prerequisites,
     ownedProcesses,
     ownedSockets,
     ownedServers,
@@ -345,7 +367,7 @@ export function isSandboxServerProcess(pid: number, expectedSystemPath: string):
   }
 }
 
-export function killProcessSafely(pid: number, sandbox: P0RealSandbox): void {
+export function killProcessSafely(pid: number, sandbox: IntegrationSandbox): void {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid owned process PID');
   const child = Array.from(sandbox.ownedProcesses).find(
     (child) => child.pid === pid && child.exitCode === null && child.signalCode === null,
@@ -366,10 +388,15 @@ export function killProcessSafely(pid: number, sandbox: P0RealSandbox): void {
   }
 }
 
-export async function copyCachedWrapper(sandbox: P0RealSandbox): Promise<void> {
-  const cache = process.env.GRADLE_USER_HOME;
+export async function copyCachedWrapper(sandbox: IntegrationSandbox): Promise<void> {
+  const candidates = [
+    process.env.GRADLE_USER_HOME,
+    process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE,
+    join(homedir(), '.gradle'),
+  ].filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
   const relativePath = join('wrapper', 'dists', 'gradle-9.8.0-bin');
-  if (!cache || !existsSync(join(cache, relativePath))) return;
+  const cache = candidates.find((dir) => existsSync(join(dir, relativePath)));
+  if (!cache) return;
   await cp(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath), {
     recursive: true,
     filter: (source) => !source.endsWith('.lck') && !source.endsWith('.part'),
@@ -378,15 +405,15 @@ export async function copyCachedWrapper(sandbox: P0RealSandbox): Promise<void> {
 
 export async function copyWorkspaceFixture(
   fixtureName: 'jdk17' | 'jdk21',
-  sandbox: P0RealSandbox,
+  sandbox: IntegrationSandbox,
 ): Promise<string> {
-  const sourceDir = resolve('test-fixtures', 'p0-concurrency', fixtureName);
+  const sourceDir = resolve('test-fixtures', 'concurrency', fixtureName);
   const targetDir = join(sandbox.workspacesDir, fixtureName);
   await cp(sourceDir, targetDir, { recursive: true });
 
   const propPath = join(targetDir, 'gradle.properties');
-  const jdk17Normalized = sandbox.prereqs.jdk17Path.replace(/\\/g, '/');
-  const jdk21Normalized = sandbox.prereqs.jdk21Path.replace(/\\/g, '/');
+  const jdk17Normalized = sandbox.prerequisites.jdk17Path.replace(/\\/g, '/');
+  const jdk21Normalized = sandbox.prerequisites.jdk21Path.replace(/\\/g, '/');
 
   const content = [
     'org.gradle.java.installations.auto-download=false',
@@ -400,7 +427,10 @@ export async function copyWorkspaceFixture(
   return targetDir;
 }
 
-export async function generateBigTree(targetDir: string, classCount = 5000): Promise<void> {
+export async function generateLargeJavaProject(
+  targetDir: string,
+  classCount = 5000,
+): Promise<void> {
   const srcDir = join(targetDir, 'src', 'main', 'java', 'com', 'example', 'bigtree');
   await mkdir(srcDir, { recursive: true });
 
@@ -423,7 +453,11 @@ export async function generateBigTree(targetDir: string, classCount = 5000): Pro
     );
   }
 
-  await writeFile(join(targetDir, 'settings.gradle'), "rootProject.name = 'p0-big-tree'\n", 'utf8');
+  await writeFile(
+    join(targetDir, 'settings.gradle'),
+    "rootProject.name = 'indexing-large-project'\n",
+    'utf8',
+  );
   await writeFile(
     join(targetDir, 'build.gradle'),
     `plugins { id 'java' }\njava { toolchain { languageVersion = JavaLanguageVersion.of(21) } }\n`,
@@ -457,7 +491,7 @@ export interface LspClientDriver {
 
 export function createLspClientDriver(
   projectPath: string,
-  sandbox: P0RealSandbox,
+  sandbox: IntegrationSandbox,
 ): LspClientDriver {
   const script = resolveScript('bridge');
   const child = spawn(process.execPath, [script], {
@@ -497,7 +531,10 @@ export function createLspClientDriver(
           ) {
             response.result = null;
           } else if (msg.method === 'workspace/applyEdit') {
-            response.result = { applied: false, failureReason: 'Read-only P0 protocol client' };
+            response.result = {
+              applied: false,
+              failureReason: 'Read-only integration protocol client',
+            };
           } else {
             response.error = { code: -32601, message: `Unsupported client method: ${msg.method}` };
           }
@@ -571,7 +608,7 @@ export interface DapClientDriver {
 
 export function createDapClientDriver(
   projectPath: string,
-  sandbox: P0RealSandbox,
+  sandbox: IntegrationSandbox,
 ): DapClientDriver {
   const script = resolveScript('dap-proxy');
   const child = spawn(process.execPath, [script], {
@@ -694,7 +731,10 @@ export interface TcpGate {
   close(): Promise<void>;
 }
 
-export async function createTcpGate(targetPort: number, sandbox: P0RealSandbox): Promise<TcpGate> {
+export async function createTcpGate(
+  targetPort: number,
+  sandbox: IntegrationSandbox,
+): Promise<TcpGate> {
   let holdBytes = true;
   let buffered: Buffer[] = [];
   let upstreamSocket: net.Socket | null = null;
@@ -791,7 +831,7 @@ export interface ExternalAttachTarget {
 export async function startExternalAttachTarget(
   jdk21Path: string,
   workDir: string,
-  sandbox: P0RealSandbox,
+  sandbox: IntegrationSandbox,
 ): Promise<ExternalAttachTarget> {
   const javaExe = join(jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
   const targetSource = resolve(

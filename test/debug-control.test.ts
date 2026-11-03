@@ -603,7 +603,7 @@ test('single-flight recovery: concurrent recover requests receive HTTP 409 confl
 
   try {
     // Fire first recover (in flight)
-    const req1 = fetch(`http://127.0.0.1:${handle.port}/recover`, {
+    const firstRecoverRequest = fetch(`http://127.0.0.1:${handle.port}/recover`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${handle.token}` },
     });
@@ -611,16 +611,20 @@ test('single-flight recovery: concurrent recover requests receive HTTP 409 confl
     // Deterministically await until request 1 has entered recover()
     await recoverStarted;
     // Fire second recover concurrently
-    const req2 = await fetch(`http://127.0.0.1:${handle.port}/recover`, {
+    const concurrentRecoverResponse = await fetch(`http://127.0.0.1:${handle.port}/recover`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${handle.token}` },
     });
-    assert.equal(req2.status, 409, 'Concurrent recover must return 409 Conflict');
+    assert.equal(
+      concurrentRecoverResponse.status,
+      409,
+      'Concurrent recover must return 409 Conflict',
+    );
 
     // Unblock first recover and ensure it finishes successfully
     unblockRecover();
-    const res1 = await req1;
-    assert.equal(res1.status, 200);
+    const firstRecoverResponse = await firstRecoverRequest;
+    assert.equal(firstRecoverResponse.status, 200);
   } finally {
     unblockRecover();
     await handle.close();

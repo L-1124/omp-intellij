@@ -241,8 +241,8 @@ test('binary responseKey supports distinct file scopes for same section and whol
   await mkdir(proj);
   const { id } = canonicalizeProject(proj);
 
-  const file1 = join(proj, 'src', 'FileOne.java');
-  const file2 = join(proj, 'src', 'FileTwo.java');
+  const fileOnePath = join(proj, 'src', 'FileOne.java');
+  const fileTwoPath = join(proj, 'src', 'FileTwo.java');
 
   await updateProjectSettings(
     systemPath,
@@ -257,8 +257,8 @@ test('binary responseKey supports distinct file scopes for same section and whol
     systemPath,
     id,
     [
-      { scopeUri: pathToFileURL(file1).href, section: 'jetbrains.java.indent' },
-      { scopeUri: pathToFileURL(file2).href, section: 'jetbrains.java.indent' },
+      { scopeUri: pathToFileURL(fileOnePath).href, section: 'jetbrains.java.indent' },
+      { scopeUri: pathToFileURL(fileTwoPath).href, section: 'jetbrains.java.indent' },
       { section: undefined },
     ],
     [
@@ -269,8 +269,8 @@ test('binary responseKey supports distinct file scopes for same section and whol
   );
 
   const res = await resolveConfigurationItems(systemPath, id, [
-    { scopeUri: pathToFileURL(file1).href, section: 'jetbrains.java.indent' },
-    { scopeUri: pathToFileURL(file2).href, section: 'jetbrains.java.indent' },
+    { scopeUri: pathToFileURL(fileOnePath).href, section: 'jetbrains.java.indent' },
+    { scopeUri: pathToFileURL(fileTwoPath).href, section: 'jetbrains.java.indent' },
     { section: undefined }, // unscoped whole-section
     { section: 'jetbrains.java.indent' }, // unscoped section resolves from dynamic baseline
   ]);
@@ -281,12 +281,12 @@ test('binary responseKey supports distinct file scopes for same section and whol
   await recordConfigurationItems(
     systemPath,
     id,
-    [{ scopeUri: pathToFileURL(file1).href, section: 'jetbrains.java' }],
+    [{ scopeUri: pathToFileURL(fileOnePath).href, section: 'jetbrains.java' }],
     [{ 'hints.collapse complex types': true, derivedIndent: 10 }],
   );
 
   const derivedRes = await resolveConfigurationItems(systemPath, id, [
-    { scopeUri: pathToFileURL(file1).href, section: 'jetbrains.java.derivedIndent' },
+    { scopeUri: pathToFileURL(fileOnePath).href, section: 'jetbrains.java.derivedIndent' },
   ]);
   assert.deepEqual(derivedRes, [10]);
 });

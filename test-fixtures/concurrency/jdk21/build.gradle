@@ -20,17 +20,17 @@ application {
 tasks.named('compileJava') {
     doFirst {
         def buildDir = layout.buildDirectory.asFile.get()
-        def triggerFile = new File(buildDir, 'p0-gate-trigger.txt')
-        def gateFile = new File(buildDir, 'p0-gate.txt')
+        def triggerFile = new File(buildDir, 'build-gate-trigger.txt')
+        def gateFile = new File(buildDir, 'build-gate.txt')
         if (triggerFile.exists()) {
-            println 'P0_BUILD_WAITING'
+            println 'BUILD_GATE_WAITING'
             System.out.flush()
             long deadline = System.currentTimeMillis() + 60000
             while (!gateFile.exists() && System.currentTimeMillis() < deadline) {
                 Thread.sleep(100)
             }
             if (gateFile.exists()) {
-                println 'P0_BUILD_PROCEED'
+                println 'BUILD_GATE_RELEASED'
             }
         }
     }
@@ -38,16 +38,16 @@ tasks.named('compileJava') {
 
 tasks.register('gateBuild') {
     doLast {
-        println 'P0_BUILD_WAITING'
+        println 'BUILD_GATE_WAITING'
         System.out.flush()
         def buildDir = layout.buildDirectory.asFile.get()
-        def gateFile = new File(buildDir, 'p0-gate.txt')
+        def gateFile = new File(buildDir, 'build-gate.txt')
         long deadline = System.currentTimeMillis() + 60000
         while (!gateFile.exists() && System.currentTimeMillis() < deadline) {
             Thread.sleep(100)
         }
         if (gateFile.exists()) {
-            println 'P0_BUILD_PROCEED'
+            println 'BUILD_GATE_RELEASED'
         }
     }
 }

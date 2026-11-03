@@ -238,10 +238,11 @@ export function reduceConnectionState(
         if (directMsg) {
           next.detail = directMsg;
         } else if (failedFolders.length > 0) {
-          const f0 = failedFolders[0];
-          const folderUri = f0.folderUri ?? f0.uri ?? 'unknown folder';
-          const tool = f0.tool ?? 'tool';
-          next.detail = `${tool} (${f0.status}) at ${folderUri}`;
+          const firstFailedFolder = failedFolders[0];
+          const folderUri =
+            firstFailedFolder.folderUri ?? firstFailedFolder.uri ?? 'unknown folder';
+          const tool = firstFailedFolder.tool ?? 'tool';
+          next.detail = `${tool} (${firstFailedFolder.status}) at ${folderUri}`;
         } else {
           next.detail =
             phase === 'CANCELLED'

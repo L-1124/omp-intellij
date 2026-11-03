@@ -70,14 +70,14 @@ test('readServerEula reads EULA document and computes correct 16-char lowercase 
 test('readServerEula hash changes when EULA bytes change even slightly', async (t) => {
   const env = await temporaryTestEnv(t);
   const bundle = await createFakeBundle(join(env.root, 'bundle'), 'Version 1.0.0');
-  const doc1 = await readServerEula(bundle.launcher);
+  const initialEulaDoc = await readServerEula(bundle.launcher);
 
   await writeFile(bundle.eulaPath, 'Version 1.0.1');
-  const doc2 = await readServerEula(bundle.launcher);
+  const updatedEulaDoc = await readServerEula(bundle.launcher);
 
-  assert.notEqual(doc1.hash, doc2.hash);
-  assert.match(doc1.hash, /^[0-9a-f]{16}$/);
-  assert.match(doc2.hash, /^[0-9a-f]{16}$/);
+  assert.notEqual(initialEulaDoc.hash, updatedEulaDoc.hash);
+  assert.match(initialEulaDoc.hash, /^[0-9a-f]{16}$/);
+  assert.match(updatedEulaDoc.hash, /^[0-9a-f]{16}$/);
 });
 
 test('readServerEula fails when EULA.txt is missing in bundle with path and code', async (t) => {

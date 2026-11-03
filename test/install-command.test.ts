@@ -678,7 +678,7 @@ test('shutdown then session restart guards against delayed callback from prior s
   assert.ok(cmd);
   const ctx1 = createMockCtx('F:\\my-project');
 
-  const p1 = cmd.handler('install', ctx1);
+  const firstInstallPromise = cmd.handler('install', ctx1);
   let restarted: void | Promise<void> | null = null;
 
   try {
@@ -712,7 +712,7 @@ test('shutdown then session restart guards against delayed callback from prior s
     assert.equal(ctx1.statusCalls.length, ctx1CallsBefore);
   } finally {
     canFinish.resolve();
-    await p1;
+    await firstInstallPromise;
     await restarted;
     pi.emit('session_shutdown');
   }
@@ -767,7 +767,7 @@ test('polling preserves in-flight active install when observed state is null or 
   assert.ok(cmd2);
   const ctx2 = createMockCtx('F:\\my-project');
 
-  const p2 = cmd2.handler('install', ctx2);
+  const secondInstallPromise = cmd2.handler('install', ctx2);
 
   try {
     await entered.promise;
@@ -814,7 +814,7 @@ test('polling preserves in-flight active install when observed state is null or 
     assert.match(stillActive.value, /80%/);
   } finally {
     canFinish.resolve();
-    await p2;
+    await secondInstallPromise;
     pi2.emit('session_shutdown');
   }
 });

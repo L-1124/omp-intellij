@@ -51,7 +51,7 @@ test('newer conn wins: newest-started live bridge overrides older ready connecti
     const projectPath = join(tempDir, 'workspace', 'my-project');
     const { canonicalPath } = canonicalizeProject(projectPath);
 
-    const conn1 = {
+    const oldConnRecord = {
       connectionId: 'conn-old',
       kind: 'bridge',
       pid: process.pid,
@@ -63,9 +63,9 @@ test('newer conn wins: newest-started live bridge overrides older ready connecti
       canonicalPath,
       closed: false,
     };
-    await writeFile(join(connDir, 'conn-old.json'), JSON.stringify(conn1, null, 2), 'utf8');
+    await writeFile(join(connDir, 'conn-old.json'), JSON.stringify(oldConnRecord, null, 2), 'utf8');
 
-    const conn2 = {
+    const newConnRecord = {
       connectionId: 'conn-new',
       kind: 'bridge',
       pid: process.pid,
@@ -77,7 +77,7 @@ test('newer conn wins: newest-started live bridge overrides older ready connecti
       canonicalPath,
       closed: false,
     };
-    await writeFile(join(connDir, 'conn-new.json'), JSON.stringify(conn2, null, 2), 'utf8');
+    await writeFile(join(connDir, 'conn-new.json'), JSON.stringify(newConnRecord, null, 2), 'utf8');
 
     const snapshot = await readProjectState(tempDir, projectPath);
     assert.equal(snapshot.connectionId, 'conn-new');
@@ -146,10 +146,10 @@ test('detail changes: distinct detail and progress updates within same phase are
 
     const connDir = join(tempDir, 'plugin-metadata', 'connections');
     const filePath = join(connDir, `${state.connectionId}.json`);
-    const snap1 = JSON.parse(await readFile(filePath, 'utf8'));
-    assert.equal(snap1.phase, 'indexing');
-    assert.equal(snap1.detail, 'Step 1: scanning files');
-    assert.equal(snap1.progress?.percentage, 10);
+    const firstSnapshot = JSON.parse(await readFile(filePath, 'utf8'));
+    assert.equal(firstSnapshot.phase, 'indexing');
+    assert.equal(firstSnapshot.detail, 'Step 1: scanning files');
+    assert.equal(firstSnapshot.progress?.percentage, 10);
 
     await state.update({
       phase: 'indexing',
@@ -157,11 +157,11 @@ test('detail changes: distinct detail and progress updates within same phase are
       progress: { title: 'Indexing', message: 'Resolving symbols', percentage: 50 },
     });
 
-    const snap2 = JSON.parse(await readFile(filePath, 'utf8'));
-    assert.equal(snap2.phase, 'indexing');
-    assert.equal(snap2.detail, 'Step 2: resolving symbols');
-    assert.equal(snap2.progress?.percentage, 50);
-    assert.ok(snap2.seq > snap1.seq);
+    const secondSnapshot = JSON.parse(await readFile(filePath, 'utf8'));
+    assert.equal(secondSnapshot.phase, 'indexing');
+    assert.equal(secondSnapshot.detail, 'Step 2: resolving symbols');
+    assert.equal(secondSnapshot.progress?.percentage, 50);
+    assert.ok(secondSnapshot.seq > firstSnapshot.seq);
 
     await state.close();
   } finally {

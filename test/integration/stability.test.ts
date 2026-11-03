@@ -21,21 +21,21 @@ import {
   copyCachedWrapper,
   copyWorkspaceFixture,
   createDapClientDriver,
+  createIntegrationSandbox,
   createLspClientDriver,
-  createP0RealSandbox,
   createTcpGate,
-  generateBigTree,
+  generateLargeJavaProject,
   isProcessAlive,
   isSandboxServerProcess,
   killProcessSafely,
   startExternalAttachTarget,
   verifyPrerequisites,
-} from './stability-fixture.js';
+} from './fixture.js';
 
-const prereqs = await verifyPrerequisites();
+const prerequisites = await verifyPrerequisites();
 test('dual project concurrency: JDK 17 and JDK 21 independent debugging and session recovery', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     const jdk17Dir = await copyWorkspaceFixture('jdk17', sandbox);
@@ -97,8 +97,8 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
     const dap17 = createDapClientDriver(jdk17Dir, sandbox);
     const dap21 = createDapClientDriver(jdk21Dir, sandbox);
 
-    await dap17.request('initialize', { clientID: 'test-p0', adapterID: 'intellij' });
-    await dap21.request('initialize', { clientID: 'test-p0', adapterID: 'intellij' });
+    await dap17.request('initialize', { clientID: 'test-concurrency', adapterID: 'intellij' });
+    await dap21.request('initialize', { clientID: 'test-concurrency', adapterID: 'intellij' });
 
     // Set breakpoints on line 8 (deterministic breakpoint line)
     await dap17.request('setBreakpoints', {
@@ -153,17 +153,17 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
     assert.ok(frameId21 !== undefined, 'Stack frame 21 must exist');
 
     // Evaluate Java version and project ID at breakpoint
-    const v17 = await dap17.evaluate('System.getProperty("java.version")', frameId17);
-    assert.match(String(v17), /^"?17/, `Expected JDK 17, got ${v17}`);
+    const javaVersion17 = await dap17.evaluate('System.getProperty("java.version")', frameId17);
+    assert.match(String(javaVersion17), /^"?17/, `Expected JDK 17, got ${javaVersion17}`);
 
-    const id17 = await dap17.evaluate('com.example.App.PROJECT_ID', frameId17);
-    assert.match(String(id17), /jdk17/, `Expected project ID jdk17, got ${id17}`);
+    const projectId17 = await dap17.evaluate('com.example.App.PROJECT_ID', frameId17);
+    assert.match(String(projectId17), /jdk17/, `Expected project ID jdk17, got ${projectId17}`);
 
-    const v21 = await dap21.evaluate('System.getProperty("java.version")', frameId21);
-    assert.match(String(v21), /^"?21/, `Expected JDK 21, got ${v21}`);
+    const javaVersion21 = await dap21.evaluate('System.getProperty("java.version")', frameId21);
+    assert.match(String(javaVersion21), /^"?21/, `Expected JDK 21, got ${javaVersion21}`);
 
-    const id21 = await dap21.evaluate('com.example.App.PROJECT_ID', frameId21);
-    assert.match(String(id21), /jdk21/, `Expected project ID jdk21, got ${id21}`);
+    const projectId21 = await dap21.evaluate('com.example.App.PROJECT_ID', frameId21);
+    assert.match(String(projectId21), /jdk21/, `Expected project ID jdk21, got ${projectId21}`);
 
     // Continue execution on both
     await dap17.request('continue', { threadId: threadId17 });
@@ -177,7 +177,10 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
 
     // Create a second debug session in jdk21
     const dap21Second = createDapClientDriver(jdk21Dir, sandbox);
-    await dap21Second.request('initialize', { clientID: 'test-p0-sec', adapterID: 'intellij' });
+    await dap21Second.request('initialize', {
+      clientID: 'test-concurrency-second',
+      adapterID: 'intellij',
+    });
     await dap21Second.request('launch', {
       file: app21Source,
       project: jdk21Dir,
@@ -191,16 +194,16 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
       systemPath: sandbox.systemPath,
       projectRoot: jdk21Dir,
     });
-    const s1 = sessions21.find((s) => s.pid === dap21.process.pid);
-    const s2 = sessions21.find((s) => s.pid === dap21Second.process.pid);
-    assert.ok(s1?.live, 'Session 1 must be active in jdk21');
-    assert.ok(s2?.live, 'Session 2 must be active in jdk21');
+    const sessionToRecover = sessions21.find((s) => s.pid === dap21.process.pid);
+    const survivingSession = sessions21.find((s) => s.pid === dap21Second.process.pid);
+    assert.ok(sessionToRecover?.live, 'Session 1 must be active in jdk21');
+    assert.ok(survivingSession?.live, 'Session 2 must be active in jdk21');
 
     // Targeted recovery of session 2 by UUID
     const recovered = await recoverDebugSession({
       systemPath: sandbox.systemPath,
       projectRoot: jdk21Dir,
-      id: s2.id,
+      id: survivingSession.id,
     });
     assert.ok(recovered, 'Targeted recovery of debug session 2 succeeded');
     for (const survivor of [
@@ -263,33 +266,33 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
 });
 
 test('indexing cancellation: wait cancellation releases barrier and permits subsequent requests', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     await copyCachedWrapper(sandbox);
-    const bigTreeDir = await copyWorkspaceFixture('jdk21', sandbox);
-    await generateBigTree(bigTreeDir, 5000);
-    const referenceFile = join(bigTreeDir, 'src/main/java/com/example/bigtree/UseBig.java');
+    const largeProjectDir = await copyWorkspaceFixture('jdk21', sandbox);
+    await generateLargeJavaProject(largeProjectDir, 5000);
+    const referenceFile = join(largeProjectDir, 'src/main/java/com/example/bigtree/UseBig.java');
     const referenceText =
       'package com.example.bigtree;\n\npublic class UseBig { int value = BigClass00001.value(); }\n';
     await writeFile(referenceFile, referenceText, 'utf8');
 
-    const bridge = createLspClientDriver(bigTreeDir, sandbox);
+    const bridge = createLspClientDriver(largeProjectDir, sandbox);
     await bridge.request('initialize', {
       processId: process.pid,
-      rootUri: pathToFileURL(bigTreeDir).href,
-      rootPath: bigTreeDir,
+      rootUri: pathToFileURL(largeProjectDir).href,
+      rootPath: largeProjectDir,
       capabilities: { window: { workDoneProgress: true }, experimental: { licensingUi: true } },
     });
     bridge.notify('initialized', {});
 
     // Poll until project state enters connecting, importing, or indexing
-    let state = await readProjectState(sandbox.systemPath, bigTreeDir);
+    let state = await readProjectState(sandbox.systemPath, largeProjectDir);
     const waitDeadline = Date.now() + 15000;
     while (Date.now() < waitDeadline && ['not-started', 'connecting'].includes(state.phase)) {
       await sleep(200);
-      state = await readProjectState(sandbox.systemPath, bigTreeDir);
+      state = await readProjectState(sandbox.systemPath, largeProjectDir);
     }
     assert.ok(
       ['importing', 'indexing'].includes(state.phase),
@@ -302,18 +305,18 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
     assert.ok(serverPid && serverPid > 0);
 
     // Cancel index wait with AbortController
-    const ac = new AbortController();
+    const abortController = new AbortController();
     const waitPromise = executeIntellij(
-      { action: 'wait', project: bigTreeDir, timeout: 60 },
-      ac.signal,
+      { action: 'wait', project: largeProjectDir, timeout: 60 },
+      abortController.signal,
       undefined,
-      { cwd: bigTreeDir } as ExtensionContext,
+      { cwd: largeProjectDir } as ExtensionContext,
       { systemPath: sandbox.systemPath },
     );
 
     // Abort after a short delay while in-flight
     await sleep(150);
-    ac.abort(new Error('Index wait aborted'));
+    abortController.abort(new Error('Index wait aborted'));
     const cancelledAt = Date.now();
 
     let waitCancelled = false;
@@ -332,10 +335,10 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
 
     // Now wait for indexing to reach ready state
     const readyResult = await executeIntellij(
-      { action: 'wait', project: bigTreeDir, timeout: 120 },
+      { action: 'wait', project: largeProjectDir, timeout: 120 },
       undefined,
       undefined,
-      { cwd: bigTreeDir } as ExtensionContext,
+      { cwd: largeProjectDir } as ExtensionContext,
       { systemPath: sandbox.systemPath },
     );
     assert.equal(
@@ -346,7 +349,7 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
 
     // Perform a real definition query on one of the generated classes to verify readiness
     const classFile = join(
-      bigTreeDir,
+      largeProjectDir,
       'src',
       'main',
       'java',
@@ -361,11 +364,11 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
       textDocument: { uri: referenceUri, languageId: 'java', version: 1, text: referenceText },
     });
 
-    const defResult = await bridge.request('textDocument/definition', {
+    const definitionResult = await bridge.request('textDocument/definition', {
       textDocument: { uri: referenceUri },
       position: { line: 2, character: referenceText.split('\n')[2].indexOf('BigClass00001') + 2 },
     });
-    const definition = Array.isArray(defResult) ? defResult[0] : defResult;
+    const definition = Array.isArray(definitionResult) ? definitionResult[0] : definitionResult;
     assert.ok(definition && typeof definition === 'object');
     const targetUri =
       'uri' in definition
@@ -386,8 +389,8 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
 });
 
 test('build cancellation: aborting DAP launch terminates process tree and preserves shared daemon', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     await copyCachedWrapper(sandbox);
@@ -412,13 +415,13 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
     await mkdir(buildDir, { recursive: true });
 
     // Arm build gate trigger
-    const triggerFile = join(buildDir, 'p0-gate-trigger.txt');
-    const gateFile = join(buildDir, 'p0-gate.txt');
+    const triggerFile = join(buildDir, 'build-gate-trigger.txt');
+    const gateFile = join(buildDir, 'build-gate.txt');
     await writeFile(triggerFile, 'trigger', 'utf8');
 
     const app17Source = join(jdk17Dir, 'src', 'main', 'java', 'com', 'example', 'App.java');
     const dap = createDapClientDriver(jdk17Dir, sandbox);
-    await dap.request('initialize', { clientID: 'test-p0-gate', adapterID: 'intellij' });
+    await dap.request('initialize', { clientID: 'test-build-cancellation', adapterID: 'intellij' });
     const ownershipMarker = randomUUID();
 
     // Initiate launch which executes Gradle build
@@ -428,12 +431,12 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
       build: true,
       buildTool: 'gradle',
       mainClass: 'com.example.App',
-      vmArgs: [`-Domp.p0.ownership=${ownershipMarker}`],
+      vmArgs: [`-Domp.intellij.test.ownership=${ownershipMarker}`],
     });
     launchPromise.catch(() => {});
 
     // Await actual marker from build gate (no fake timers)
-    await dap.waitForOutputSubstring('P0_BUILD_WAITING', 45000);
+    await dap.waitForOutputSubstring('BUILD_GATE_WAITING', 45000);
     const daemonPids: number[] = [];
     for await (const file of glob('daemon/*/daemon-*.out.log', { cwd: sandbox.gradleUserHome })) {
       const pid = Number(/daemon-(\d+)\.out\.log$/.exec(file)?.[1]);
@@ -449,11 +452,11 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
       systemPath: sandbox.systemPath,
       projectRoot: jdk17Dir,
     });
-    const s = sessions.find((x) => x.pid === dap.process.pid);
-    assert.ok(s?.live, 'Session must be active while waiting in build');
+    const launchSession = sessions.find((x) => x.pid === dap.process.pid);
+    assert.ok(launchSession?.live, 'Session must be active while waiting in build');
     const { port: controlPort } = JSON.parse(
       await readFile(
-        join(getDebugSessionsDir(sandbox.systemPath, jdk17Dir), `${s.id}.json`),
+        join(getDebugSessionsDir(sandbox.systemPath, jdk17Dir), `${launchSession.id}.json`),
         'utf8',
       ),
     ) as { port: number };
@@ -475,13 +478,13 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
         `Shared Gradle daemon ${pid} must survive cancellation`,
       );
     const targets = spawnSync(
-      join(prereqs.jdk21Path, 'bin', process.platform === 'win32' ? 'jps.exe' : 'jps'),
+      join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'jps.exe' : 'jps'),
       ['-v'],
       { encoding: 'utf8', timeout: 5000, windowsHide: true },
     );
     assert.equal(targets.status, 0, 'Owned target probe must succeed');
     assert.equal(
-      targets.stdout.includes(`-Domp.p0.ownership=${ownershipMarker}`),
+      targets.stdout.includes(`-Domp.intellij.test.ownership=${ownershipMarker}`),
       false,
       'Cancelled launch must leave no marked target JVM',
     );
@@ -512,8 +515,8 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
 });
 
 test('attach cancellation: aborting handshake disconnects proxy and leaves target JVM intact', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     const project = await copyWorkspaceFixture('jdk21', sandbox);
@@ -544,7 +547,7 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
     );
     assert.equal(indexed.details?.phase, 'ready', JSON.stringify(indexed.details));
     const target = await startExternalAttachTarget(
-      prereqs.jdk21Path,
+      prerequisites.jdk21Path,
       sandbox.workspacesDir,
       sandbox,
     );
@@ -554,7 +557,10 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
     const gate = await createTcpGate(target.jdwpPort, sandbox);
 
     const dap = createDapClientDriver(project, sandbox);
-    await dap.request('initialize', { clientID: 'test-p0-attach', adapterID: 'intellij' });
+    await dap.request('initialize', {
+      clientID: 'test-attach-cancellation',
+      adapterID: 'intellij',
+    });
 
     // Send attach pointing to gate port
     const attachPromise = dap.request(
@@ -582,9 +588,12 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
     await gate.close();
 
     // Verify external target JVM is still alive and generating heartbeats
-    const hb1 = target.heartbeats;
+    const heartbeatsBeforeCancellation = target.heartbeats;
     await sleep(600);
-    assert.ok(target.heartbeats > hb1, 'Target must continue heartbeating after cancellation');
+    assert.ok(
+      target.heartbeats > heartbeatsBeforeCancellation,
+      'Target must continue heartbeating after cancellation',
+    );
 
     // Re-attach to latest announced target JDWP port
     const dapReattach = createDapClientDriver(project, sandbox);
@@ -606,9 +615,12 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
     await dapReattach.request('disconnect', { terminateDebuggee: false });
     await dapReattach.waitForExit(10000);
 
-    const hb2 = target.heartbeats;
+    const heartbeatsBeforeDisconnect = target.heartbeats;
     await sleep(600);
-    assert.ok(target.heartbeats > hb2, 'Target continues heartbeating after reattach disconnect');
+    assert.ok(
+      target.heartbeats > heartbeatsBeforeDisconnect,
+      'Target continues heartbeating after reattach disconnect',
+    );
 
     target.close();
   } finally {
@@ -617,58 +629,61 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
 });
 
 test('process isolation: killed proxy marks session unrecoverable and preserves sibling sessions', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     const jdk21Dir = await copyWorkspaceFixture('jdk21', sandbox);
     const app21Source = join(jdk21Dir, 'src', 'main', 'java', 'com', 'example', 'App.java');
 
-    const dap1 = createDapClientDriver(jdk21Dir, sandbox);
-    const dap2 = createDapClientDriver(jdk21Dir, sandbox);
+    const terminatedClient = createDapClientDriver(jdk21Dir, sandbox);
+    const survivingClient = createDapClientDriver(jdk21Dir, sandbox);
 
-    await dap1.request('initialize', { clientID: 'test-kill-1', adapterID: 'intellij' });
-    await dap1.request('launch', {
+    await terminatedClient.request('initialize', {
+      clientID: 'test-kill-1',
+      adapterID: 'intellij',
+    });
+    await terminatedClient.request('launch', {
       file: app21Source,
       project: jdk21Dir,
       noDebug: true,
       build: true,
       mainClass: 'com.example.App',
     });
-    await dap1.request('configurationDone');
+    await terminatedClient.request('configurationDone');
 
-    await dap2.request('initialize', { clientID: 'test-kill-2', adapterID: 'intellij' });
-    await dap2.request('launch', {
+    await survivingClient.request('initialize', { clientID: 'test-kill-2', adapterID: 'intellij' });
+    await survivingClient.request('launch', {
       file: app21Source,
       project: jdk21Dir,
       noDebug: true,
       build: false,
       mainClass: 'com.example.App',
     });
-    await dap2.request('configurationDone');
+    await survivingClient.request('configurationDone');
 
     // Both sessions must be active and present
     const sessions = await listDebugSessions({
       systemPath: sandbox.systemPath,
       projectRoot: jdk21Dir,
     });
-    const s1 = sessions.find((s) => s.pid === dap1.process.pid);
-    const s2 = sessions.find((s) => s.pid === dap2.process.pid);
-    assert.ok(s1?.live, 'Session 1 must be active');
-    assert.ok(s2?.live, 'Session 2 must be active');
+    const terminatedSession = sessions.find((s) => s.pid === terminatedClient.process.pid);
+    const survivingSession = sessions.find((s) => s.pid === survivingClient.process.pid);
+    assert.ok(terminatedSession?.live, 'Session 1 must be active');
+    assert.ok(survivingSession?.live, 'Session 2 must be active');
 
     // Strong kill proxy 1 PID
-    const dap1Pid = dap1.process.pid;
-    assert.ok(dap1Pid, 'dap1 PID must exist');
-    killProcessSafely(dap1Pid, sandbox);
-    await dap1.waitForExit();
+    const terminatedProxyPid = terminatedClient.process.pid;
+    assert.ok(terminatedProxyPid, 'dap1 PID must exist');
+    killProcessSafely(terminatedProxyPid, sandbox);
+    await terminatedClient.waitForExit();
 
     // Query listDebugSessions: must assert killed session is present and marked unrecoverable
     const sessionsAfter = await listDebugSessions({
       systemPath: sandbox.systemPath,
       projectRoot: jdk21Dir,
     });
-    const killed = sessionsAfter.find((s) => s.id === s1.id);
+    const killed = sessionsAfter.find((s) => s.id === terminatedSession.id);
     assert.ok(killed, 'Killed session must be recorded in debug metadata');
     assert.equal(killed.live, false, 'Killed session must be reported dead');
     assert.match(
@@ -678,16 +693,16 @@ test('process isolation: killed proxy marks session unrecoverable and preserves 
     );
 
     // Verify survivor session 2 continues heartbeating
-    await dap2.waitForOutputSubstring('HEARTBEAT_21=', 15000);
-    await dap2.close();
+    await survivingClient.waitForOutputSubstring('HEARTBEAT_21=', 15000);
+    await survivingClient.close();
   } finally {
     await sandbox.cleanup();
   }
 });
 
 test('crash recovery: terminated server transitions connection to disconnected with bounded wait', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     const jdk17Dir = await copyWorkspaceFixture('jdk17', sandbox);
@@ -771,8 +786,8 @@ test('crash recovery: terminated server transitions connection to disconnected w
 });
 
 test('build gate timeout: long-running Gradle launch resolves upon gate release', async () => {
-  assert.ok(prereqs?.eulaDoc, 'Prerequisites must be verified before running matrix');
-  const sandbox = await createP0RealSandbox(prereqs);
+  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+  const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     await copyCachedWrapper(sandbox);
@@ -780,13 +795,13 @@ test('build gate timeout: long-running Gradle launch resolves upon gate release'
     const buildDir = join(jdk17Dir, 'build');
     await mkdir(buildDir, { recursive: true });
 
-    const triggerFile = join(buildDir, 'p0-gate-trigger.txt');
-    const gateFile = join(buildDir, 'p0-gate.txt');
+    const triggerFile = join(buildDir, 'build-gate-trigger.txt');
+    const gateFile = join(buildDir, 'build-gate.txt');
     await writeFile(triggerFile, 'trigger', 'utf8');
 
     const app17Source = join(jdk17Dir, 'src', 'main', 'java', 'com', 'example', 'App.java');
     const dap = createDapClientDriver(jdk17Dir, sandbox);
-    await dap.request('initialize', { clientID: 'test-p0-timing', adapterID: 'intellij' });
+    await dap.request('initialize', { clientID: 'test-build-deadline', adapterID: 'intellij' });
 
     // Initiate launch with build
     const launchPromise = dap.request(
@@ -803,7 +818,7 @@ test('build gate timeout: long-running Gradle launch resolves upon gate release'
     );
 
     // Await actual gate marker on output
-    await dap.waitForOutputSubstring('P0_BUILD_WAITING', 45000);
+    await dap.waitForOutputSubstring('BUILD_GATE_WAITING', 45000);
     const holdStart = Date.now();
 
     // Hold latch for > 15 seconds to simulate deterministic long build
