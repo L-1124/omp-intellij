@@ -17,14 +17,23 @@
 
 ## 安装插件
 
-通过 GitHub marketplace 安装：
+从 GitHub 注册 marketplace 并安装：
 
 ```sh
 omp plugin marketplace add L-1124/omp-intellij
 omp plugin install omp-intellij@omp-intellij
 ```
 
-安装后重新启动 OMP 会话。插件使用宿主 Bun 将源码转译为 Node 桥接脚本，缓存在安装目录的 `.runtime/` 中；无需手动构建。安装目录需要可写，Node.js 仍用于运行桥接与调试代理。
+安装后重新启动 OMP 会话。
+
+已安装的用户可刷新市场并重新安装最新源码：
+
+```sh
+omp plugin marketplace update omp-intellij
+omp plugin install --force omp-intellij@omp-intellij
+```
+
+插件首次加载时由 OMP 内置 Bun 自动转译桥接源码，产物缓存在安装目录的 `.runtime/` 中。安装目录需要可写；Node.js 用于运行 LSP 桥接和 DAP 代理。
 
 ## 首次使用
 
