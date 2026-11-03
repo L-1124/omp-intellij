@@ -8,6 +8,7 @@ import {
 } from './cache-manager.js';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
 import { listDebugSessions, recoverDebugSession } from './debug-control.js';
+import { formatDoctorReport, inspectDoctor } from './doctor.js';
 import { acceptServerEula, type EulaDocument, readEulaAcceptance, readServerEula } from './eula.js';
 import type { ExtensionContext, ExtensionPluginInstance } from './extension-types.js';
 import {
@@ -178,6 +179,11 @@ export interface ExtensionOverrides {
     restartServer: typeof restartServer;
   }>;
   systemPath?: string;
+  configDir?: string;
+  doctorApi?: Partial<{
+    inspectDoctor: typeof inspectDoctor;
+    formatDoctorReport: typeof formatDoctorReport;
+  }>;
 }
 
 export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverrides = {}) {
@@ -214,6 +220,10 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     stopServer: overrides.lifecycleApi?.stopServer ?? stopServer,
     restartServer: overrides.lifecycleApi?.restartServer ?? restartServer,
   };
+  const doctorApi = {
+    inspectDoctor: overrides.doctorApi?.inspectDoctor ?? inspectDoctor,
+    formatDoctorReport: overrides.doctorApi?.formatDoctorReport ?? formatDoctorReport,
+  };
   const activeSystemPath = overrides.systemPath ?? settings.systemPath;
   async function resolveSelectedExecutable(): Promise<{
     executable?: string;
@@ -246,7 +256,11 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
   }
 
   pi.setLabel?.('IntelliJ LSP');
-  registerIntellij(pi);
+  registerIntellij(pi, {
+    systemPath: activeSystemPath,
+    configFile: overrides.configFile,
+    configDir: overrides.configDir,
+  });
 
   let statusVisible = false;
   let statusText = '';
@@ -539,6 +553,26 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           ctx.ui?.notify(
             `IntelliJ ${sub} refused: ${sanitizeString(getErrorMessage(error))}`,
             'warning',
+          );
+        }
+      } else if (sub === 'doctor') {
+        if (parts.length !== 1) {
+          ctx.ui?.notify('Usage: /intellij doctor', 'warning');
+          return;
+        }
+        try {
+          const projectRoot = findProjectRootFn(ctx.cwd);
+          const report = await doctorApi.inspectDoctor(projectRoot, {
+            systemPath: activeSystemPath,
+            configFile: overrides.configFile,
+            configDir: overrides.configDir,
+          });
+          const formatted = doctorApi.formatDoctorReport(report);
+          ctx.ui?.notify(formatted, report.summary.ok ? 'info' : 'warning');
+        } catch (error: unknown) {
+          ctx.ui?.notify(
+            `IntelliJ doctor failed: ${sanitizeString(getErrorMessage(error))}`,
+            'error',
           );
         }
       } else if (sub === 'status') {
@@ -1563,7 +1597,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|stop|restart|install [--version <build|latest>] [--dir <path>]|versions [--remote]|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop|restart|doctor|install [--version <build|latest>] [--dir <path>]|versions [--remote]|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }

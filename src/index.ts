@@ -1,6 +1,7 @@
 export * from './cache-manager.js';
 export * from './connection-state.js';
 export * from './dap-proxy.js';
+export * from './doctor.js';
 export { default as extension } from './extension.js';
 export * from './index-barrier.js';
 export * from './intellij-tool.js';

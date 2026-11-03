@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import { type ProjectStateResult, readProjectState } from './connection-state.js';
+import { type DoctorReport, formatDoctorReport, inspectDoctor } from './doctor.js';
 import type {
   ExtensionContext,
   ExtensionPluginInstance,
@@ -193,7 +194,7 @@ export function formatLicenseLines(license?: LicenseSummary): string[] {
 }
 
 export interface IntellijParams {
-  action?: 'status' | 'wait' | 'reload';
+  action?: 'status' | 'wait' | 'reload' | 'doctor';
   project?: string;
   timeout?: number;
 }
@@ -205,6 +206,7 @@ export interface IntellijDetails extends ProjectStateResult {
   reloaded?: boolean;
   elapsedMs?: number;
   workspace?: IntellijWorkspaceContext;
+  doctor?: DoctorReport;
 }
 
 export interface ExecuteIntellijOptions {
@@ -224,6 +226,7 @@ export interface ExecuteIntellijOptions {
   ) => Promise<WorkspaceInfo>;
   systemPath?: string;
   configDir?: string;
+  configFile?: string;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   pollIntervalMs?: number;
   now?: () => number;
@@ -247,6 +250,31 @@ export async function executeIntellij(
 
   const projectRoot = params.project ? resolve(ctx.cwd, params.project) : findProjectRoot(ctx.cwd);
   const action = params.action || 'status';
+
+  if (action === 'doctor') {
+    signal?.throwIfAborted();
+    const report = await inspectDoctor(projectRoot, {
+      systemPath,
+      configDir,
+      configFile: options.configFile,
+    });
+    const snapshot = await readState(systemPath, projectRoot).catch(() => ({
+      phase: 'failed',
+    }));
+    signal?.throwIfAborted();
+    return {
+      content: [{ type: 'text', text: formatDoctorReport(report) }],
+      details: {
+        phase: snapshot.phase,
+        detail:
+          report.checks.find((check) => check.id === 'project-state')?.message ??
+          'Project state unavailable',
+        project: report.project ?? sanitizeString(projectRoot),
+        doctor: report,
+      },
+      isError: !report.summary.ok,
+    };
+  }
 
   if (action === 'status') {
     const rawSnapshot = await readState(systemPath, projectRoot);
@@ -748,13 +776,13 @@ export function registerIntellij(
     approval: 'exec',
     label: 'IntelliJ',
     description:
-      'Check IntelliJ index status, wait for indexing to finish, or reload workspace model. Status and wait actions are read-only; reload connects to the IntelliJ server and triggers project reimport.',
+      'Inspect IntelliJ setup with doctor, check or wait for indexing, or reload workspace model. Doctor, status and wait do not start the service; reload connects and triggers project reimport.',
     parameters: z.object({
       action: z
-        .enum(['status', 'wait', 'reload'])
+        .enum(['status', 'wait', 'reload', 'doctor'])
         .default('status')
         .describe(
-          'Check indexing status, wait for indexing to complete, or reload workspace model',
+          'Inspect local setup, check index status, wait for readiness, or reload workspace model',
         ),
       project: z
         .string()
