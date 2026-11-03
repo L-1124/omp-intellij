@@ -6,11 +6,11 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { acceptServerEula, type EulaDocument, readServerEula } from '../src/eula.js';
-import { getActiveLeases } from '../src/metadata.js';
-import { encode, frameParser } from '../src/protocol.js';
-import { terminateMarkedProcess } from '../src/run-core.js';
-import { sanitizeString } from '../src/runtime-status.js';
+import { acceptServerEula, type EulaDocument, readServerEula } from '../../src/eula.js';
+import { getActiveLeases } from '../../src/metadata.js';
+import { encode, frameParser } from '../../src/protocol.js';
+import { terminateMarkedProcess } from '../../src/run-core.js';
+import { sanitizeString } from '../../src/runtime-status.js';
 
 export { readServerEula };
 

@@ -8,15 +8,15 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { readProjectState } from '../src/connection-state.js';
+import { readProjectState } from '../../src/connection-state.js';
 import {
   getDebugSessionsDir,
   listDebugSessions,
   recoverDebugSession,
-} from '../src/debug-control.js';
-import type { ExtensionContext } from '../src/extension-types.js';
-import { executeIntellij } from '../src/intellij-tool.js';
-import { canonicalizeProject } from '../src/metadata.js';
+} from '../../src/debug-control.js';
+import type { ExtensionContext } from '../../src/extension-types.js';
+import { executeIntellij } from '../../src/intellij-tool.js';
+import { canonicalizeProject } from '../../src/metadata.js';
 import {
   copyCachedWrapper,
   copyWorkspaceFixture,
