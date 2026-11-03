@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { writeFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { executeBuild, runViaDap } from '../src/debug/run-core.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
@@ -31,6 +35,58 @@ test('failed build preserves compiler diagnostics and blocks success', async () 
     /exit code 7[\s\S]*compile-failure-sentinel/,
   );
 });
+
+for (const exitCode of [0, 7]) {
+  test(`build decodes fragmented UTF-8 streams through exit ${exitCode}`, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'omp-build-output-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const release = join(dir, 'release');
+    const output = { stdout: '', stderr: '' };
+    const build = executeBuild(
+      {
+        command: [
+          process.execPath,
+          '-e',
+          `
+            const fs = require('node:fs');
+            const out = Buffer.from('中文🚀');
+            const err = Buffer.from('错误🙂');
+            const watcher = fs.watch('.', () => {
+              if (!fs.existsSync(process.argv[1])) return;
+              watcher.close();
+              process.exitCode = Number(process.argv[2]);
+              process.stdout.end(out.subarray(1));
+              process.stderr.end(Buffer.concat([err.subarray(2), Buffer.from([0xe4])]));
+            });
+            process.stdout.write(Buffer.concat([Buffer.from('stdout:'), out.subarray(0, 1)]));
+            process.stderr.write(Buffer.concat([Buffer.from('stderr:'), err.subarray(0, 2)]));
+          `,
+          release,
+          String(exitCode),
+        ],
+        cwd: dir,
+      },
+      {
+        onOutput: (event) => {
+          if (event.category !== 'stdout' && event.category !== 'stderr') return;
+          output[event.category] += event.output;
+          if (output.stdout.startsWith('stdout:') && output.stderr.startsWith('stderr:')) {
+            writeFileSync(release, '');
+          }
+        },
+      },
+    );
+    if (exitCode === 0) {
+      const result = await build;
+      assert.equal(result.exitCode, 0);
+      assert.ok(result.buildOutput.includes('中文🚀'));
+      assert.ok(result.buildOutput.includes('错误🙂\ufffd'));
+    } else {
+      await assert.rejects(build, /exit code 7[\s\S]*错误🙂\ufffd/);
+    }
+    assert.deepEqual(output, { stdout: 'stdout:中文🚀', stderr: 'stderr:错误🙂\ufffd' });
+  });
+}
 
 test('cancellation terminates a running build', async () => {
   const abort = new AbortController();

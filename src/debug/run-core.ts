@@ -909,7 +909,7 @@ export async function executeBuild(
     const binDir = join(effectiveJavaHome, 'bin');
     baseEnv[pathKey] = currentPath ? `${binDir}${delimiter}${currentPath}` : binDir;
   }
-  baseEnv.JAVA_TOOL_OPTIONS = `${baseEnv.JAVA_TOOL_OPTIONS ? `${baseEnv.JAVA_TOOL_OPTIONS} ` : ''}-Dfile.encoding=UTF-8`;
+  baseEnv.JAVA_TOOL_OPTIONS = `${baseEnv.JAVA_TOOL_OPTIONS ? `${baseEnv.JAVA_TOOL_OPTIONS} ` : ''}-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8`;
 
   const {
     promise,
@@ -948,14 +948,14 @@ export async function executeBuild(
   }
   options.signal?.addEventListener('abort', handleAbort, { once: true });
 
-  proc.stdout.on('data', (chunk: Buffer) => {
-    const text = chunk.toString('utf8');
+  proc.stdout.setEncoding('utf8');
+  proc.stderr.setEncoding('utf8');
+  proc.stdout.on('data', (text: string) => {
     captured += text;
     if (options.onOutput) options.onOutput({ output: text, category: 'stdout' });
   });
 
-  proc.stderr.on('data', (chunk: Buffer) => {
-    const text = chunk.toString('utf8');
+  proc.stderr.on('data', (text: string) => {
     captured += text;
     if (options.onOutput) options.onOutput({ output: text, category: 'stderr' });
   });
