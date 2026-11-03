@@ -281,6 +281,11 @@ export async function createDapTestHarness(
           const custom = options.onLspRequest(msg.method, msg.params);
           if (custom !== undefined) {
             sendLsp({ id: msg.id, result: custom }, socket);
+            if (msg.method === 'initialize') {
+              setImmediate(() => {
+                sendLsp({ method: 'intellij/ready-for-test', params: {} }, socket);
+              });
+            }
             return;
           }
         }

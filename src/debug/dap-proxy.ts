@@ -139,12 +139,12 @@ export function normalizeSourcePaths(obj: unknown): unknown {
  * Checks whether this module is executed directly as a script vs imported by another module.
  */
 export function isDirectExecution(
-  argv1: string | undefined = process.argv[1],
+  entryScript: string | undefined = process.argv[1],
   importMetaUrl = import.meta.url,
 ): boolean {
-  if (!argv1) return false;
+  if (!entryScript) return false;
   try {
-    const scriptPath = resolve(argv1);
+    const scriptPath = resolve(entryScript);
     const modulePath = fileURLToPath(importMetaUrl);
     if (scriptPath === modulePath) return true;
 
@@ -562,6 +562,14 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
 
   async function connectBackend(): Promise<void> {
     if (!lspSession) throw new Error('LSP session not active');
+    const provider = lspSession.serverCapabilities?.executeCommandProvider;
+    const commands =
+      provider && typeof provider === 'object' && !Array.isArray(provider) && 'commands' in provider
+        ? provider.commands
+        : undefined;
+    if (Array.isArray(commands) && !commands.includes('start_debug_server')) {
+      throw new Error('IntelliJ server does not support start_debug_server');
+    }
     phase = 'connecting-dap';
     const port = await startDebugServer(lspSession, lspSession.rootUri);
     backendPort = port;
@@ -946,6 +954,9 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         if (command === 'attach') {
           await openProject(projectRoot);
           await connectBackend();
+          if (!supportsThreadDump) {
+            throw new Error('IntelliJ backend does not support threadDump readiness checks');
+          }
           await replayBreakpoints();
           // OMP sends configurationDone after attach replies; JDWP needs it before confirming.
           clientConfigurationDone = true;

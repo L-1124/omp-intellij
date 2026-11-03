@@ -966,3 +966,77 @@ test('a disconnect acknowledgement cannot complete recovery before transport tea
   assert.equal(reply.type === 'response' && reply.success, true);
   assert.equal(await h.closed, 0);
 });
+
+test('capability probe: attach fails fast before sending native attach when supportsThreadDumpRequest is missing', async (t) => {
+  const h = await createDapTestHarness(t, {
+    capabilities: { supportsThreadDumpRequest: false },
+  });
+  const reply = await h.request('attach', { port: 5005 });
+  assert.equal(reply.success, false);
+  assert.match(
+    reply.message ?? '',
+    /IntelliJ backend does not support threadDump readiness checks/,
+  );
+  await h.closed;
+  assert.equal(
+    h.backendRequests.some((r) => r.command === 'attach'),
+    false,
+  );
+});
+
+test('capability probe: missing start_debug_server in executeCommandProvider fails fast without blocking LSP', async (t) => {
+  const h = await createDapTestHarness(t, {
+    onLspRequest(method) {
+      if (method === 'initialize') {
+        return {
+          capabilities: {
+            codeLensProvider: { resolveProvider: false },
+            executeCommandProvider: {
+              commands: ['exportWorkspace', 'intellij.java.resolveLaunch'],
+            },
+          },
+        };
+      }
+    },
+  });
+  const reply = await h.request('attach', { port: 5005 });
+  assert.equal(reply.success, false);
+  assert.match(reply.message ?? '', /IntelliJ server does not support start_debug_server/);
+  await h.closed;
+  assert.equal(
+    h.lspRequests.some(
+      (r) =>
+        r.method === 'workspace/executeCommand' &&
+        r.params &&
+        typeof r.params === 'object' &&
+        'command' in r.params &&
+        r.params.command === 'start_debug_server',
+    ),
+    false,
+  );
+});
+
+test('capability probe: rejected buildToolTarget preserves original backend reason', async (t) => {
+  let h: DapTestHarness;
+  h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'launch') {
+        h.respond(
+          request,
+          undefined,
+          false,
+          'Unsupported launch configuration type: intellij_gradle (buildToolTarget unavailable)',
+        );
+        return true;
+      }
+    },
+  });
+  const reply = await h.request('launch', {
+    program: 'test-fixtures/jvm-hybrid-app/src/main/java/com/example/JavaGreeter.java',
+    buildTool: 'gradle',
+    mainClass: 'com.example.JavaGreeter',
+  });
+  assert.equal(reply.success, false);
+  assert.match(reply.message ?? '', /buildToolTarget unavailable/);
+  await h.closed;
+});
