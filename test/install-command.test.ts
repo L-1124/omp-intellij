@@ -44,6 +44,53 @@ test('parseInstallArgs preserves paths with spaces across quoting styles', () =>
   const unknownFlag = parseInstallArgs('--unknown-flag');
   assert.equal(typeof unknownFlag.error, 'string');
   assert.match(unknownFlag.error ?? '', /Usage/i);
+
+  // Both flag orders and version parsing
+  assert.deepEqual(parseInstallArgs('--version 263.7084.0 --dir "C:\\Program Files\\IntelliJ"'), {
+    version: '263.7084.0',
+    dir: 'C:\\Program Files\\IntelliJ',
+  });
+  assert.deepEqual(parseInstallArgs('--dir "C:\\Program Files\\IntelliJ" --version 263.7084.0'), {
+    version: '263.7084.0',
+    dir: 'C:\\Program Files\\IntelliJ',
+  });
+  assert.deepEqual(parseInstallArgs('--version=263.7084.0 --dir="D:/tools"'), {
+    version: '263.7084.0',
+    dir: 'D:/tools',
+  });
+  assert.deepEqual(parseInstallArgs('--version 263.7084.0 --dir F:\\path with spaces\\dir'), {
+    version: '263.7084.0',
+    dir: 'F:\\path with spaces\\dir',
+  });
+  assert.deepEqual(parseInstallArgs('--dir F:\\path with spaces\\dir --version 263.7084.0'), {
+    version: '263.7084.0',
+    dir: 'F:\\path with spaces\\dir',
+  });
+  assert.deepEqual(parseInstallArgs('--version latest'), {
+    version: 'latest',
+  });
+  assert.match(parseInstallArgs('--version').error ?? '', /version must not be empty/i);
+  assert.match(parseInstallArgs('--version ""').error ?? '', /version must not be empty/i);
+  assert.match(
+    parseInstallArgs('--version --dir "D:/tools"').error ?? '',
+    /version must not be empty/i,
+  );
+  assert.match(
+    parseInstallArgs('--dir --version 263.7084.0').error ?? '',
+    /directory must not be empty/i,
+  );
+  assert.match(
+    parseInstallArgs('--version 1.0.0 --version 2.0.0').error ?? '',
+    /duplicate --version/i,
+  );
+  assert.match(parseInstallArgs('--dir /a --dir /b').error ?? '', /duplicate --dir/i);
+  assert.match(
+    parseInstallArgs('--version 263.7084.0 extra').error ?? '',
+    /unexpected argument: extra/i,
+  );
+  assert.match(parseInstallArgs('--dir "C:/dir" extra').error ?? '', /unexpected argument: extra/i);
+  assert.ok(parseInstallArgs('--dir "unfinished directory').error);
+  assert.ok(parseInstallArgs("--version '263.7084.0").error);
 });
 
 test('formatInstallStatusText and formatInstallDescription format known vs unknown totalBytes', () => {
@@ -91,80 +138,6 @@ test('formatInstallStatusText and formatInstallDescription format known vs unkno
   const failedState: InstallState = { ...withTotal, phase: 'failed', error: 'archive corrupted' };
   assert.equal(formatInstallStatusText(failedState), 'IntelliJ failed (archive corrupted)');
   assert.equal(formatInstallDescription(failedState), 'install: failed (archive corrupted)');
-});
-
-test('install command parses custom directory with spaces, calls trackInstallation before ensureInstalled, and saves managed config on success', async () => {
-  const callOrder: string[] = [];
-  let trackedDir = '';
-  let savedConfig: ServerConfiguration | null = null;
-  const customTargetDir = 'F:\\managed storage\\custom intellij';
-
-  const pi = createMockPi();
-  extension(pi, {
-    serverConfigApi: {
-      async readServerConfig(): Promise<ServerConfiguration> {
-        return { mode: 'external', executable: 'F:\\fallback\\server.bat' };
-      },
-      async trackInstallation(dir: string): Promise<void> {
-        callOrder.push('trackInstallation');
-        trackedDir = dir;
-      },
-      async saveServerConfig(config: ServerConfiguration): Promise<void> {
-        callOrder.push('saveServerConfig');
-        savedConfig = config;
-      },
-      defaultInstallDir(): string {
-        return 'F:\\default\\intellij';
-      },
-      async readObservedInstallState(): Promise<InstallState | null> {
-        return null;
-      },
-    },
-    serverInstallApi: {
-      async ensureInstalled(dir: string): Promise<InstallResult> {
-        callOrder.push('ensureInstalled');
-        return {
-          installDir: dir,
-          version: '263.7084.0',
-          executable: `${dir}\\bin\\intellij.bat`,
-        };
-      },
-      async readInstallState(dir: string): Promise<InstallState | null> {
-        return {
-          installId: 'real-install-id',
-          pid: process.pid,
-          installDir: dir,
-          version: '263.7084.0',
-          phase: 'ready',
-          downloadedBytes: 100,
-          totalBytes: 100,
-          updatedAt: Date.now(),
-          executable: `${dir}\\bin\\intellij.bat`,
-        };
-      },
-    },
-  });
-
-  try {
-    const cmd = pi.getCommand('intellij');
-    assert.ok(cmd);
-    const ctx = createMockCtx('F:\\my-project');
-
-    await cmd.handler(`install --dir "${customTargetDir}"`, ctx);
-
-    assert.equal(trackedDir, customTargetDir);
-    assert.deepEqual(callOrder, ['trackInstallation', 'ensureInstalled', 'saveServerConfig']);
-    assert.deepEqual(savedConfig, {
-      mode: 'managed',
-      installDir: customTargetDir,
-    });
-    assert.equal(ctx.notifications.length, 1);
-    assert.equal(ctx.notifications[0].level, 'info');
-    assert.match(ctx.notifications[0].msg, /IntelliJ server installed: 263\.7084\.0 at/);
-    assert.ok(ctx.notifications[0].msg.includes(customTargetDir));
-  } finally {
-    pi.emit('session_shutdown');
-  }
 });
 
 test('corrupt config propagates explicit error and aborts install without saving config or starting download', async () => {
@@ -977,6 +950,11 @@ test('/intellij install never implicitly accepts EULA or writes eula acceptance 
     const pi = createMockPi();
     extension(pi, {
       configFile,
+      versionApi: {
+        async selectServerVersion() {
+          return fakeResult;
+        },
+      },
       serverInstallApi: {
         async ensureInstalled(): Promise<InstallResult> {
           return fakeResult;
@@ -1000,4 +978,525 @@ test('/intellij install never implicitly accepts EULA or writes eula acceptance 
     await rm(confDir, { recursive: true, force: true });
     await rm(installDir, { recursive: true, force: true });
   }
+});
+
+test('/intellij install --version resolves bundle, passes it to ensureInstalled, and pins version', async () => {
+  let resolvedVersionArg = '';
+  let installedBundleVersion = '';
+  let selectedVersion = '';
+  const fakeTargetDir = 'F:\\managed\\intellij';
+
+  const pi = createMockPi();
+  extension(pi, {
+    serverConfigApi: {
+      async readServerConfig() {
+        return { mode: 'managed', installDir: fakeTargetDir };
+      },
+      async trackInstallation() {},
+      async saveServerConfig() {},
+      defaultInstallDir: () => fakeTargetDir,
+      async readObservedInstallState() {
+        return null;
+      },
+    },
+    versionApi: {
+      async resolveServerBundle(version) {
+        resolvedVersionArg = version;
+        return {
+          version,
+          url: `https://download.jetbrains.com/test/${version}.zip`,
+          sha256: 'a'.repeat(64),
+          archive: 'zip',
+        };
+      },
+      async selectServerVersion(version) {
+        selectedVersion = version;
+        return {
+          installDir: fakeTargetDir,
+          version,
+          executable: `${fakeTargetDir}\\bin\\intellij.bat`,
+        };
+      },
+    },
+    serverInstallApi: {
+      async ensureInstalled(dir, opts) {
+        installedBundleVersion = opts?.bundle?.version ?? '';
+        return {
+          installDir: dir,
+          version: opts?.bundle?.version ?? '263.7084.0',
+          executable: `${dir}\\bin\\intellij.bat`,
+        };
+      },
+      async readInstallState(dir) {
+        return {
+          installId: 'inst-custom-ver',
+          pid: process.pid,
+          installDir: dir,
+          version: '263.8000.0',
+          phase: 'ready',
+          downloadedBytes: 100,
+          totalBytes: 100,
+          updatedAt: Date.now(),
+        };
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler('install --version 263.8000.0', ctx);
+
+    assert.equal(resolvedVersionArg, '263.8000.0');
+    assert.equal(installedBundleVersion, '263.8000.0');
+    assert.equal(selectedVersion, '263.8000.0');
+    assert.equal(ctx.notifications.length, 1);
+    assert.match(ctx.notifications[0].msg, /IntelliJ server installed: 263\.8000\.0/);
+    assert.match(ctx.notifications[0].msg, /configured\/selected; start explicitly/);
+  } finally {
+    pi.emit('session_shutdown');
+  }
+});
+
+test('/intellij install without --version defaults to existing managed pin rather than bundled default', async () => {
+  let resolvedVersionArg = '';
+  let installedBundleVersion = '';
+  const fakeTargetDir = 'F:\\managed\\intellij';
+
+  const pi = createMockPi();
+  extension(pi, {
+    serverConfigApi: {
+      async readServerConfig() {
+        return { mode: 'managed', installDir: fakeTargetDir, version: '263.9999.0' };
+      },
+      async trackInstallation() {},
+      async saveServerConfig() {},
+      defaultInstallDir: () => fakeTargetDir,
+      async readObservedInstallState() {
+        return null;
+      },
+    },
+    versionApi: {
+      async resolveServerBundle(version) {
+        resolvedVersionArg = version;
+        return {
+          version,
+          url: `https://download.jetbrains.com/test/${version}.zip`,
+          sha256: 'b'.repeat(64),
+          archive: 'zip',
+        };
+      },
+      async selectServerVersion(version) {
+        return {
+          installDir: fakeTargetDir,
+          version,
+          executable: `${fakeTargetDir}\\bin\\intellij.bat`,
+        };
+      },
+    },
+    serverInstallApi: {
+      async ensureInstalled(dir, opts) {
+        installedBundleVersion = opts?.bundle?.version ?? '';
+        return {
+          installDir: dir,
+          version: opts?.bundle?.version ?? '263.9999.0',
+          executable: `${dir}\\bin\\intellij.bat`,
+        };
+      },
+      async readInstallState(dir) {
+        return {
+          installId: 'inst-pin-preserve',
+          pid: process.pid,
+          installDir: dir,
+          version: '263.9999.0',
+          phase: 'ready',
+          downloadedBytes: 100,
+          totalBytes: 100,
+          updatedAt: Date.now(),
+        };
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler('install', ctx);
+
+    assert.equal(resolvedVersionArg, '263.9999.0', 'Must resolve existing pinned version');
+    assert.equal(installedBundleVersion, '263.9999.0');
+  } finally {
+    pi.emit('session_shutdown');
+  }
+});
+
+test('/intellij install when selectServerVersion is blocked notifies installed-but-not-selected and does not claim install failed', async () => {
+  let savedConfigCalled = false;
+  const fakeTargetDir = 'F:\\managed\\custom-dir';
+
+  const pi = createMockPi();
+  extension(pi, {
+    serverConfigApi: {
+      async readServerConfig() {
+        return { mode: 'managed', installDir: 'F:\\managed\\old-dir', version: '263.7084.0' };
+      },
+      async trackInstallation() {},
+      async saveServerConfig() {
+        savedConfigCalled = true;
+      },
+      defaultInstallDir: () => 'F:\\managed\\old-dir',
+      async readObservedInstallState() {
+        return null;
+      },
+    },
+    versionApi: {
+      async selectServerVersion() {
+        throw new Error(
+          'Cannot select IntelliJ version while the shared server is running or its ownership is unverified. Run /intellij stop first.',
+        );
+      },
+    },
+    serverInstallApi: {
+      async ensureInstalled(dir) {
+        return {
+          installDir: dir,
+          version: '263.7084.0',
+          executable: `${dir}\\bin\\intellij.bat`,
+        };
+      },
+      async readInstallState(dir) {
+        return {
+          installId: 'inst-blocked',
+          pid: process.pid,
+          installDir: dir,
+          version: '263.7084.0',
+          phase: 'ready',
+          downloadedBytes: 100,
+          totalBytes: 100,
+          updatedAt: Date.now(),
+        };
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler(`install --dir "${fakeTargetDir}"`, ctx);
+
+    assert.equal(savedConfigCalled, false, 'Config must not be updated when selection is blocked');
+    assert.equal(ctx.notifications.length, 1);
+    assert.equal(ctx.notifications[0].level, 'warning');
+    // Must NOT say installation failed
+    assert.equal(ctx.notifications[0].msg.includes('installation failed'), false);
+    // Must report installed, but not selected with guidance
+    assert.match(ctx.notifications[0].msg, /IntelliJ server installed: 263\.7084\.0 at/);
+    assert.match(ctx.notifications[0].msg, /not selected/);
+    assert.match(ctx.notifications[0].msg, /Run \/intellij stop first/);
+    assert.match(ctx.notifications[0].msg, /re-run \/intellij install --version/);
+  } finally {
+    pi.emit('session_shutdown');
+  }
+});
+
+test('/intellij versions lists installed, selected version, path, running status, and avoids network without --remote', async () => {
+  let latestCalled = false;
+  const fakeDir = 'F:\\managed\\store';
+
+  const pi = createMockPi();
+  extension(pi, {
+    serverConfigApi: {
+      async readServerConfig() {
+        return { mode: 'managed', installDir: fakeDir, version: '263.7084.0' };
+      },
+    },
+    serverInstallApi: {
+      async listInstalledVersions() {
+        return [
+          {
+            version: '263.7084.0',
+            installDir: fakeDir,
+            executable: `${fakeDir}\\bin\\intellij.bat`,
+          },
+          {
+            version: '263.7083.0',
+            installDir: fakeDir,
+            executable: `${fakeDir}\\bin\\intellij.bat`,
+          },
+        ];
+      },
+    },
+    versionApi: {
+      async latestServerVersion() {
+        latestCalled = true;
+        return '263.9000.0';
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler('versions', ctx);
+
+    assert.equal(latestCalled, false, 'latestServerVersion must NOT be called without --remote');
+    assert.equal(ctx.notifications.length, 1);
+    const msg = ctx.notifications[0].msg;
+    assert.match(msg, /Selected version: 263\.7084\.0/);
+    assert.match(msg, /Installed versions: 263\.7084\.0 \(selected\), 263\.7083\.0/);
+    assert.match(msg, /Server status: stopped/);
+  } finally {
+    pi.emit('session_shutdown');
+  }
+});
+
+test('/intellij versions --remote explicitly queries remote latest version', async () => {
+  let latestCalled = false;
+  const fakeDir = 'F:\\managed\\store';
+
+  const pi = createMockPi();
+  extension(pi, {
+    serverConfigApi: {
+      async readServerConfig() {
+        return { mode: 'managed', installDir: fakeDir, version: '263.7084.0' };
+      },
+    },
+    serverInstallApi: {
+      async listInstalledVersions() {
+        return [
+          {
+            version: '263.7084.0',
+            installDir: fakeDir,
+            executable: `${fakeDir}\\bin\\intellij.bat`,
+          },
+        ];
+      },
+    },
+    versionApi: {
+      async latestServerVersion() {
+        latestCalled = true;
+        return '263.9000.0';
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler('versions --remote', ctx);
+
+    assert.equal(latestCalled, true);
+    assert.equal(ctx.notifications.length, 1);
+    assert.match(ctx.notifications[0].msg, /Latest remote version: 263\.9000\.0/);
+  } finally {
+    pi.emit('session_shutdown');
+  }
+});
+
+test('/intellij use <version> validates arguments, invokes selectServerVersion, reports EULA gate, and never starts server', async () => {
+  let selectedVersion = '';
+  const baseDir = join(tmpdir(), 'omp-use-test-' + Math.random().toString(36).slice(2));
+  const binDir = join(baseDir, 'bin');
+  await mkdir(binDir, { recursive: true });
+  const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
+  const launcherPath = join(binDir, launcherName);
+  await writeFile(launcherPath, '#!/bin/sh\nexit 0', { mode: 0o755 });
+  await writeFile(join(baseDir, 'EULA.txt'), 'Sample terms', 'utf8');
+
+  const confDir = join(tmpdir(), 'omp-use-conf-' + Math.random().toString(36).slice(2));
+  await mkdir(confDir, { recursive: true });
+  const configFile = join(confDir, 'intellij.json');
+
+  const pi = createMockPi();
+  extension(pi, {
+    configFile,
+    versionApi: {
+      async selectServerVersion(ver) {
+        selectedVersion = ver;
+        return {
+          version: ver,
+          installDir: baseDir,
+          executable: launcherPath,
+        };
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    // Missing version
+    await cmd.handler('use', ctx);
+    assert.match(
+      ctx.notifications[ctx.notifications.length - 1].msg,
+      /Usage: \/intellij use <version>/,
+    );
+
+    // Latest rejected
+    await cmd.handler('use latest', ctx);
+    assert.match(
+      ctx.notifications[ctx.notifications.length - 1].msg,
+      /requires an explicit numeric build version/,
+    );
+
+    // Valid version
+    await cmd.handler('use 263.7084.0', ctx);
+    assert.equal(selectedVersion, '263.7084.0');
+    const successMsg = ctx.notifications[ctx.notifications.length - 1].msg;
+    assert.match(successMsg, /Selected IntelliJ server 263\.7084\.0/);
+    assert.match(successMsg, /EULA not accepted/);
+    assert.match(successMsg, /Run \/intellij eula accept/);
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+    await rm(confDir, { recursive: true, force: true });
+    pi.emit('session_shutdown');
+  }
+});
+
+test('EULA commands verify chosen configured version via findInstalled rather than last readInstallState', async () => {
+  let findInstalledVersionChecked = '';
+  const confDir = join(tmpdir(), 'omp-eula-ver-conf-' + Math.random().toString(36).slice(2));
+  await mkdir(confDir, { recursive: true });
+  const configFile = join(confDir, 'intellij.json');
+  await writeFile(
+    configFile,
+    JSON.stringify({
+      server: { mode: 'managed', installDir: 'F:\\managed\\server', version: '263.8888.0' },
+    }),
+    'utf8',
+  );
+
+  const pi = createMockPi();
+  extension(pi, {
+    configFile,
+    serverInstallApi: {
+      async readInstallState() {
+        return {
+          installId: 'old-inst',
+          pid: 1234,
+          installDir: 'F:\\managed\\server',
+          version: '263.7084.0',
+          phase: 'ready',
+          downloadedBytes: 100,
+          totalBytes: 100,
+          updatedAt: Date.now(),
+          executable: 'F:\\managed\\server\\bin\\old-intellij.bat',
+        };
+      },
+      async findInstalled(_dir, bundle) {
+        findInstalledVersionChecked = bundle?.version ?? '';
+        return null;
+      },
+    },
+  });
+
+  try {
+    const cmd = pi.getCommand('intellij');
+    assert.ok(cmd);
+    const ctx = createMockCtx('F:\\my-project');
+
+    await cmd.handler('eula status', ctx);
+
+    assert.equal(
+      findInstalledVersionChecked,
+      '263.8888.0',
+      'findInstalled must check the configured version',
+    );
+    assert.equal(ctx.notifications.length, 1);
+    assert.equal(ctx.notifications[0].level, 'warning');
+    assert.match(
+      ctx.notifications[0].msg,
+      /Managed IntelliJ server is not installed \(263\.8888\.0\)/,
+    );
+  } finally {
+    await rm(confDir, { recursive: true, force: true });
+    pi.emit('session_shutdown');
+  }
+});
+
+test('cached installation and rollback commands preserve selected receipts offline without accepting EULA', async (t) => {
+  const root = join(tmpdir(), `omp-offline-version-command-${Math.random().toString(36).slice(2)}`);
+  const installDir = join(root, 'installation');
+  const systemPath = join(root, 'system');
+  const configFile = join(root, 'intellij.json');
+  const versions = ['263.3000.0', '263.4000.0'];
+  const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
+  await mkdir(root, { recursive: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const version of versions) {
+    const versionDir = join(installDir, 'versions', version);
+    await mkdir(join(versionDir, 'bin'), { recursive: true });
+    await writeFile(join(versionDir, 'bin', launcherName), `Local fixture ${version}`);
+    await writeFile(join(versionDir, 'EULA.txt'), `Local fixture document ${version}`);
+    await writeFile(
+      join(versionDir, 'receipt.json'),
+      JSON.stringify({
+        version,
+        sha256: 'a'.repeat(64),
+        platform: process.platform,
+        arch: process.arch,
+        launcher: `bin/${launcherName}`,
+        installedAt: 1,
+      }),
+    );
+  }
+  await writeFile(
+    configFile,
+    JSON.stringify({
+      server: { mode: 'managed', installDir, version: versions[0] },
+      unrelated: { preserve: true },
+    }),
+  );
+  const pi = createMockPi();
+  extension(pi, {
+    configFile,
+    systemPath,
+    versionApi: {
+      async resolveServerBundle() {
+        throw new Error('Cached install must remain offline');
+      },
+      async latestServerVersion() {
+        throw new Error('Local listing must remain offline');
+      },
+    },
+    serverInstallApi: {
+      async ensureInstalled() {
+        throw new Error('An installed version must not be downloaded again');
+      },
+    },
+  });
+  t.after(() => pi.emit('session_shutdown'));
+  const command = pi.getCommand('intellij');
+  assert.ok(command);
+  const ctx = createMockCtx(root);
+  await command.handler('install', ctx);
+  assert.equal(ctx.notifications.at(-1)?.level, 'info');
+  const afterInstall = JSON.parse(await readFile(configFile, 'utf8'));
+  assert.equal(afterInstall.server.version, versions[0]);
+  assert.deepEqual(afterInstall.unrelated, { preserve: true });
+  for (const version of [versions[1], versions[0]]) {
+    await command.handler(`use ${version}`, ctx);
+    assert.equal(ctx.notifications.at(-1)?.level, 'info');
+    const selected = JSON.parse(await readFile(configFile, 'utf8'));
+    assert.equal(selected.server.version, version);
+    const beforeInvalid = await readFile(configFile, 'utf8');
+    await command.handler('use 263.9999.0', ctx);
+    assert.equal(await readFile(configFile, 'utf8'), beforeInvalid);
+  }
+  await command.handler('versions', ctx);
+  const listing = ctx.notifications.at(-1)?.msg ?? '';
+  for (const version of versions) assert.ok(listing.includes(version));
+  await assert.rejects(readFile(join(root, 'intellij-eula.json')), { code: 'ENOENT' });
 });

@@ -30,32 +30,160 @@ export function formatStatusText(
   return `IntelliJ ${phase}${extra}`;
 }
 
-export function parseInstallArgs(rawRemainder: string): { dir?: string; error?: string } {
+export interface ParsedInstallArgs {
+  dir?: string;
+  version?: string;
+  error?: string;
+}
+
+const INSTALL_USAGE = 'Usage: /intellij install [--version <build|latest>] [--dir <path>]';
+
+function stripQuotes(value: string): string {
+  let s = value.trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"') && s.length >= 2) ||
+    (s.startsWith("'") && s.endsWith("'") && s.length >= 2)
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+export function parseInstallArgs(rawRemainder: string): ParsedInstallArgs {
   const trimmed = rawRemainder.trim();
   if (!trimmed) {
     return {};
   }
-  let target = '';
-  if (trimmed === '--dir' || trimmed.startsWith('--dir ') || trimmed.startsWith('--dir\t')) {
-    target = trimmed.slice(5).trim();
-  } else if (trimmed === '--dir=' || trimmed.startsWith('--dir=')) {
-    target = trimmed.slice(6).trim();
-  } else {
-    return { error: 'Usage: /intellij install [--dir <path>]' };
+
+  const rawTokens: string[] = [];
+  let current = '';
+  let inQuote: '"' | "'" | null = null;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (inQuote) {
+      current += ch;
+      if (ch === inQuote) {
+        inQuote = null;
+      }
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      current += ch;
+    } else if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        rawTokens.push(current);
+        current = '';
+      }
+    } else {
+      current += ch;
+    }
   }
-  if (!target) {
-    return { error: 'IntelliJ installation directory must not be empty' };
+  if (inQuote) {
+    return { error: `Unterminated quoted argument. ${INSTALL_USAGE}` };
   }
-  if (
-    (target.startsWith('"') && target.endsWith('"') && target.length >= 2) ||
-    (target.startsWith("'") && target.endsWith("'") && target.length >= 2)
-  ) {
-    target = target.slice(1, -1).trim();
+  if (current.length > 0) {
+    rawTokens.push(current);
   }
-  if (!target) {
-    return { error: 'IntelliJ installation directory must not be empty' };
+
+  let dir: string | undefined;
+  let version: string | undefined;
+  let seenDir = false;
+  let seenVersion = false;
+
+  let i = 0;
+  while (i < rawTokens.length) {
+    const token = rawTokens[i];
+
+    if (token === '--dir' || token.startsWith('--dir=')) {
+      if (seenDir) {
+        return { error: `Duplicate --dir flag. ${INSTALL_USAGE}` };
+      }
+      seenDir = true;
+
+      let rawVal = '';
+      if (token.startsWith('--dir=')) {
+        rawVal = token.slice(6);
+        i++;
+        if (
+          !(rawVal.startsWith('"') && rawVal.endsWith('"')) &&
+          !(rawVal.startsWith("'") && rawVal.endsWith("'"))
+        ) {
+          const extraTokens: string[] = [];
+          while (i < rawTokens.length && !rawTokens[i].startsWith('-')) {
+            extraTokens.push(rawTokens[i]);
+            i++;
+          }
+          if (extraTokens.length > 0) {
+            rawVal = rawVal ? `${rawVal} ${extraTokens.join(' ')}` : extraTokens.join(' ');
+          }
+        }
+      } else {
+        i++;
+        if (i >= rawTokens.length || rawTokens[i].startsWith('-')) {
+          return { error: 'IntelliJ installation directory must not be empty' };
+        }
+        const firstValToken = rawTokens[i];
+        i++;
+        const isQuoted =
+          (firstValToken.startsWith('"') &&
+            firstValToken.endsWith('"') &&
+            firstValToken.length >= 2) ||
+          (firstValToken.startsWith("'") &&
+            firstValToken.endsWith("'") &&
+            firstValToken.length >= 2);
+
+        if (isQuoted) {
+          rawVal = firstValToken;
+        } else {
+          const dirTokens = [firstValToken];
+          while (i < rawTokens.length && !rawTokens[i].startsWith('-')) {
+            dirTokens.push(rawTokens[i]);
+            i++;
+          }
+          rawVal = dirTokens.join(' ');
+        }
+      }
+
+      const stripped = stripQuotes(rawVal);
+      if (!stripped) {
+        return { error: 'IntelliJ installation directory must not be empty' };
+      }
+      dir = stripped;
+    } else if (token === '--version' || token.startsWith('--version=')) {
+      if (seenVersion) {
+        return { error: `Duplicate --version flag. ${INSTALL_USAGE}` };
+      }
+      seenVersion = true;
+
+      let rawVal = '';
+      if (token.startsWith('--version=')) {
+        rawVal = token.slice(10);
+        i++;
+      } else {
+        i++;
+        if (i >= rawTokens.length || rawTokens[i].startsWith('-')) {
+          return { error: 'IntelliJ server version must not be empty' };
+        }
+        rawVal = rawTokens[i];
+        i++;
+      }
+
+      const stripped = stripQuotes(rawVal);
+      if (!stripped) {
+        return { error: 'IntelliJ server version must not be empty' };
+      }
+      version = stripped;
+    } else {
+      if (token.startsWith('-')) {
+        return { error: `Unknown flag: ${token}. ${INSTALL_USAGE}` };
+      }
+      return { error: `Unexpected argument: ${token}. ${INSTALL_USAGE}` };
+    }
   }
-  return { dir: target };
+
+  return {
+    ...(dir !== undefined ? { dir } : {}),
+    ...(version !== undefined ? { version } : {}),
+  };
 }
 
 export function isInstallActive(state: InstallState | null | undefined): boolean {

@@ -1,13 +1,24 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { promisify } from 'node:util';
-import { type ServerBundle, serverBundle } from './server-bundles.js';
+import { DEFAULT_SERVER_VERSION, type ServerBundle, serverBundle } from './server-bundles.js';
 
 const execFileAsync = promisify(execFile);
 const MISSING_OWNER_GRACE_MS = 10_000;
@@ -206,10 +217,20 @@ async function writeStateAtomically(installDir: string, state: InstallState): Pr
 
 export async function findInstalled(
   installDir: string,
-  bundle: ServerBundle = serverBundle(),
+  bundle: { version: string; sha256?: string } = serverBundle(),
 ): Promise<InstallResult | null> {
+  validateBundleVersion(bundle.version);
+  const expectedHash =
+    bundle.sha256 ??
+    (bundle.version === DEFAULT_SERVER_VERSION ? serverBundle().sha256 : undefined);
   const versionDir = resolve(installDir, 'versions', bundle.version);
   const receiptFile = join(versionDir, 'receipt.json');
+  try {
+    if (!(await lstat(versionDir)).isDirectory()) return null;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
   try {
     const text = await readFile(receiptFile, 'utf8');
     const receipt: unknown = JSON.parse(text);
@@ -220,7 +241,8 @@ export async function findInstalled(
       receipt.version === bundle.version &&
       'sha256' in receipt &&
       typeof receipt.sha256 === 'string' &&
-      receipt.sha256.toLowerCase() === bundle.sha256.toLowerCase() &&
+      /^[a-f0-9]{64}$/i.test(receipt.sha256) &&
+      (expectedHash === undefined || receipt.sha256.toLowerCase() === expectedHash.toLowerCase()) &&
       'platform' in receipt &&
       receipt.platform === process.platform &&
       'arch' in receipt &&
@@ -245,6 +267,9 @@ export async function findInstalled(
       }
 
       const s = await stat(launcherPath);
+      const canonicalVersionDir = await realpath(versionDir);
+      const canonicalLauncher = await realpath(launcherPath);
+      if (!canonicalLauncher.startsWith(canonicalVersionDir + sep)) return null;
       if (s.isFile()) {
         return {
           executable: launcherPath,
@@ -253,8 +278,32 @@ export async function findInstalled(
         };
       }
     }
-  } catch {}
+  } catch (error: unknown) {
+    if (
+      !(error instanceof SyntaxError) &&
+      (error as NodeJS.ErrnoException).code !== 'ENOENT' &&
+      (error as NodeJS.ErrnoException).code !== 'ENOTDIR'
+    )
+      throw error;
+  }
   return null;
+}
+
+export async function listInstalledVersions(installDir: string): Promise<InstallResult[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(join(installDir, 'versions'));
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const installed: InstallResult[] = [];
+  for (const version of entries) {
+    if (typeof version !== 'string' || !/^\d+(?:\.\d+){2,3}$/.test(version)) continue;
+    const result = await findInstalled(installDir, { version });
+    if (result) installed.push(result);
+  }
+  return installed.sort((a, b) => b.version.localeCompare(a.version, 'en', { numeric: true }));
 }
 
 function validateBundleUrl(urlStr: string): void {

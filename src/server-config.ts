@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { validateServerVersion } from './server-bundles.js';
 import { type InstallState, readInstallState } from './server-install.js';
 
 export type ServerConfiguration =
-  | { mode: 'managed'; installDir: string }
+  | { mode: 'managed'; installDir: string; version?: string }
   | { mode: 'external'; executable: string };
 
 interface ConfigOptions {
@@ -47,14 +48,24 @@ function parseServer(value: unknown): ServerConfiguration {
       value.installDir.trim() &&
       !('executable' in value)
     ) {
-      return { mode: 'managed', installDir: resolve(value.installDir) };
+      const version = 'version' in value ? value.version : undefined;
+      if (version !== undefined) {
+        if (typeof version !== 'string') throw new Error('Invalid IntelliJ server version');
+        validateServerVersion(version);
+      }
+      return {
+        mode: 'managed',
+        installDir: resolve(value.installDir),
+        ...(version === undefined ? {} : { version }),
+      };
     }
     if (
       value.mode === 'external' &&
       'executable' in value &&
       typeof value.executable === 'string' &&
       value.executable.trim() &&
-      !('installDir' in value)
+      !('installDir' in value) &&
+      !('version' in value)
     ) {
       return { mode: 'external', executable: resolve(value.executable) };
     }

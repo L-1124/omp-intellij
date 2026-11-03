@@ -10,7 +10,9 @@ import { promisify } from 'node:util';
 import type { ServerBundle } from '../src/server-bundles.js';
 import {
   ensureInstalled,
+  findInstalled,
   type InstallState,
+  listInstalledVersions,
   readInstallState,
   validateArchiveEntry,
 } from '../src/server-install.js';
@@ -170,6 +172,53 @@ test('streamed download and install succeeds with progress, receipt, and fast pa
   const cachedResult = await ensureInstalled(installDir, { bundle });
   assert.deepEqual(cachedResult, result);
   assert.equal(mockServer.requestCount(), reqsBefore);
+});
+
+test('installing another version retains usable older versions and a checksum failure cannot replace them', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-version-install-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = await createTestArchive({
+    dir: root,
+    name: 'first.zip',
+    kind: 'zip',
+    files: { [LAUNCHER_NAME]: 'first-version-launcher' },
+  });
+  const second = await createTestArchive({
+    dir: root,
+    name: 'second.zip',
+    kind: 'zip',
+    files: { [LAUNCHER_NAME]: 'second-version-launcher' },
+  });
+  const server = await startMockServer(async (request, response) => {
+    const archive = request.url === '/first.zip' ? first : second;
+    response.end(await readFile(archive.archivePath));
+  });
+  t.after(() => server.close());
+  const installDir = join(root, 'installed');
+  const descriptor = (version: string, archive: typeof first, path: string): ServerBundle => ({
+    version,
+    url: `${server.url}/${path}`,
+    sha256: archive.sha256,
+    archive: 'zip',
+  });
+  await ensureInstalled(installDir, { bundle: descriptor('263.1000.0', first, 'first.zip') });
+  await ensureInstalled(installDir, { bundle: descriptor('263.2000.0', second, 'second.zip') });
+  await assert.rejects(
+    ensureInstalled(installDir, {
+      bundle: { ...descriptor('263.3000.0', second, 'second.zip'), sha256: '0'.repeat(64) },
+    }),
+    /checksum|sha-?256/i,
+  );
+  assert.deepEqual(
+    (await listInstalledVersions(installDir)).map((entry) => entry.version),
+    ['263.2000.0', '263.1000.0'],
+  );
+  const previous = await findInstalled(installDir, { version: '263.1000.0' });
+  assert.ok(previous);
+  assert.equal(await readFile(previous.executable, 'utf8'), 'first-version-launcher');
+  const current = await findInstalled(installDir, { version: '263.2000.0' });
+  assert.ok(current);
+  assert.equal(await readFile(current.executable, 'utf8'), 'second-version-launcher');
 });
 
 test('archive with single top-level wrapper directory is normalized correctly', async (t: TestContext) => {

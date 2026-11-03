@@ -28,6 +28,13 @@ import {
   sanitizeString,
 } from './runtime-status.js';
 import {
+  DEFAULT_SERVER_VERSION,
+  latestServerVersion as defaultLatestServerVersion,
+  resolveServerBundle as defaultResolveServerBundle,
+  serverBundle,
+  validateServerVersion,
+} from './server-bundles.js';
+import {
   defaultInstallDir as defaultDefaultInstallDir,
   readObservedInstallState as defaultReadObservedInstallState,
   readServerConfig as defaultReadServerConfig,
@@ -36,9 +43,12 @@ import {
 } from './server-config.js';
 import {
   ensureInstalled as defaultEnsureInstalled,
+  findInstalled as defaultFindInstalled,
+  listInstalledVersions as defaultListInstalledVersions,
   readInstallState as defaultReadInstallState,
   type InstallState,
 } from './server-install.js';
+import { selectServerVersion as defaultSelectServerVersion } from './server-versions.js';
 import {
   endpoint,
   ensureServer,
@@ -149,6 +159,13 @@ export interface ExtensionOverrides {
   serverInstallApi?: Partial<{
     ensureInstalled: typeof defaultEnsureInstalled;
     readInstallState: typeof defaultReadInstallState;
+    findInstalled: typeof defaultFindInstalled;
+    listInstalledVersions: typeof defaultListInstalledVersions;
+  }>;
+  versionApi?: Partial<{
+    selectServerVersion: typeof defaultSelectServerVersion;
+    resolveServerBundle: typeof defaultResolveServerBundle;
+    latestServerVersion: typeof defaultLatestServerVersion;
   }>;
   pollIntervalMs?: number;
   configFile?: string;
@@ -178,6 +195,14 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
   const installApi = {
     ensureInstalled: overrides.serverInstallApi?.ensureInstalled ?? defaultEnsureInstalled,
     readInstallState: overrides.serverInstallApi?.readInstallState ?? defaultReadInstallState,
+    findInstalled: overrides.serverInstallApi?.findInstalled ?? defaultFindInstalled,
+    listInstalledVersions:
+      overrides.serverInstallApi?.listInstalledVersions ?? defaultListInstalledVersions,
+  };
+  const versionApi = {
+    selectServerVersion: overrides.versionApi?.selectServerVersion ?? defaultSelectServerVersion,
+    resolveServerBundle: overrides.versionApi?.resolveServerBundle ?? defaultResolveServerBundle,
+    latestServerVersion: overrides.versionApi?.latestServerVersion ?? defaultLatestServerVersion,
   };
   const pollIntervalMs = overrides.pollIntervalMs ?? 500;
   const configOptions = overrides.configFile ? { configFile: overrides.configFile } : {};
@@ -194,6 +219,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     executable?: string;
     mode: 'managed' | 'external';
     installDir?: string;
+    version?: string;
     error?: string;
   }> {
     const configuration = await configApi.readServerConfig(settings.executable, configOptions);
@@ -201,14 +227,21 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       return { mode: 'external', executable: configuration.executable };
     }
     const installDir = configuration.installDir;
-    const state = await installApi.readInstallState(installDir).catch(() => null);
-    if (state?.phase === 'ready' && state.executable && existsSync(state.executable)) {
-      return { mode: 'managed', executable: state.executable, installDir };
+    const version = configuration.version ?? DEFAULT_SERVER_VERSION;
+    const installed = await installApi.findInstalled(installDir, { version }).catch(() => null);
+    if (installed?.executable && existsSync(installed.executable)) {
+      return {
+        mode: 'managed',
+        executable: installed.executable,
+        installDir,
+        version: installed.version,
+      };
     }
     return {
       mode: 'managed',
       installDir,
-      error: 'Managed IntelliJ server is not installed. Run /intellij install to install it first.',
+      version,
+      error: `Managed IntelliJ server is not installed (${version}). Run /intellij install to install it first.`,
     };
   }
 
@@ -516,7 +549,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         const configuration = await configApi.readServerConfig(settings.executable, configOptions);
         const configDesc =
           configuration.mode === 'managed'
-            ? `server (managed): ${configuration.installDir}`
+            ? `server (managed): ${configuration.installDir} (version: ${configuration.version ?? DEFAULT_SERVER_VERSION})`
             : `server (external): ${configuration.executable}`;
 
         const observed =
@@ -565,7 +598,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         startObserver(ctx);
         const commandGen = generation;
         const remainder = rawArgs.trim().slice('install'.length);
-        const { dir, error } = parseInstallArgs(remainder);
+        const { dir, version: requestedVersion, error } = parseInstallArgs(remainder);
         if (error) {
           ctx.ui?.notify(error, 'warning');
           return;
@@ -576,11 +609,11 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         let targetDir = dir;
 
         try {
+          const currentConfig = await configApi.readServerConfig(
+            settings.executable,
+            configOptions,
+          );
           if (!targetDir) {
-            const currentConfig = await configApi.readServerConfig(
-              settings.executable,
-              configOptions,
-            );
             if (currentConfig.mode === 'managed') {
               targetDir = currentConfig.installDir;
             } else {
@@ -588,37 +621,78 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             }
           }
 
+          let targetVersion = requestedVersion;
+          if (!targetVersion) {
+            if (currentConfig.mode === 'managed' && currentConfig.version) {
+              targetVersion = currentConfig.version;
+            } else {
+              targetVersion = DEFAULT_SERVER_VERSION;
+            }
+          }
+
+          const cachedVersion =
+            targetVersion === 'latest' ? null : validateServerVersion(targetVersion);
+          let result = cachedVersion
+            ? await installApi.findInstalled(targetDir, { version: cachedVersion })
+            : null;
           await configApi.trackInstallation(targetDir, configOptions);
-          const result = await installApi.ensureInstalled(targetDir, {
-            signal: ownedAbort.signal,
-            onProgress: (prog) => {
-              applyInstallState(prog, ctx, commandGen, false);
-            },
-          });
+          if (!result) {
+            const bundle =
+              targetVersion === DEFAULT_SERVER_VERSION
+                ? serverBundle()
+                : await versionApi.resolveServerBundle(targetVersion, {
+                    signal: ownedAbort.signal,
+                  });
+            result = await installApi.ensureInstalled(targetDir, {
+              bundle,
+              signal: ownedAbort.signal,
+              onProgress: (prog) => {
+                applyInstallState(prog, ctx, commandGen, false);
+              },
+            });
+          }
           if (disposed || generation !== commandGen) {
             return;
           }
-          await configApi.saveServerConfig(
-            { mode: 'managed', installDir: result.installDir },
-            configOptions,
-          );
+
+          let selectionBlockedError: string | null = null;
+          try {
+            await versionApi.selectServerVersion(result.version, {
+              configFile: overrides.configFile,
+              installDir: result.installDir,
+              systemPath: activeSystemPath,
+            });
+          } catch (selectErr: unknown) {
+            selectionBlockedError = getErrorMessage(selectErr);
+          }
+
           if (disposed || generation !== commandGen) {
             return;
           }
+
           const realState = await installApi.readInstallState(result.installDir);
           if (disposed || generation !== commandGen) return;
           const readyKey = `${realState?.installId || result.installDir}:ready`;
           notifiedInstalls.add(readyKey);
-          if (realState) {
+          if (realState?.version === result.version) {
             applyInstallState(realState, ctx, commandGen, false);
           } else {
             activeInstallState = null;
             renderStatus(ctx);
           }
-          ctx.ui?.notify(
-            `IntelliJ server installed: ${result.version} at ${result.executable}`,
-            'info',
-          );
+
+          if (selectionBlockedError) {
+            const retryDirArg = dir ? ` --dir "${result.installDir}"` : '';
+            ctx.ui?.notify(
+              `IntelliJ server installed: ${result.version} at ${result.executable}, but not selected: ${selectionBlockedError}. Stop the server and re-run /intellij install --version ${result.version}${retryDirArg} to switch to this installation.`,
+              'warning',
+            );
+          } else {
+            ctx.ui?.notify(
+              `IntelliJ server installed: ${result.version} at ${result.executable} (configured/selected; start explicitly)`,
+              'info',
+            );
+          }
         } catch (err: unknown) {
           if (disposed || generation !== commandGen) {
             return;
@@ -641,6 +715,123 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           if (activeCommandAbort === ownedAbort) {
             activeCommandAbort = null;
           }
+        }
+      } else if (sub === 'versions') {
+        const remainder = rawArgs.trim().slice('versions'.length).trim();
+        let queryRemote = false;
+        if (remainder) {
+          if (remainder === '--remote') {
+            queryRemote = true;
+          } else {
+            ctx.ui?.notify('Usage: /intellij versions [--remote]', 'warning');
+            return;
+          }
+        }
+
+        try {
+          const currentConfig = await configApi.readServerConfig(
+            settings.executable,
+            configOptions,
+          );
+
+          let serverRunningDesc: string;
+          if (await status(activeSystemPath)) {
+            try {
+              const { host, port } = await endpoint(activeSystemPath);
+              serverRunningDesc = `running (${host}:${port})`;
+            } catch {
+              serverRunningDesc = 'running';
+            }
+          } else if ((await isServerAlive(activeSystemPath)).alive) {
+            serverRunningDesc = 'process running (endpoint unavailable)';
+          } else {
+            serverRunningDesc = 'stopped';
+          }
+
+          const lines: string[] = [];
+          const selectedVersion =
+            currentConfig.mode === 'managed'
+              ? (currentConfig.version ?? DEFAULT_SERVER_VERSION)
+              : null;
+          const installDir =
+            currentConfig.mode === 'managed'
+              ? currentConfig.installDir
+              : configApi.defaultInstallDir();
+          if (currentConfig.mode === 'managed') {
+            lines.push(
+              `Selected version: ${selectedVersion}${currentConfig.version ? '' : ' (default)'}`,
+            );
+          } else {
+            lines.push(`External executable: ${currentConfig.executable}`);
+          }
+          const installed = await installApi.listInstalledVersions(installDir);
+          lines.push(
+            `Installed versions: ${
+              installed
+                .map((item) =>
+                  item.version === selectedVersion ? `${item.version} (selected)` : item.version,
+                )
+                .join(', ') || 'none'
+            }`,
+            `Installation directory: ${installDir}`,
+          );
+          lines.push(`Server status: ${serverRunningDesc}`);
+
+          if (queryRemote) {
+            try {
+              const latest = await versionApi.latestServerVersion();
+              lines.push(`Latest remote version: ${latest}`);
+            } catch (err: unknown) {
+              lines.push(`Latest remote version: error (${getErrorMessage(err)})`);
+            }
+          }
+
+          ctx.ui?.notify(lines.join('; '), 'info');
+        } catch (err: unknown) {
+          ctx.ui?.notify(`Failed to list IntelliJ versions: ${getErrorMessage(err)}`, 'error');
+        }
+      } else if (sub === 'use') {
+        const remainder = rawArgs.trim().slice('use'.length).trim();
+        const useTokens = remainder ? remainder.split(/\s+/).filter(Boolean) : [];
+        if (useTokens.length !== 1) {
+          ctx.ui?.notify('Usage: /intellij use <version>', 'warning');
+          return;
+        }
+        const targetVersion = useTokens[0];
+        if (targetVersion === 'latest') {
+          ctx.ui?.notify(
+            'Usage: /intellij use <version> requires an explicit numeric build version, not "latest".',
+            'warning',
+          );
+          return;
+        }
+
+        try {
+          const selected = await versionApi.selectServerVersion(targetVersion, {
+            configFile: overrides.configFile,
+            systemPath: activeSystemPath,
+          });
+
+          let eulaNote = '';
+          try {
+            const doc = await readServerEula(selected.executable);
+            const acceptance = await readEulaAcceptance(configOptions);
+            const isAccepted = acceptance.acceptedHashes.includes(doc.hash);
+            if (isAccepted) {
+              eulaNote = `EULA accepted (${doc.hash}).`;
+            } else {
+              eulaNote = `EULA not accepted (hash: ${doc.hash}). Run /intellij eula accept ${doc.hash} before starting the server.`;
+            }
+          } catch (eulaErr: unknown) {
+            eulaNote = `EULA status unknown (${getErrorMessage(eulaErr)}).`;
+          }
+
+          ctx.ui?.notify(
+            `Selected IntelliJ server ${selected.version} (${selected.executable}). ${eulaNote}`,
+            'info',
+          );
+        } catch (err: unknown) {
+          ctx.ui?.notify(`Failed to select IntelliJ version: ${getErrorMessage(err)}`, 'error');
         }
       } else if (sub === 'cache') {
         try {
@@ -1372,7 +1563,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|stop|restart|install [--dir <path>]|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop|restart|install [--version <build|latest>] [--dir <path>]|versions [--remote]|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }

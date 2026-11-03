@@ -11,6 +11,7 @@ export * from './run-core.js';
 export * from './server-bundles.js';
 export * from './server-config.js';
 export * from './server-install.js';
+export * from './server-versions.js';
 export * from './service.js';
 export * from './types.js';
 export * from './workspace.js';

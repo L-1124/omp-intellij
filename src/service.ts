@@ -12,6 +12,7 @@ import {
   releaseLifecycleLock,
 } from './lifecycle-lock.js';
 import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from './metadata.js';
+import { DEFAULT_SERVER_VERSION } from './server-bundles.js';
 import { readServerConfig, trackInstallation } from './server-config.js';
 import { findInstalled } from './server-install.js';
 
@@ -780,10 +781,12 @@ async function resolveStartConfiguration(options: {
     const configuration = await readServerConfig(settings.executable);
     if (configuration.mode === 'managed') {
       await trackInstallation(configuration.installDir);
-      const installed = await findInstalled(configuration.installDir);
+      const installed = await findInstalled(configuration.installDir, {
+        version: configuration.version ?? DEFAULT_SERVER_VERSION,
+      });
       if (!installed) {
         throw new Error(
-          `IntelliJ server is not installed at "${configuration.installDir}". Run /intellij install to download and install it explicitly.`,
+          `IntelliJ server ${configuration.version ?? DEFAULT_SERVER_VERSION} is not installed at "${configuration.installDir}". Run /intellij install to download and install it explicitly.`,
         );
       }
       executable = installed.executable;

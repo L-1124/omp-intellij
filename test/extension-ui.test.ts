@@ -3,9 +3,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import extension from '../src/extension.js';
 import type { ProjectStateResult } from '../src/connection-state.js';
 import { readServerEula } from '../src/eula.js';
+import extension from '../src/extension.js';
 import { formatStatusText, sanitizeDetail } from '../src/install-status.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
@@ -358,14 +358,16 @@ test('/intellij eula accept writes actual acceptance file and preserves other co
   }
 });
 
-test('/intellij eula accept in managed mode with real install-state file writes acceptance', async () => {
+test('/intellij eula accept in managed mode binds acceptance to the selected installed version', async () => {
   const installDir = join(tmpdir(), 'omp-real-managed-' + Math.random().toString(36).slice(2));
-  const binDir = join(installDir, 'bin');
+  const version = '263.1000.0';
+  const versionDir = join(installDir, 'versions', version);
+  const binDir = join(versionDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
   const launcherPath = join(binDir, launcherName);
   await writeFile(launcherPath, '#!/bin/sh\nexit 0', { mode: 0o755 });
-  const eulaPath = join(installDir, 'EULA.txt');
+  const eulaPath = join(versionDir, 'EULA.txt');
   await writeFile(eulaPath, 'Managed IntelliJ EULA content', 'utf8');
   const doc = await readServerEula(launcherPath);
 
@@ -374,13 +376,24 @@ test('/intellij eula accept in managed mode with real install-state file writes 
     installId: 'managed-test-1',
     pid: process.pid,
     installDir,
-    version: '263.7084.0',
+    version,
     phase: 'ready',
     downloadedBytes: 1000,
     executable: launcherPath,
     updatedAt: Date.now(),
   };
   await writeFile(join(installDir, 'install-state.json'), JSON.stringify(installState), 'utf8');
+  await writeFile(
+    join(versionDir, 'receipt.json'),
+    JSON.stringify({
+      version,
+      sha256: 'a'.repeat(64),
+      platform: process.platform,
+      arch: process.arch,
+      launcher: `bin/${launcherName}`,
+      installedAt: Date.now(),
+    }),
+  );
 
   const confDir = join(tmpdir(), 'omp-real-managed-conf-' + Math.random().toString(36).slice(2));
   await mkdir(confDir, { recursive: true });
@@ -388,7 +401,7 @@ test('/intellij eula accept in managed mode with real install-state file writes 
   await writeFile(
     configFile,
     JSON.stringify({
-      server: { mode: 'managed', installDir },
+      server: { mode: 'managed', installDir, version },
       managedExtraField: 'preserveManagedConfig',
     }),
     'utf8',
