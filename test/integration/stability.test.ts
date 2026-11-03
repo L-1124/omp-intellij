@@ -775,6 +775,7 @@ test('build gate timeout: long-running Gradle launch resolves upon gate release'
   const sandbox = await createP0RealSandbox(prereqs);
 
   try {
+    await copyCachedWrapper(sandbox);
     const jdk17Dir = await copyWorkspaceFixture('jdk17', sandbox);
     const buildDir = join(jdk17Dir, 'build');
     await mkdir(buildDir, { recursive: true });
