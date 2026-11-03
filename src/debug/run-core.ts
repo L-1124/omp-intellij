@@ -125,6 +125,7 @@ export function prepareBuildCommand(executable: string, args: string[]) {
 export interface LspSession {
   rootUri: string;
   nativePath: string;
+  serverCapabilities?: Record<string, unknown>;
   request: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
   notify: (method: string, params: unknown) => void;
   isReady: () => boolean;
@@ -711,7 +712,16 @@ export async function createLspSession(
       return promise;
     }
 
-    await request('initialize', initParams, initTimeout);
+    const initResult = await request('initialize', initParams, initTimeout);
+    const serverCapabilities =
+      initResult &&
+      typeof initResult === 'object' &&
+      'capabilities' in initResult &&
+      initResult.capabilities &&
+      typeof initResult.capabilities === 'object' &&
+      !Array.isArray(initResult.capabilities)
+        ? (initResult.capabilities as Record<string, unknown>)
+        : undefined;
     send({ method: 'initialized', params: {} });
 
     await waitForReady(requestTimeout, signal);
@@ -758,6 +768,7 @@ export async function createLspSession(
     return {
       rootUri: effectiveRootUri,
       nativePath,
+      serverCapabilities,
       request,
       notify,
       isReady: () => serverReady,

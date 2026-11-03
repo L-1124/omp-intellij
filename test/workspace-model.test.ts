@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { canonicalizeProject } from '../src/project/metadata.js';
 import {
+  formatModelLines,
   inspectWorkspaceModel,
   isPathContained,
   serializeWorkspaceModelError,
@@ -25,6 +26,8 @@ async function createTestServer(
   handlers: {
     onLaunch?: (id: number) => unknown;
     onBuild?: (id: number) => unknown;
+    capabilities?: Record<string, unknown>;
+    onExportWorkspace?: (id: number, exportDir: string) => Promise<unknown> | unknown;
   } = {},
 ): Promise<TestServerFixture> {
   const receivedMethods: string[] = [];
@@ -46,7 +49,13 @@ async function createTestServer(
         }
 
         if (msg.method === 'initialize' && msg.id !== undefined) {
-          socket.write(encode({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {} } }));
+          socket.write(
+            encode({
+              jsonrpc: '2.0',
+              id: msg.id,
+              result: { capabilities: handlers.capabilities ?? {} },
+            }),
+          );
           setImmediate(() => {
             socket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
           });
@@ -77,6 +86,17 @@ async function createTestServer(
                   },
                 };
             socket.write(encode({ jsonrpc: '2.0', id: msg.id, ...(resp as object) }));
+          } else if (params.command === 'exportWorkspace') {
+            const exportDir =
+              Array.isArray(params.arguments) && typeof params.arguments[0] === 'string'
+                ? params.arguments[0]
+                : '';
+            const resp = handlers.onExportWorkspace
+              ? await handlers.onExportWorkspace(msg.id, exportDir)
+              : { result: null };
+            if (resp !== undefined) {
+              socket.write(encode({ jsonrpc: '2.0', id: msg.id, ...(resp as object) }));
+            }
           }
         }
       }),
@@ -321,9 +341,13 @@ test('fixture: malformed RPC responses are rejected explicitly', async (t: TestC
     onLaunch: () => ({ result: { javaExec: '/test/jdk/bin/java' } }),
     onBuild: () => ({ result: { tool: 'maven' } }), // missing boolean supported
   });
-  const sock1 = await fixtureMissingSupported.connect();
+  const missingSupportedSocket = await fixtureMissingSupported.connect();
   await assert.rejects(
-    () => inspectWorkspaceModel(projectDir, javaFile, { socket: sock1, timeoutMs: 10000 }),
+    () =>
+      inspectWorkspaceModel(projectDir, javaFile, {
+        socket: missingSupportedSocket,
+        timeoutMs: 10000,
+      }),
     /missing or invalid boolean "supported" field/,
   );
 
@@ -331,9 +355,13 @@ test('fixture: malformed RPC responses are rejected explicitly', async (t: TestC
     onLaunch: () => ({ result: { workingDirectory: projectDir } }), // missing javaExec
     onBuild: () => ({ result: { supported: true } }),
   });
-  const sock2 = await fixtureMissingJavaExec.connect();
+  const missingJavaExecSocket = await fixtureMissingJavaExec.connect();
   await assert.rejects(
-    () => inspectWorkspaceModel(projectDir, javaFile, { socket: sock2, timeoutMs: 10000 }),
+    () =>
+      inspectWorkspaceModel(projectDir, javaFile, {
+        socket: missingJavaExecSocket,
+        timeoutMs: 10000,
+      }),
     /Launch resolution returned no java executable/,
   );
 });
@@ -507,4 +535,179 @@ test('maskConfiguredSecrets masks configured secrets across all report fields an
       }),
     /Invalid workspace configuration/,
   );
+});
+
+test('fixture: exportWorkspace enriches moduleSourceRoots, sdks, libraryCount, expands <HOME>/<MAVEN_REPO>, and masks secrets', async (t: TestContext) => {
+  const tmpRoot = await mkdtemp(join(tmpdir(), 'omp-model-export-test-'));
+  t.after(() => rm(tmpRoot, { recursive: true, force: true }));
+
+  const fakeHome = join(tmpRoot, 'home');
+  const m2Dir = join(fakeHome, '.m2');
+  const customRepo = join(fakeHome, 'custom-m2-repo');
+  const projectDir = join(fakeHome, 'workspace', 'myhook');
+  const mainJavaDir = join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example');
+  const kspDir = join(projectDir, 'app', 'build', 'generated', 'ksp', 'debug', 'kotlin');
+  const configDir = join(tmpRoot, 'configs');
+  await mkdir(m2Dir, { recursive: true });
+  await mkdir(customRepo, { recursive: true });
+  await mkdir(mainJavaDir, { recursive: true });
+  await mkdir(kspDir, { recursive: true });
+  await mkdir(configDir, { recursive: true });
+
+  await writeFile(
+    join(m2Dir, 'settings.xml'),
+    '<settings><!-- <localRepository>/ignored/comment</localRepository> --><localRepository>${user.home}/custom-m2-repo</localRepository></settings>',
+    'utf8',
+  );
+  await writeFile(join(projectDir, 'settings.gradle.kts'), 'include(":app")', 'utf8');
+  const javaFile = join(mainJavaDir, 'App.java');
+  await writeFile(javaFile, 'package com.example; public class App {}', 'utf8');
+
+  const { id: projectId } = canonicalizeProject(projectDir);
+  await writeFile(
+    join(configDir, `${projectId}.json`),
+    JSON.stringify({
+      id: projectId,
+      env: { REPO_SECRET: 'secret-sdk-token' },
+    }),
+    'utf8',
+  );
+
+  let observedExportDir = '';
+  const fixture = await createTestServer(t, {
+    capabilities: {
+      executeCommandProvider: {
+        commands: ['exportWorkspace', 'start_debug_server'],
+      },
+    },
+    onLaunch: () => ({
+      result: {
+        javaExec: '/test/jdk/bin/java',
+        moduleContentPaths: [],
+        classpath: [join(customRepo, 'org/junit/junit.jar')],
+        workingDirectory: join(projectDir, 'app'),
+      },
+    }),
+    onBuild: () => ({
+      result: {
+        supported: true,
+        tool: 'gradle',
+        cwd: projectDir,
+        command: ['gradlew', ':app:compileDebugSources'],
+      },
+    }),
+    onExportWorkspace: async (_id, exportDir) => {
+      observedExportDir = exportDir;
+      await writeFile(
+        join(exportDir, 'workspace.json'),
+        JSON.stringify({
+          modules: [
+            {
+              name: 'myhook',
+              contentRoots: [{ path: '<HOME>/workspace/myhook' }],
+            },
+            {
+              name: 'myhook.app.debug',
+              contentRoots: [
+                {
+                  path: '<HOME>/workspace/myhook/app/src/main',
+                  sourceRoots: [
+                    {
+                      path: '<HOME>/workspace/myhook/app/src/main/java',
+                      type: 'java-source',
+                    },
+                  ],
+                },
+                {
+                  path: '<HOME>/workspace/myhook/app/build/generated/ksp/debug/kotlin',
+                  sourceRoots: [
+                    {
+                      path: '<HOME>/workspace/myhook/app/build/generated/ksp/debug/kotlin',
+                      type: 'java-source',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          sdks: [
+            {
+              name: 'JDK 21 (secret-sdk-token)',
+              type: 'JavaSDK',
+              version: '21.0.12',
+              homePath: '<MAVEN_REPO>/jdks/jdk-21',
+            },
+          ],
+          libraries: [
+            { name: 'Gradle: junit:junit:4.13.2' },
+            { name: 'Gradle: androidx.room:room-runtime:2.6.1' },
+          ],
+        }),
+        'utf8',
+      );
+      return { result: null };
+    },
+  });
+
+  const clientSocket = await fixture.connect();
+  const report = await inspectWorkspaceModel(projectDir, javaFile, {
+    socket: clientSocket,
+    configDir,
+    homeDir: fakeHome,
+    timeoutMs: 10000,
+  });
+
+  assert.equal(report.moduleName, 'myhook.app.debug');
+  assert.equal(report.moduleContentPaths?.length, 2);
+  assert.equal(report.moduleSourceRoots?.length, 2);
+  assert.equal(report.moduleSourceRoots?.[0]?.path, join(projectDir, 'app', 'src', 'main', 'java'));
+  assert.equal(report.moduleSourceRoots?.[0]?.type, 'java-source');
+  assert.equal(report.moduleSourceRoots?.[1]?.path, kspDir);
+  assert.equal(report.libraryCount, 2);
+  assert.equal(report.sdks?.length, 1);
+  assert.ok(report.sdks?.[0]?.name.includes('[REDACTED]'));
+  assert.equal(report.sdks?.[0]?.homePath, join(customRepo, 'jdks', 'jdk-21'));
+  assert.equal(JSON.stringify(report).includes('secret-sdk-token'), false);
+
+  const formatted = formatModelLines(report).join('\n');
+  assert.match(formatted, /Module: myhook\.app\.debug/);
+  assert.match(formatted, /Module source roots: .*java-source/);
+  assert.match(formatted, /SDKs: JDK 21/);
+  assert.match(formatted, /Workspace libraries: 2/);
+  assert.ok(observedExportDir.length > 0);
+});
+
+test('workspace export failures remain visible instead of returning a complete model', async (t) => {
+  const projectDir = await mkdtemp(join(tmpdir(), 'omp-model-export-failure-'));
+  t.after(() => rm(projectDir, { recursive: true, force: true }));
+  const sourceFile = join(projectDir, 'App.java');
+  await writeFile(sourceFile, 'class App {}');
+  for (const scenario of [
+    { name: 'missing file', document: undefined, expected: /did not write workspace.json/ },
+    { name: 'invalid shape', document: '[]', expected: /invalid document/ },
+    { name: 'invalid libraries', document: '{"libraries":false}', expected: /invalid libraries/ },
+    { name: 'server error', document: undefined, expected: /Export failed/ },
+  ]) {
+    await t.test(scenario.name, async (subtest) => {
+      const fixture = await createTestServer(subtest, {
+        capabilities: { executeCommandProvider: { commands: ['exportWorkspace'] } },
+        onExportWorkspace: async (_id, exportDir) => {
+          if (scenario.name === 'server error') {
+            return { error: { code: -32603, message: 'Export failed' } };
+          }
+          if (scenario.document !== undefined) {
+            await writeFile(join(exportDir, 'workspace.json'), scenario.document);
+          }
+          return { result: null };
+        },
+      });
+      await assert.rejects(
+        inspectWorkspaceModel(projectDir, sourceFile, {
+          socket: await fixture.connect(),
+          timeoutMs: 10000,
+        }),
+        scenario.expected,
+      );
+    });
+  }
 });
