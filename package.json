@@ -10,6 +10,7 @@
   },
   "files": [
     "dist/",
+    "src/",
     "settings.json",
     ".omp-plugin/marketplace.json",
     "README.md"
@@ -61,7 +62,7 @@
   },
   "omp": {
     "extensions": [
-      "./dist/plugin.js"
+      "./src/plugin.ts"
     ]
   }
 }

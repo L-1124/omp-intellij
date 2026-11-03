@@ -17,16 +17,14 @@
 
 ## 安装插件
 
-当前从源码构建后，通过本地 marketplace 安装：
+通过 GitHub marketplace 安装：
 
 ```sh
-npm ci
-npm run build
-omp plugin marketplace add .
+omp plugin marketplace add L-1124/omp-intellij
 omp plugin install omp-intellij@omp-intellij
 ```
 
-安装后重新启动 OMP 会话。
+安装后重新启动 OMP 会话。插件使用宿主 Bun 将源码转译为 Node 桥接脚本，缓存在安装目录的 `.runtime/` 中；无需手动构建。安装目录需要可写，Node.js 仍用于运行桥接与调试代理。
 
 ## 首次使用
 

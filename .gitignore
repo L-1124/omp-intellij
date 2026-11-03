@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-test/
+.runtime/
 test-fixtures/**/target/
 test-fixtures/**/build/
 test-fixtures/**/.gradle/
