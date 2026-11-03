@@ -1,6 +1,6 @@
 {
   "name": "omp-intellij",
-  "version": "1.6.1",
+  "version": "2.0.0",
   "description": "IntelliJ Language Server and JVM runner/debugger integration for OMP",
   "type": "module",
   "main": "dist/index.js",
@@ -19,6 +19,7 @@
     "omp-intellij-dap": "./dist/debug/dap-proxy.js"
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
     "prepack": "npm run build",
     "watch": "tsc -w",
