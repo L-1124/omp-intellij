@@ -912,10 +912,10 @@ test('/intellij status displays selected mode, path, install info with percent o
 });
 
 test('/intellij install never implicitly accepts EULA or writes eula acceptance file', async () => {
-  const confDir = join(tmpdir(), 'omp-install-no-eula-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-install-no-eula-conf-${Math.random().toString(36).slice(2)}`);
   const installDir = join(
     tmpdir(),
-    'omp-install-no-eula-target-' + Math.random().toString(36).slice(2),
+    `omp-install-no-eula-target-${Math.random().toString(36).slice(2)}`,
   );
   await mkdir(confDir, { recursive: true });
   await mkdir(installDir, { recursive: true });
@@ -1305,7 +1305,7 @@ test('/intellij versions --remote explicitly queries remote latest version', asy
 
 test('/intellij use <version> validates arguments, invokes selectServerVersion, reports EULA gate, and never starts server', async () => {
   let selectedVersion = '';
-  const baseDir = join(tmpdir(), 'omp-use-test-' + Math.random().toString(36).slice(2));
+  const baseDir = join(tmpdir(), `omp-use-test-${Math.random().toString(36).slice(2)}`);
   const binDir = join(baseDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
@@ -1313,7 +1313,7 @@ test('/intellij use <version> validates arguments, invokes selectServerVersion, 
   await writeFile(launcherPath, '#!/bin/sh\nexit 0', { mode: 0o755 });
   await writeFile(join(baseDir, 'EULA.txt'), 'Sample terms', 'utf8');
 
-  const confDir = join(tmpdir(), 'omp-use-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-use-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
 
@@ -1367,7 +1367,7 @@ test('/intellij use <version> validates arguments, invokes selectServerVersion, 
 
 test('EULA commands verify chosen configured version via findInstalled rather than last readInstallState', async () => {
   let findInstalledVersionChecked = '';
-  const confDir = join(tmpdir(), 'omp-eula-ver-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-eula-ver-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(

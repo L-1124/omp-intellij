@@ -884,23 +884,21 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           const confirmed = inv.workspaces.filter((w) => w.mapping.status === 'confirmed').length;
           const unknown = count - confirmed;
           const serverNote = inv.serverAlive
-            ? 'Server running (PID ' + inv.serverPid + ')'
+            ? `Server running (PID ${inv.serverPid})`
             : 'Server stopped';
-          const leaseNote = inv.activeLeases.length + ' active lease(s)';
+          const leaseNote = `${inv.activeLeases.length} active lease(s)`;
 
           const details = inv.workspaces
             .map((w) => {
               const name =
                 w.mapping.status === 'confirmed'
                   ? w.mapping.projectPath || w.hash
-                  : 'Unknown (' + w.hash.slice(0, 8) + ')';
+                  : `Unknown (${w.hash.slice(0, 8)})`;
               const used = w.lastUsed
                 ? new Date(w.lastUsed).toISOString().replace('T', ' ').slice(0, 16)
                 : 'never';
               const lease = w.hasActiveLease ? ' [active lease]' : '';
-              return (
-                name + ': ' + formatBytes(w.logicalBytes) + ' (last used: ' + used + ')' + lease
-              );
+              return `${name}: ${formatBytes(w.logicalBytes)} (last used: ${used})${lease}`;
             })
             .join('; ');
 
@@ -921,7 +919,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             (unknown > 0
               ? ' (Note: Unknown workspaces cannot be pruned because native ownership cannot be verified.)'
               : '') +
-            (details ? ' Breakdown: ' + details : '');
+            (details ? ` Breakdown: ${details}` : '');
 
           ctx.ui?.notify(summary, 'info');
 
@@ -937,7 +935,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             );
           }
         } catch (err: unknown) {
-          ctx.ui?.notify('Failed to inspect cache: ' + getErrorMessage(err), 'warning');
+          ctx.ui?.notify(`Failed to inspect cache: ${getErrorMessage(err)}`, 'warning');
         }
       } else if (sub === 'prune') {
         const applyMode = parts[1] === '--apply';
@@ -1055,7 +1053,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             });
           }
         } catch (err: unknown) {
-          ctx.ui?.notify('Prune failed: ' + getErrorMessage(err), 'warning');
+          ctx.ui?.notify(`Prune failed: ${getErrorMessage(err)}`, 'warning');
         }
       } else if (sub === 'workspace') {
         const wsSub = (parts[1] || 'status').toLowerCase();
@@ -1105,9 +1103,9 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             if (isAuthDenied(projectState.license)) {
               statusParts.push(`recovery: ${LICENSE_RECOVERY_GUIDANCE}`);
             }
-            ctx.ui?.notify(statusParts.join('; ') + '.', 'info');
+            ctx.ui?.notify(`${statusParts.join('; ')}.`, 'info');
           } catch (err: unknown) {
-            ctx.ui?.notify('Failed to get workspace info: ' + getErrorMessage(err), 'warning');
+            ctx.ui?.notify(`Failed to get workspace info: ${getErrorMessage(err)}`, 'warning');
           }
         } else if (wsSub === 'list') {
           try {
@@ -1134,7 +1132,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               .join('; ');
             ctx.ui?.notify(`IntelliJ workspaces (${list.length}): ${entries}`, 'info');
           } catch (err: unknown) {
-            ctx.ui?.notify('Failed to list workspaces: ' + getErrorMessage(err), 'warning');
+            ctx.ui?.notify(`Failed to list workspaces: ${getErrorMessage(err)}`, 'warning');
           }
         } else if (wsSub === 'jdks') {
           try {
@@ -1158,7 +1156,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               .join('; ');
             ctx.ui?.notify(`Discovered JDKs (${candidates.length}): ${items}`, 'info');
           } catch (err: unknown) {
-            ctx.ui?.notify('Failed to discover JDKs: ' + getErrorMessage(err), 'warning');
+            ctx.ui?.notify(`Failed to discover JDKs: ${getErrorMessage(err)}`, 'warning');
           }
         } else if (wsSub === 'jdk') {
           const match = args.match(/^workspace\s+jdk(?:\s+([\s\S]+))?$/i);
@@ -1181,7 +1179,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 systemPath: settings.systemPath,
               });
             } catch (err: unknown) {
-              ctx.ui.notify('Failed to discover JDKs: ' + getErrorMessage(err), 'warning');
+              ctx.ui.notify(`Failed to discover JDKs: ${getErrorMessage(err)}`, 'warning');
               return;
             }
             if (!candidates || candidates.length === 0) {
@@ -1214,7 +1212,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               systemPath: settings.systemPath,
             });
           } catch (err: unknown) {
-            ctx.ui?.notify('Failed to save workspace JDK: ' + getErrorMessage(err), 'warning');
+            ctx.ui?.notify(`Failed to save workspace JDK: ${getErrorMessage(err)}`, 'warning');
             return;
           }
 
@@ -1222,8 +1220,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             const reimport = await wsApi.reimportWorkspace(projectRoot, {
               systemPath: settings.systemPath,
             });
-            const timeNote =
-              reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+            const timeNote = reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
             ctx.ui?.notify(
               'Workspace JDK saved and applied: ' +
                 (saved?.javaHome || targetPath) +
@@ -1259,18 +1256,14 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             const reimport = await wsApi.reimportWorkspace(projectRoot, {
               systemPath: settings.systemPath,
             });
-            const timeNote =
-              reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
-            ctx.ui?.notify(
-              'Workspace reimported successfully: index ready' + timeNote + '.',
-              'info',
-            );
+            const timeNote = reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
+            ctx.ui?.notify(`Workspace reimported successfully: index ready${timeNote}.`, 'info');
           } catch (err: unknown) {
             const msg = getErrorMessage(err);
             if (isTimeoutError(err)) {
-              ctx.ui?.notify('Workspace reimport timed out: ' + msg + '.', 'warning');
+              ctx.ui?.notify(`Workspace reimport timed out: ${msg}.`, 'warning');
             } else {
-              ctx.ui?.notify('Workspace reimport failed: ' + msg + '.', 'warning');
+              ctx.ui?.notify(`Workspace reimport failed: ${msg}.`, 'warning');
             }
           }
         } else if (wsSub === 'env') {
@@ -1297,7 +1290,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 'info',
               );
             } catch (err: unknown) {
-              ctx.ui?.notify('Failed to get workspace env: ' + getErrorMessage(err), 'warning');
+              ctx.ui?.notify(`Failed to get workspace env: ${getErrorMessage(err)}`, 'warning');
             }
           } else if (action === 'set') {
             const match = args.match(
@@ -1327,7 +1320,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               });
             } catch (err: unknown) {
               ctx.ui?.notify(
-                'Failed to save workspace environment variable: ' + getErrorMessage(err),
+                `Failed to save workspace environment variable: ${getErrorMessage(err)}`,
                 'warning',
               );
               return;
@@ -1343,7 +1336,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 systemPath: activeSystemPath,
               });
               const timeNote =
-                reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+                reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
               ctx.ui?.notify(
                 `Workspace environment variable ${name} saved and reload submitted: index ready${timeNote}.${precedenceNote}`,
                 'info',
@@ -1384,7 +1377,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               });
             } catch (err: unknown) {
               ctx.ui?.notify(
-                'Failed to unset workspace environment variable: ' + getErrorMessage(err),
+                `Failed to unset workspace environment variable: ${getErrorMessage(err)}`,
                 'warning',
               );
               return;
@@ -1403,7 +1396,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 systemPath: activeSystemPath,
               });
               const timeNote =
-                reimport?.elapsedMs !== undefined ? ' (' + reimport.elapsedMs + 'ms)' : '';
+                reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
               ctx.ui?.notify(
                 `Workspace environment variable ${name} unset and reload submitted: index ready${timeNote}.`,
                 'info',

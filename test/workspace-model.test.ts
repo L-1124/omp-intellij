@@ -556,7 +556,7 @@ test('fixture: exportWorkspace enriches moduleSourceRoots, sdks, libraryCount, e
 
   await writeFile(
     join(m2Dir, 'settings.xml'),
-    '<settings><!-- <localRepository>/ignored/comment</localRepository> --><localRepository>${user.home}/custom-m2-repo</localRepository></settings>',
+    `<settings><!-- <localRepository>/ignored/comment</localRepository> --><localRepository>\${user.home}/custom-m2-repo</localRepository></settings>`,
     'utf8',
   );
   await writeFile(join(projectDir, 'settings.gradle.kts'), 'include(":app")', 'utf8');

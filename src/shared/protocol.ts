@@ -2,7 +2,7 @@ import { Transform } from 'node:stream';
 
 export function encode(message: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(message));
-  return Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\r\n\r\n'), body]);
+  return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
 }
 
 export type FrameHandler = (message: unknown, frame: Buffer) => void;

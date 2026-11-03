@@ -353,7 +353,7 @@ export async function startBridge(): Promise<void> {
 
     if (error) {
       const safeMsg = sanitizeString(error.message);
-      console.error('intellij-bridge: ' + safeMsg);
+      console.error(`intellij-bridge: ${safeMsg}`);
       process.exitCode = 1;
     }
 

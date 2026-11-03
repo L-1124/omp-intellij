@@ -495,7 +495,9 @@ test('runner preserves raw RpcResponseError code and data in memory while messag
   assert.ok(!caughtError.message.includes('token_secret_999'));
   assert.ok(caughtError.message.includes('[REDACTED]'));
   const dir = join(fake.systemPath, 'plugin-metadata', 'connections');
-  const recordPath = join(dir, (await readdir(dir)).find((name) => name.endsWith('.json'))!);
+  const recordEntry = (await readdir(dir)).find((name) => name.endsWith('.json'));
+  assert.ok(recordEntry);
+  const recordPath = join(dir, recordEntry);
   const storedText = await readFile(recordPath, 'utf8');
   const stored = JSON.parse(storedText);
   assert.equal(stored.phase, 'ready');

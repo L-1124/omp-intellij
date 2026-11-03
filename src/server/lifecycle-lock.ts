@@ -131,7 +131,7 @@ export async function acquireLifecycleLock(options: {
           ' if no process is running.',
       );
     }
-    throw new Error('Timed out waiting for IntelliJ lifecycle lock: ' + lock);
+    throw new Error(`Timed out waiting for IntelliJ lifecycle lock: ${lock}`);
   }
 
   await writeFile(

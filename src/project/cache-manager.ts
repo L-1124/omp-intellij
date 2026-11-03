@@ -298,9 +298,7 @@ export async function applyPrune(
       (l) => l.canonicalPath && l.canonicalPath.toLowerCase() === cand.projectPath?.toLowerCase(),
     );
     if (hasLease) {
-      throw new Error(
-        'Cannot prune workspace ' + cand.hash + ': active connection lease detected.',
-      );
+      throw new Error(`Cannot prune workspace ${cand.hash}: active connection lease detected.`);
     }
   }
 
@@ -319,7 +317,7 @@ export async function applyPrune(
     const resolvedPath = resolve(cand.path);
     const rel = relative(workspacesDir, resolvedPath);
     if (!rel || rel.includes('..') || isAbsolute(rel)) {
-      failures.push({ hash: cand.hash, error: 'Path outside workspaces directory: ' + cand.path });
+      failures.push({ hash: cand.hash, error: `Path outside workspaces directory: ${cand.path}` });
       continue;
     }
 
@@ -328,7 +326,7 @@ export async function applyPrune(
       if (st.isSymbolicLink()) {
         failures.push({
           hash: cand.hash,
-          error: 'Refusing to delete symlink or reparse target: ' + cand.path,
+          error: `Refusing to delete symlink or reparse target: ${cand.path}`,
         });
         continue;
       }

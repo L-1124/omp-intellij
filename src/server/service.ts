@@ -825,13 +825,13 @@ async function internalStartServer(
     child = spawn(
       executable,
       [
-        '--socket=' + settings.host + ':0',
-        '--port-file=' + currentPortFile,
+        `--socket=${settings.host}:0`,
+        `--port-file=${currentPortFile}`,
         '--multi-client',
-        '--system-path=' + systemPath,
-        '--idle-timeout=' + settings.idleTimeout,
+        `--system-path=${systemPath}`,
+        `--idle-timeout=${settings.idleTimeout}`,
         '--data-sharing=none',
-        '--eula=' + eulaHash,
+        `--eula=${eulaHash}`,
       ],
       { detached: true, windowsHide: true, stdio: ['ignore', log.fd, log.fd] },
     );

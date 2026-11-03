@@ -9,7 +9,7 @@ import type { ProjectStateResult } from '../src/project/connection-state.js';
 import { findProjectRoot, watchIndex } from '../src/project/readiness.js';
 
 test('findProjectRoot searches upward for project markers', async () => {
-  const base = join(tmpdir(), 'omp-test-find-root-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-test-find-root-${Math.random().toString(36).slice(2)}`);
   const sub = join(base, 'module-a', 'src', 'main', 'java');
   await mkdir(sub, { recursive: true });
   await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
@@ -23,13 +23,13 @@ test('findProjectRoot searches upward for project markers', async () => {
 });
 
 test('findProjectRoot returns cwd or startPath when no marker found', () => {
-  const randomDir = join(tmpdir(), 'omp-no-marker-' + Math.random().toString(36).slice(2));
+  const randomDir = join(tmpdir(), `omp-no-marker-${Math.random().toString(36).slice(2)}`);
   const res = findProjectRoot(randomDir);
   assert.equal(res.toLowerCase(), randomDir.toLowerCase());
 });
 
 test('findProjectRoot prefers nearest build marker over outer unrelated .git in monorepo', async () => {
-  const base = join(tmpdir(), 'omp-test-monorepo-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-test-monorepo-${Math.random().toString(36).slice(2)}`);
   const gitDir = join(base, '.git');
   const childMaven = join(base, 'packages', 'child-maven');
   const childSrc = join(childMaven, 'src', 'main', 'java');
@@ -57,7 +57,7 @@ test('findProjectRoot prefers nearest build marker over outer unrelated .git in 
 });
 
 test('findProjectRoot identifies sibling Maven and Gradle child projects in same monorepo', async () => {
-  const base = join(tmpdir(), 'omp-test-siblings-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-test-siblings-${Math.random().toString(36).slice(2)}`);
   const gitDir = join(base, '.git');
   const mavenSvc = join(base, 'services', 'maven-svc');
   const mavenSrc = join(mavenSvc, 'src', 'main', 'java');
@@ -85,7 +85,7 @@ test('findProjectRoot identifies sibling Maven and Gradle child projects in same
 });
 
 test('findProjectRoot falls back to .git only when no supported build/project marker exists', async () => {
-  const base = join(tmpdir(), 'omp-test-fallback-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-test-fallback-${Math.random().toString(36).slice(2)}`);
   const gitDir = join(base, '.git');
   const nested = join(base, 'tools', 'scripts');
   const scriptFile = join(nested, 'run.sh');
@@ -108,7 +108,7 @@ test('findProjectRoot falls back to .git only when no supported build/project ma
 });
 
 test('findProjectRoot recognizes IntelliJ .idea and .iml module markers', async () => {
-  const base = join(tmpdir(), 'omp-test-idea-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-test-idea-${Math.random().toString(36).slice(2)}`);
   const gitDir = join(base, '.git');
   const ideaProject = join(base, 'apps', 'idea-app');
   const imlProject = join(base, 'apps', 'iml-app');
@@ -136,7 +136,7 @@ test('findProjectRoot recognizes IntelliJ .idea and .iml module markers', async 
 });
 
 test('findProjectRoot returns nearest nested module root rather than outer aggregator', async () => {
-  const base = join(tmpdir(), 'omp-test-multimodule-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-test-multimodule-${Math.random().toString(36).slice(2)}`);
   const subModule = join(base, 'sub-module');
   const subSrc = join(subModule, 'src', 'main', 'java');
 
@@ -262,7 +262,7 @@ test('watchIndex cleanup stops polling and rejects stale async callbacks', async
     if (callCount === 2) {
       return delayed.promise;
     }
-    return { phase: 'indexing', detail: 'Step ' + callCount, connectionId: 'c1' };
+    return { phase: 'indexing', detail: `Step ${callCount}`, connectionId: 'c1' };
   };
 
   const stopFn = watchIndex(

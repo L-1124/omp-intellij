@@ -78,7 +78,7 @@ export function validateSourceFile(
   const realFile = realpathSync(resolvedFile);
 
   let resolvedProject: string;
-  if (projectRoot && projectRoot.trim()) {
+  if (projectRoot?.trim()) {
     resolvedProject = resolve(projectRoot.trim());
     if (!existsSync(resolvedProject)) {
       throw new Error(`Project root not found: ${resolvedProject}`);

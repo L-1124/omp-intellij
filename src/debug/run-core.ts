@@ -909,8 +909,7 @@ export async function executeBuild(
     const binDir = join(effectiveJavaHome, 'bin');
     baseEnv[pathKey] = currentPath ? `${binDir}${delimiter}${currentPath}` : binDir;
   }
-  baseEnv.JAVA_TOOL_OPTIONS =
-    (baseEnv.JAVA_TOOL_OPTIONS ? baseEnv.JAVA_TOOL_OPTIONS + ' ' : '') + '-Dfile.encoding=UTF-8';
+  baseEnv.JAVA_TOOL_OPTIONS = `${baseEnv.JAVA_TOOL_OPTIONS ? `${baseEnv.JAVA_TOOL_OPTIONS} ` : ''}-Dfile.encoding=UTF-8`;
 
   const {
     promise,

@@ -34,15 +34,14 @@ for (const [filename, wrapper, declaration] of [
   ['.lsp.json', 'servers', plugin.lspServers],
   ['.dap.json', 'adapters', plugin.dapAdapters],
 ] as const) {
-  const content =
-    JSON.stringify(
-      { [wrapper]: declaration },
-      (_key, value: unknown) =>
-        typeof value === 'string'
-          ? value.replaceAll(rootToken, root.replace(/\\/g, '/').replace(/\/$/, ''))
-          : value,
-      2,
-    ) + '\n';
+  const content = `${JSON.stringify(
+    { [wrapper]: declaration },
+    (_key, value: unknown) =>
+      typeof value === 'string'
+        ? value.replaceAll(rootToken, root.replace(/\\/g, '/').replace(/\/$/, ''))
+        : value,
+    2,
+  )}\n`;
   const target = join(root, filename);
   try {
     if ((await readFile(target, 'utf8')) === content) continue;

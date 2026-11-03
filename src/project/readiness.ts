@@ -131,13 +131,13 @@ export function watchIndex(
           onState(snapshot);
         } catch (error: unknown) {
           const msg = error instanceof Error ? error.message : String(error);
-          console.error('intellij readiness: ' + msg);
+          console.error(`intellij readiness: ${msg}`);
         }
       }
     } catch (error: unknown) {
       if (stopped || thisGen !== generation) return;
       const msg = error instanceof Error ? error.message : String(error);
-      console.error('intellij readiness poll error: ' + msg);
+      console.error(`intellij readiness poll error: ${msg}`);
     } finally {
       if (!stopped) {
         timer = setTimeout(poll, intervalMs);

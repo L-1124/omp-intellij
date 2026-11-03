@@ -476,7 +476,7 @@ test('/intellij workspace reload triggers reimport and reports outcome', async (
 });
 
 test('/intellij workspace status surfaces sanitized failure and license state along with workspace info without starting LSP', async () => {
-  const tempSystemPath = join(tmpdir(), 'omp-ws-status-sys-' + Math.random().toString(36).slice(2));
+  const tempSystemPath = join(tmpdir(), `omp-ws-status-sys-${Math.random().toString(36).slice(2)}`);
   const connDir = join(tempSystemPath, 'plugin-metadata', 'connections');
   await mkdir(connDir, { recursive: true });
 

@@ -187,7 +187,7 @@ export function reduceConnectionState(
           : undefined;
       const errMsg = typeof errObj?.message === 'string' ? errObj.message : 'unknown error';
       next.phase = 'failed';
-      next.detail = 'Initialize failed: ' + errMsg;
+      next.detail = `Initialize failed: ${errMsg}`;
       next.failure = {
         kind: 'rpc',
         stage: 'initialize',
@@ -318,7 +318,7 @@ export function reduceConnectionState(
             next.indexReadySeen &&
             next.indexingTokens.length === 0 &&
             next.phase !== 'failed' &&
-            (!next.failure || next.failure.kind !== 'authorization')
+            next.failure?.kind !== 'authorization'
           ) {
             next.phase = 'ready';
             next.detail = 'IntelliJ index ready';
@@ -338,7 +338,7 @@ export function reduceConnectionState(
     } else if (message.method === 'intellij/ready-for-test') {
       next.indexReadySeen = true;
       next.indexingTokens = [];
-      if (next.phase !== 'failed' && (!next.failure || next.failure.kind !== 'authorization')) {
+      if (next.phase !== 'failed' && next.failure?.kind !== 'authorization') {
         next.phase = 'ready';
         next.detail = 'IntelliJ index ready';
         next.progress = null;
@@ -406,7 +406,7 @@ export function createConnectionState(options: {
       } catch (err: unknown) {
         const rawMsg = err instanceof Error ? err.message : String(err);
         const message = sanitizeString(rawMsg);
-        console.error('intellij connection-state write error: ' + message);
+        console.error(`intellij connection-state write error: ${message}`);
         if (onWriteError) {
           try {
             onWriteError(err);
@@ -557,7 +557,7 @@ export async function readProjectState(
     const message = e instanceof Error ? e.message : String(e);
     const readErrResult: ProjectStateResult = {
       phase: 'not-started',
-      detail: 'Failed to read connection metadata: ' + message,
+      detail: `Failed to read connection metadata: ${message}`,
       license: { status: 'unknown' },
     };
     return sanitizeStatus(readErrResult) as ProjectStateResult;
@@ -630,7 +630,7 @@ export async function readProjectState(
         matches = true;
       } else if (
         targetCanonical.startsWith(
-          connCanonical.endsWith('/') ? connCanonical : connCanonical + '/',
+          connCanonical.endsWith('/') ? connCanonical : `${connCanonical}/`,
         )
       ) {
         matches = true;

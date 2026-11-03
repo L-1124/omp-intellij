@@ -54,7 +54,7 @@ test('formatStatusText avoids duplicate percentage prefix', () => {
 test('extension startup and shutdown are idempotent without noisy status writes', async () => {
   const pi = createMockPi();
   extension(pi);
-  const base = join(tmpdir(), 'omp-ui-idem-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-ui-idem-${Math.random().toString(36).slice(2)}`);
   await mkdir(base, { recursive: true });
   await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
   try {
@@ -80,7 +80,7 @@ test('extension startup and shutdown are idempotent without noisy status writes'
   }
 });
 test('/intellij eula (default) and status report real document hash, path, and acceptance', async () => {
-  const baseDir = join(tmpdir(), 'omp-real-eula-' + Math.random().toString(36).slice(2));
+  const baseDir = join(tmpdir(), `omp-real-eula-${Math.random().toString(36).slice(2)}`);
   const binDir = join(baseDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
@@ -90,7 +90,7 @@ test('/intellij eula (default) and status report real document hash, path, and a
   await writeFile(eulaPath, 'Official JetBrains EULA text for testing', 'utf8');
   const doc = await readServerEula(launcherPath);
 
-  const confDir = join(tmpdir(), 'omp-real-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-real-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(
@@ -129,7 +129,7 @@ test('/intellij eula (default) and status report real document hash, path, and a
 });
 
 test('/intellij eula status when managed server is absent warns to install without downloading', async () => {
-  const confDir = join(tmpdir(), 'omp-managed-absent-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-managed-absent-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   const emptyInstallDir = join(confDir, 'nonexistent-install');
@@ -171,7 +171,7 @@ test('/intellij eula status when managed server is absent warns to install witho
 });
 
 test('/intellij eula view reads real document text and path from launcher', async () => {
-  const baseDir = join(tmpdir(), 'omp-real-view-' + Math.random().toString(36).slice(2));
+  const baseDir = join(tmpdir(), `omp-real-view-${Math.random().toString(36).slice(2)}`);
   const binDir = join(baseDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
@@ -182,7 +182,7 @@ test('/intellij eula view reads real document text and path from launcher', asyn
   await writeFile(eulaPath, uniqueEulaContent, 'utf8');
   const doc = await readServerEula(launcherPath);
 
-  const confDir = join(tmpdir(), 'omp-real-view-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-real-view-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(
@@ -211,7 +211,7 @@ test('/intellij eula view reads real document text and path from launcher', asyn
 });
 
 test('/intellij eula accept validates format and mismatch with real files and no writes', async () => {
-  const baseDir = join(tmpdir(), 'omp-real-mismatch-' + Math.random().toString(36).slice(2));
+  const baseDir = join(tmpdir(), `omp-real-mismatch-${Math.random().toString(36).slice(2)}`);
   const binDir = join(baseDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
@@ -220,7 +220,7 @@ test('/intellij eula accept validates format and mismatch with real files and no
   const eulaPath = join(baseDir, 'EULA.txt');
   await writeFile(eulaPath, 'Official EULA text', 'utf8');
 
-  const confDir = join(tmpdir(), 'omp-real-mismatch-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-real-mismatch-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(
@@ -283,7 +283,7 @@ test('/intellij eula accept validates format and mismatch with real files and no
 });
 
 test('/intellij eula accept writes actual acceptance file and preserves other config fields', async () => {
-  const baseDir = join(tmpdir(), 'omp-real-accept-' + Math.random().toString(36).slice(2));
+  const baseDir = join(tmpdir(), `omp-real-accept-${Math.random().toString(36).slice(2)}`);
   const binDir = join(baseDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
@@ -293,7 +293,7 @@ test('/intellij eula accept writes actual acceptance file and preserves other co
   await writeFile(eulaPath, 'Official EULA text for acceptance test', 'utf8');
   const doc = await readServerEula(launcherPath);
 
-  const confDir = join(tmpdir(), 'omp-real-accept-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-real-accept-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(
@@ -359,7 +359,7 @@ test('/intellij eula accept writes actual acceptance file and preserves other co
 });
 
 test('/intellij eula accept in managed mode binds acceptance to the selected installed version', async () => {
-  const installDir = join(tmpdir(), 'omp-real-managed-' + Math.random().toString(36).slice(2));
+  const installDir = join(tmpdir(), `omp-real-managed-${Math.random().toString(36).slice(2)}`);
   const version = '263.1000.0';
   const versionDir = join(installDir, 'versions', version);
   const binDir = join(versionDir, 'bin');
@@ -395,7 +395,7 @@ test('/intellij eula accept in managed mode binds acceptance to the selected ins
     }),
   );
 
-  const confDir = join(tmpdir(), 'omp-real-managed-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-real-managed-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(
@@ -432,7 +432,7 @@ test('/intellij eula accept in managed mode binds acceptance to the selected ins
 });
 
 test('/intellij eula accept aborts and does not write old acceptance if file changes during confirmation', async () => {
-  const baseDir = join(tmpdir(), 'omp-real-stale-' + Math.random().toString(36).slice(2));
+  const baseDir = join(tmpdir(), `omp-real-stale-${Math.random().toString(36).slice(2)}`);
   const binDir = join(baseDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
@@ -442,7 +442,7 @@ test('/intellij eula accept aborts and does not write old acceptance if file cha
   await writeFile(eulaPath, 'Original initial EULA content before confirm', 'utf8');
   const initialDoc = await readServerEula(launcherPath);
 
-  const confDir = join(tmpdir(), 'omp-real-stale-conf-' + Math.random().toString(36).slice(2));
+  const confDir = join(tmpdir(), `omp-real-stale-conf-${Math.random().toString(36).slice(2)}`);
   await mkdir(confDir, { recursive: true });
   const configFile = join(confDir, 'intellij.json');
   await writeFile(
@@ -505,7 +505,7 @@ test('watchIndex observer notifies on auth denial once and notifies once on reco
 
   // Start observer via start command
   // We emit session_start with Java marker present
-  const base = join(tmpdir(), 'omp-auth-obs-' + Math.random().toString(36).slice(2));
+  const base = join(tmpdir(), `omp-auth-obs-${Math.random().toString(36).slice(2)}`);
   await mkdir(base, { recursive: true });
   await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
   try {

@@ -128,7 +128,7 @@ async function appendLedgerEvent(
   const { id, canonicalPath, nativePath, rootUri } = canonicalizeProject(projectPath);
   const dirs = getMetadataDirs(systemPath);
   await mkdir(dirs.projects, { recursive: true });
-  const line = JSON.stringify({ id, canonicalPath, nativePath, rootUri, ...event }) + '\n';
+  const line = `${JSON.stringify({ id, canonicalPath, nativePath, rootUri, ...event })}\n`;
   await appendFile(eventsFile(dirs, id), line, 'utf8');
   return foldLedger(await readFile(eventsFile(dirs, id), 'utf8'));
 }

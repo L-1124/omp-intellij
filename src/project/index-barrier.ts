@@ -98,7 +98,7 @@ export class IndexBarrier {
       } catch (err) {
         const safeErrMsg =
           err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
-        console.error('IndexBarrier onStateChange error: ' + safeErrMsg);
+        console.error(`IndexBarrier onStateChange error: ${safeErrMsg}`);
       }
     }
   }
@@ -164,7 +164,7 @@ export class IndexBarrier {
     this.failureKind = effectiveFailure?.kind;
 
     if (this.state.phase !== 'disconnected') {
-      if (!effectiveFailure || effectiveFailure.kind !== 'authorization') {
+      if (effectiveFailure?.kind !== 'authorization') {
         this.state.phase = 'failed';
       }
       this.state.detail = reason;
@@ -177,7 +177,7 @@ export class IndexBarrier {
         } catch (err) {
           const safeErrMsg =
             err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
-          console.error('IndexBarrier onStateChange error: ' + safeErrMsg);
+          console.error(`IndexBarrier onStateChange error: ${safeErrMsg}`);
         }
       }
     }

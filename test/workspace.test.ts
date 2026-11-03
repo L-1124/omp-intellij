@@ -49,13 +49,12 @@ async function createMockJdk(
   if (!skipJavac) await writeFile(javacFile, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   if (!skipRelease) {
     const ver = malformedVersion ? 'not-a-number' : version;
-    const releaseContent =
-      [
-        `IMPLEMENTOR="${implementor}"`,
-        `JAVA_VERSION="${ver}"`,
-        'OS_ARCH="x86_64"',
-        `OS_NAME="${process.platform === 'win32' ? 'Windows' : 'Linux'}"`,
-      ].join('\n') + '\n';
+    const releaseContent = `${[
+      `IMPLEMENTOR="${implementor}"`,
+      `JAVA_VERSION="${ver}"`,
+      'OS_ARCH="x86_64"',
+      `OS_NAME="${process.platform === 'win32' ? 'Windows' : 'Linux'}"`,
+    ].join('\n')}\n`;
     await writeFile(join(dir, 'release'), releaseContent, 'utf8');
   }
 }
@@ -67,7 +66,7 @@ test('cleanPath removes surrounding quotes and whitespace', () => {
 });
 
 test('validateJdk verifies bin/java, bin/javac, and release file', async () => {
-  const tmp = join(tmpdir(), 'omp-test-jdk-' + Math.random().toString(36).slice(2));
+  const tmp = join(tmpdir(), `omp-test-jdk-${Math.random().toString(36).slice(2)}`);
   try {
     await createMockJdk(tmp, { version: '21.0.4', implementor: 'Eclipse Adoptium' });
     const validated = validateJdk(tmp);
@@ -79,7 +78,7 @@ test('validateJdk verifies bin/java, bin/javac, and release file', async () => {
 });
 
 test('validateJdk rejects malformed JAVA_VERSION in release file', async () => {
-  const tmp = join(tmpdir(), 'omp-test-jdk-malformed-' + Math.random().toString(36).slice(2));
+  const tmp = join(tmpdir(), `omp-test-jdk-malformed-${Math.random().toString(36).slice(2)}`);
   try {
     await createMockJdk(tmp, { malformedVersion: true });
     assert.throws(() => validateJdk(tmp), /malformed JAVA_VERSION/i);
@@ -89,7 +88,7 @@ test('validateJdk rejects malformed JAVA_VERSION in release file', async () => {
 });
 
 test('validateJdk accepts path with spaces', async () => {
-  const tmp = join(tmpdir(), 'omp test jdk ' + Math.random().toString(36).slice(2));
+  const tmp = join(tmpdir(), `omp test jdk ${Math.random().toString(36).slice(2)}`);
   try {
     await createMockJdk(tmp, { version: '17.0.2', implementor: 'Oracle Corporation' });
     const validated = validateJdk(`"${tmp}"`);
@@ -101,8 +100,8 @@ test('validateJdk accepts path with spaces', async () => {
 });
 
 test('validateJdk allows symlink paths', async () => {
-  const realDir = join(tmpdir(), 'omp-test-jdk-real-' + Math.random().toString(36).slice(2));
-  const linkDir = join(tmpdir(), 'omp-test-jdk-link-' + Math.random().toString(36).slice(2));
+  const realDir = join(tmpdir(), `omp-test-jdk-real-${Math.random().toString(36).slice(2)}`);
+  const linkDir = join(tmpdir(), `omp-test-jdk-link-${Math.random().toString(36).slice(2)}`);
   try {
     await createMockJdk(realDir, { version: '21.0.1' });
     try {
@@ -119,7 +118,7 @@ test('validateJdk allows symlink paths', async () => {
 });
 
 test('detectProjectType identifies maven and gradle projects', async () => {
-  const tmp = join(tmpdir(), 'omp-test-proj-' + Math.random().toString(36).slice(2));
+  const tmp = join(tmpdir(), `omp-test-proj-${Math.random().toString(36).slice(2)}`);
   try {
     await mkdir(tmp, { recursive: true });
     assert.equal(detectProjectType(tmp), 'unknown');
@@ -140,10 +139,10 @@ test('detectProjectType identifies maven and gradle projects', async () => {
 });
 
 test('setWorkspaceJdk persists atomically and does not write on invalid JDK', async () => {
-  const configDir = join(tmpdir(), 'omp-test-cfg-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp test proj ' + Math.random().toString(36).slice(2));
-  const validJdk = join(tmpdir(), 'omp-valid-jdk-' + Math.random().toString(36).slice(2));
-  const invalidJdk = join(tmpdir(), 'omp-invalid-jdk-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-cfg-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp test proj ${Math.random().toString(36).slice(2)}`);
+  const validJdk = join(tmpdir(), `omp-valid-jdk-${Math.random().toString(36).slice(2)}`);
+  const invalidJdk = join(tmpdir(), `omp-invalid-jdk-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(projDir, { recursive: true });
@@ -172,10 +171,10 @@ test('setWorkspaceJdk persists atomically and does not write on invalid JDK', as
 });
 
 test('getWorkspaceInfo distinguishes savedJdk from verified runtime receipt', async () => {
-  const configDir = join(tmpdir(), 'omp-test-cfg2-' + Math.random().toString(36).slice(2));
-  const systemPath = join(tmpdir(), 'omp-test-sys2-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj2-' + Math.random().toString(36).slice(2));
-  const jdk21 = join(tmpdir(), 'omp-test-jdk21-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-cfg2-${Math.random().toString(36).slice(2)}`);
+  const systemPath = join(tmpdir(), `omp-test-sys2-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj2-${Math.random().toString(36).slice(2)}`);
+  const jdk21 = join(tmpdir(), `omp-test-jdk21-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(projDir, { recursive: true });
@@ -229,8 +228,8 @@ test('getWorkspaceInfo distinguishes savedJdk from verified runtime receipt', as
 });
 
 test('applyWorkspaceOptions returns original options untouched when no profile saved', async () => {
-  const configDir = join(tmpdir(), 'omp-test-cfg-unconf-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj-unconf-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-cfg-unconf-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj-unconf-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(projDir, { recursive: true });
@@ -248,9 +247,9 @@ test('applyWorkspaceOptions returns original options untouched when no profile s
 });
 
 test('applyWorkspaceOptions throws if project type cannot be determined for saved profile', async () => {
-  const configDir = join(tmpdir(), 'omp-test-cfg-unk-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj-unk-' + Math.random().toString(36).slice(2));
-  const jdk21 = join(tmpdir(), 'omp-test-jdk-unk-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-cfg-unk-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj-unk-${Math.random().toString(36).slice(2)}`);
+  const jdk21 = join(tmpdir(), `omp-test-jdk-unk-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(projDir, { recursive: true });
@@ -269,9 +268,9 @@ test('applyWorkspaceOptions throws if project type cannot be determined for save
 });
 
 test('applyWorkspaceOptions merges managed JDK and preserves unrelated native options', async () => {
-  const configDir = join(tmpdir(), 'omp-test-cfg3-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj3-' + Math.random().toString(36).slice(2));
-  const jdk21 = join(tmpdir(), 'omp-test-jdk21-3-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-cfg3-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj3-${Math.random().toString(36).slice(2)}`);
+  const jdk21 = join(tmpdir(), `omp-test-jdk21-3-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(projDir, { recursive: true });
@@ -322,7 +321,7 @@ test('applyWorkspaceOptions merges managed JDK and preserves unrelated native op
 });
 
 test('discoverJdks finds bounded candidate JDKs and deduplicates', async () => {
-  const root = join(tmpdir(), 'omp-test-store-' + Math.random().toString(36).slice(2));
+  const root = join(tmpdir(), `omp-test-store-${Math.random().toString(36).slice(2)}`);
   const subJdk1 = join(root, 'jdk-21');
   const subJdk2 = join(root, 'jdk-17');
   const nonJdk = join(root, 'not-a-jdk');
@@ -360,9 +359,9 @@ test('discoverJdks finds bounded candidate JDKs and deduplicates', async () => {
 });
 
 test('executeBuild integrates managed JDK and prepends effective JAVA_HOME to PATH', async () => {
-  const configDir = join(tmpdir(), 'omp-test-cfg-eb-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj-eb-' + Math.random().toString(36).slice(2));
-  const jdk21 = join(tmpdir(), 'omp-test-jdk21-eb-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-cfg-eb-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj-eb-${Math.random().toString(36).slice(2)}`);
+  const jdk21 = join(tmpdir(), `omp-test-jdk21-eb-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(projDir, { recursive: true });
@@ -469,9 +468,9 @@ test('maskConfiguredSecrets strips literal configured env values from echoed err
 });
 
 test('setWorkspaceEnvVar, unsetWorkspaceEnvVar and setWorkspaceJdk preserve unrelated fields and each other', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-env-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-ws-proj-' + Math.random().toString(36).slice(2));
-  const jdk21 = join(tmpdir(), 'omp-test-jdk-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-env-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-ws-proj-${Math.random().toString(36).slice(2)}`);
+  const jdk21 = join(tmpdir(), `omp-test-jdk-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(configDir, { recursive: true });
@@ -527,10 +526,10 @@ test('setWorkspaceEnvVar, unsetWorkspaceEnvVar and setWorkspaceJdk preserve unre
 });
 
 test('applyWorkspaceOptions applies env-only configuration without saved JDK and never mutates process.env', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-env-only-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-env-only-${Math.random().toString(36).slice(2)}`);
   const projDir = join(
     tmpdir(),
-    'omp-test-ws-proj-env-only-' + Math.random().toString(36).slice(2),
+    `omp-test-ws-proj-env-only-${Math.random().toString(36).slice(2)}`,
   );
 
   try {
@@ -577,9 +576,9 @@ test('applyWorkspaceOptions applies env-only configuration without saved JDK and
 });
 
 test('applyWorkspaceOptions isolates multiple projects and prevents cross-project env pollution', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-iso-' + Math.random().toString(36).slice(2));
-  const projA = join(tmpdir(), 'omp-test-proj-a-' + Math.random().toString(36).slice(2));
-  const projB = join(tmpdir(), 'omp-test-proj-b-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-iso-${Math.random().toString(36).slice(2)}`);
+  const projA = join(tmpdir(), `omp-test-proj-a-${Math.random().toString(36).slice(2)}`);
+  const projB = join(tmpdir(), `omp-test-proj-b-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(configDir, { recursive: true });
@@ -631,9 +630,9 @@ test('applyWorkspaceOptions isolates multiple projects and prevents cross-projec
 });
 
 test('applyWorkspaceOptions enforces JDK authoritative precedence over conflicting env JAVA_HOME', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-prec-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj-prec-' + Math.random().toString(36).slice(2));
-  const validJdk = join(tmpdir(), 'omp-test-jdk-valid-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-prec-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj-prec-${Math.random().toString(36).slice(2)}`);
+  const validJdk = join(tmpdir(), `omp-test-jdk-valid-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(configDir, { recursive: true });
@@ -667,8 +666,8 @@ test('applyWorkspaceOptions enforces JDK authoritative precedence over conflicti
 });
 
 test('applyWorkspaceOptions with raw host options cleans up unset env vars', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-unset-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-ws-proj-unset-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-unset-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-ws-proj-unset-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(configDir, { recursive: true });
@@ -713,9 +712,9 @@ test('applyWorkspaceOptions with raw host options cleans up unset env vars', asy
 });
 
 test('unsetWorkspaceEnvVar cleans up env while preserving JDK and other fields', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-reset-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-ws-proj-reset-' + Math.random().toString(36).slice(2));
-  const jdk21 = join(tmpdir(), 'omp-test-jdk-reset-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-reset-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-ws-proj-reset-${Math.random().toString(36).slice(2)}`);
+  const jdk21 = join(tmpdir(), `omp-test-jdk-reset-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(configDir, { recursive: true });
@@ -745,9 +744,9 @@ test('unsetWorkspaceEnvVar cleans up env while preserving JDK and other fields',
 });
 
 test('getWorkspaceInfo accurately tracks persistent importStatus receipt and marks pending if config changed', async () => {
-  const configDir = join(tmpdir(), 'omp-test-ws-status-' + Math.random().toString(36).slice(2));
-  const systemPath = join(tmpdir(), 'omp-test-sys-status-' + Math.random().toString(36).slice(2));
-  const projDir = join(tmpdir(), 'omp-test-proj-status-' + Math.random().toString(36).slice(2));
+  const configDir = join(tmpdir(), `omp-test-ws-status-${Math.random().toString(36).slice(2)}`);
+  const systemPath = join(tmpdir(), `omp-test-sys-status-${Math.random().toString(36).slice(2)}`);
+  const projDir = join(tmpdir(), `omp-test-proj-status-${Math.random().toString(36).slice(2)}`);
 
   try {
     await mkdir(configDir, { recursive: true });
