@@ -22,6 +22,12 @@ import {
   type ReimportWorkspaceResult,
   type WorkspaceInfo,
 } from './workspace.js';
+import {
+  formatModelLines,
+  inspectWorkspaceModel,
+  serializeWorkspaceModelError,
+  type WorkspaceModelReport,
+} from './workspace-model.js';
 
 export interface IntellijWorkspaceContext {
   projectType?: 'maven' | 'gradle' | 'unknown';
@@ -194,8 +200,9 @@ export function formatLicenseLines(license?: LicenseSummary): string[] {
 }
 
 export interface IntellijParams {
-  action?: 'status' | 'wait' | 'reload' | 'doctor';
+  action?: 'status' | 'wait' | 'reload' | 'doctor' | 'model';
   project?: string;
+  file?: string;
   timeout?: number;
 }
 
@@ -207,6 +214,7 @@ export interface IntellijDetails extends ProjectStateResult {
   elapsedMs?: number;
   workspace?: IntellijWorkspaceContext;
   doctor?: DoctorReport;
+  model?: WorkspaceModelReport;
 }
 
 export interface ExecuteIntellijOptions {
@@ -274,6 +282,64 @@ export async function executeIntellij(
       },
       isError: !report.summary.ok,
     };
+  }
+  if (action === 'model') {
+    signal?.throwIfAborted();
+    if (!params.file?.trim()) throw new Error('Action "model" requires a source file');
+    const file = resolve(ctx.cwd, params.file);
+    const timeoutSec = params.timeout ?? 60;
+    if (!Number.isInteger(timeoutSec) || timeoutSec < 1 || timeoutSec > 300) {
+      throw new Error('Model timeout must be an integer from 1 to 300 seconds');
+    }
+    try {
+      const model = await inspectWorkspaceModel(params.project ? projectRoot : undefined, file, {
+        signal,
+        timeoutMs: timeoutSec * 1000,
+        systemPath,
+        configDir,
+      });
+      const current = await readState(
+        systemPath,
+        params.project ? projectRoot : findProjectRoot(file),
+      );
+      return {
+        content: [{ type: 'text', text: formatModelLines(model).join('\n') }],
+        details: {
+          project: model.project,
+          phase: current.phase,
+          detail: 'Model resolved; inspection connection released',
+          model,
+        },
+        isError: false,
+      };
+    } catch (error: unknown) {
+      if (signal?.aborted) throw error;
+      const safe = serializeWorkspaceModelError(error) as {
+        message?: string;
+        code?: string | number;
+        data?: unknown;
+      } | null;
+      const failure: FailureDetail = {
+        kind:
+          isTimeoutError(error) || (error instanceof Error && error.name === 'TimeoutError')
+            ? 'timeout'
+            : 'rpc',
+        stage: 'request',
+        message: safe?.message ?? 'Workspace model inspection failed',
+        code: safe?.code,
+        data: safe?.data,
+      };
+      return {
+        content: [{ type: 'text', text: formatFailureLines(failure, systemPath).join('\n') }],
+        details: {
+          project: sanitizeString(projectRoot),
+          phase: 'failed',
+          detail: failure.message,
+          failure,
+        },
+        isError: true,
+      };
+    }
   }
 
   if (action === 'status') {
@@ -776,27 +842,31 @@ export function registerIntellij(
     approval: 'exec',
     label: 'IntelliJ',
     description:
-      'Inspect IntelliJ setup with doctor, check or wait for indexing, or reload workspace model. Doctor, status and wait do not start the service; reload connects and triggers project reimport.',
+      'Inspect IntelliJ setup, index readiness, or the compile and launch model for a source file. Doctor, status and wait do not start the service; model connects without building or running; reload triggers project reimport.',
     parameters: z.object({
       action: z
-        .enum(['status', 'wait', 'reload', 'doctor'])
+        .enum(['status', 'wait', 'reload', 'doctor', 'model'])
         .default('status')
         .describe(
-          'Inspect local setup, check index status, wait for readiness, or reload workspace model',
+          'Inspect setup, index readiness, reload the project, or query the source-file model',
         ),
       project: z
         .string()
         .optional()
         .describe('Project root directory; defaults to current directory or detected project root'),
+      file: z
+        .string()
+        .optional()
+        .describe(
+          'Required for model: JVM source path relative to current directory; project can specify the reactor root',
+        ),
       timeout: z
         .number()
         .int()
         .min(1)
         .max(300)
         .default(60)
-        .describe(
-          'Timeout in seconds when waiting for index readiness or reloading workspace (1-300, default 60)',
-        ),
+        .describe('Timeout in seconds for wait, reload, or model (1-300, default 60)'),
     }),
     execute(
       _id: string,

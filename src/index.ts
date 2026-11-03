@@ -16,3 +16,4 @@ export * from './server-versions.js';
 export * from './service.js';
 export * from './types.js';
 export * from './workspace.js';
+export * from './workspace-model.js';
