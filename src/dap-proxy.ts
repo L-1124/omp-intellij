@@ -364,11 +364,9 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             // The target may have already exited.
           }
         }
-        if (dapSocket.destroyed && backendTerminated) {
-          backendInitialized = false;
-        } else {
-          try {
-            const cleanupDeadline = Date.now() + 15000;
+        try {
+          const cleanupDeadline = Date.now() + 15000;
+          if (!dapSocket.destroyed) {
             await sendNativeRequest(
               'disconnect',
               {
@@ -377,25 +375,24 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
               },
               15000,
             );
-            const deadline = Promise.withResolvers<never>();
-            const timer = setTimeout(
-              () => deadline.reject(new Error('IntelliJ debugger teardown timed out')),
-              Math.max(1, cleanupDeadline - Date.now()),
-            );
-            try {
-              const transportClosed = await Promise.race([backendClosed, deadline.promise]);
-              if (!transportClosed)
-                throw new Error('IntelliJ debugger transport closed abnormally');
-            } finally {
-              clearTimeout(timer);
-            }
-          } catch (error: unknown) {
-            // IntelliJ may close its DAP transport after teardown before flushing the response.
-            if (!(error instanceof NativeDisconnectCompleted)) {
-              cleanupError = `IntelliJ debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
-              output(`${cleanupError}\n`);
-              exitCode = 1;
-            }
+          }
+          const deadline = Promise.withResolvers<never>();
+          const timer = setTimeout(
+            () => deadline.reject(new Error('IntelliJ debugger teardown timed out')),
+            Math.max(1, cleanupDeadline - Date.now()),
+          );
+          try {
+            const transportClosed = await Promise.race([backendClosed, deadline.promise]);
+            if (!transportClosed) throw new Error('IntelliJ debugger transport closed abnormally');
+          } finally {
+            clearTimeout(timer);
+          }
+        } catch (error: unknown) {
+          // IntelliJ may close its DAP transport after teardown before flushing the response.
+          if (!(error instanceof NativeDisconnectCompleted)) {
+            cleanupError = `IntelliJ debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+            output(`${cleanupError}\n`);
+            exitCode = 1;
           }
         }
       }
@@ -624,7 +621,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       for (const pending of nativePending.values()) {
         clearTimeout(pending.timer);
         pending.reject(
-          isShuttingDown && backendEndedCleanly && pending.command === 'disconnect'
+          isShuttingDown && backendEndedCleanly && !hadError && pending.command === 'disconnect'
             ? new NativeDisconnectCompleted(
                 'IntelliJ closed the debugger transport after disconnect',
               )

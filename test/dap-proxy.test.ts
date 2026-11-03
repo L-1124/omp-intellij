@@ -911,6 +911,35 @@ for (const cleanupFails of [false, true]) {
   });
 }
 
+for (const reset of [false, true]) {
+  test(`launch recovery distinguishes normal transport teardown from reset=${reset}`, async (t) => {
+    let h: DapTestHarness;
+    h = await createDapTestHarness(t, {
+      onDapRequest(request) {
+        if (request.command !== 'terminate') return;
+        h.closeBackend(reset);
+        return true;
+      },
+    });
+    await h.request('launch', testLaunchArguments());
+    const status = await h.request('omp/intellij/status');
+    const projectRoot = (status.body as DebugSnapshot).projectRoot;
+    const options = { systemPath: h.systemPath, projectRoot };
+    if (reset) {
+      await assert.rejects(recoverDebugSession(options), /cleanup failed/);
+      assert.equal(await h.closed, 1);
+      const remaining = await listDebugSessions(options);
+      assert.equal(remaining[0]?.snapshot?.phase, 'failed');
+    } else {
+      const recovered = await recoverDebugSession(options);
+      assert.equal(recovered.phase, 'closed');
+      assert.equal(recovered.pendingRequests, 0);
+      assert.equal(await h.closed, 0);
+      assert.deepEqual(await listDebugSessions(options), []);
+    }
+  });
+}
+
 test('a disconnect acknowledgement cannot complete recovery before transport teardown', async (t) => {
   const acknowledged = Promise.withResolvers<void>();
   let h: DapTestHarness;

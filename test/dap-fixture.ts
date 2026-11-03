@@ -67,7 +67,7 @@ export interface DapTestHarness {
   waitFor: (predicate: (m: DapMessage) => boolean, timeoutMs?: number) => Promise<DapMessage>;
   emit: (event: string, body?: unknown) => void;
   respond: (request: DapRequest, body?: unknown, success?: boolean, message?: string) => void;
-  closeBackend: () => void;
+  closeBackend: (reset?: boolean) => void;
   lspPort: number;
   dapPort: number;
   systemPath: string;
@@ -497,10 +497,11 @@ export async function createDapTestHarness(
     )) as DapResponse;
   };
 
-  const closeBackend = () => {
+  const closeBackend = (reset = false) => {
     for (const s of backendSockets) {
       try {
-        s.destroy();
+        if (reset) s.resetAndDestroy();
+        else s.destroy();
       } catch {}
     }
     backendSockets.clear();
