@@ -1,9 +1,10 @@
 {
-  "name": "omp-intellij-local",
-  "owner": { "name": "omp-intellij" },
+  "name": "omp-intellij",
+  "owner": { "name": "L-1124" },
   "plugins": [
     {
       "name": "omp-intellij",
+      "description": "IntelliJ language intelligence, JVM execution and debugging for OMP",
       "source": "./",
       "lspServers": {
         "intellij-server": {
