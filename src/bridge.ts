@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import type net from 'node:net';
 import { join, resolve } from 'node:path';
-import { Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { AndroidNavigation } from './android/navigation.js';
 import {
   loadDefaultPluginSettings,
   loadProjectConfiguration,
@@ -27,7 +27,8 @@ import {
 } from './project/metadata.js';
 import { applyWorkspaceOptions } from './project/workspace.js';
 import { connectWithLease, settings } from './server/service.js';
-import { asyncFramedStream, encode, frameParser } from './shared/protocol.js';
+import { NavigationRelay } from './shared/navigation-relay.js';
+import { asyncFramedStream, encode } from './shared/protocol.js';
 import { type FailureDetail, sanitizeStatus, sanitizeString } from './shared/runtime-status.js';
 
 export async function saveInitializeParams(
@@ -77,6 +78,22 @@ export async function startBridge(): Promise<void> {
   let initializeTimer: NodeJS.Timeout | null = null;
 
   const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
+  const navigationRelay = new NavigationRelay({
+    sendServer: (message, frame) => barrier.fromClient(message, frame),
+    sendClient: (frame) => downstream.push(frame),
+    resolve: (input) =>
+      navigation.resolve({
+        ...input,
+        projectRoot: canonicalizeProject(projectPath).nativePath,
+      }),
+    invalidate: () => navigation.invalidate(),
+    timeoutMs: requestWaitTimeoutMs,
+  });
+  const navigation = new AndroidNavigation(
+    navigationRelay.request,
+    navigationRelay.readDocument,
+    navigationRelay.documentPaths,
+  );
 
   let socket: net.Socket;
   try {
@@ -96,25 +113,6 @@ export async function startBridge(): Promise<void> {
       }),
     );
     throw error;
-  }
-
-  function framedStream(receive: (msg: Record<string, unknown>, frame: Buffer) => void) {
-    const parse = frameParser((message, frame) => {
-      if (!message || typeof message !== 'object' || Array.isArray(message)) {
-        throw new Error('Expected a JSON-RPC object');
-      }
-      receive(message as Record<string, unknown>, frame);
-    });
-    return new Transform({
-      transform(chunk: Buffer, _encoding: BufferEncoding, done: (error?: Error | null) => void) {
-        try {
-          parse(chunk);
-          done();
-        } catch (error: unknown) {
-          done(error instanceof Error ? error : new Error(String(error)));
-        }
-      },
-    });
   }
 
   const upstream = asyncFramedStream(async (messageRaw: unknown, frame: Buffer) => {
@@ -274,13 +272,17 @@ export async function startBridge(): Promise<void> {
         await recordConfigurationItems(settings.systemPath, id, items, message.result);
       }
     }
+    if (message) await navigationRelay.fromClient(message);
 
     if (message) {
       barrier.fromClient(message, frame);
     }
   });
 
-  const downstream = framedStream((message: Record<string, unknown>, frame: Buffer) => {
+  const downstream = asyncFramedStream(async (messageRaw: unknown, frame: Buffer) => {
+    const message = messageRaw as Record<string, unknown> | null;
+    if (!message) return;
+
     if (
       initializeTimer &&
       message.id === barrier.initializeRequestId &&
@@ -310,7 +312,7 @@ export async function startBridge(): Promise<void> {
   barrier = new IndexBarrier({
     requestWaitTimeoutMs,
     sendServer: (frame: Buffer) => upstream.push(frame),
-    sendClient: (frame: Buffer) => downstream.push(frame),
+    sendClient: (frame: Buffer) => navigationRelay.receive(frame),
     onStateChange: (state: StateRecord) => {
       connState
         .update({
@@ -331,6 +333,7 @@ export async function startBridge(): Promise<void> {
   ) {
     if (closing) return;
     closing = true;
+    navigationRelay.close();
 
     if (initializeTimer) {
       clearTimeout(initializeTimer);

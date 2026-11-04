@@ -64,5 +64,8 @@
     "extensions": [
       "./src/plugin.ts"
     ]
+  },
+  "dependencies": {
+    "saxes": "^6.0.0"
   }
 }

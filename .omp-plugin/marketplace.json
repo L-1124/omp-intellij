@@ -10,7 +10,7 @@
         "intellij-server": {
           "command": "node",
           "args": ["${OMP_PLUGIN_ROOT}/dist/bridge.js"],
-          "fileTypes": [".java", ".kt", ".kts"],
+          "fileTypes": [".java", ".kt", ".kts", ".xml"],
           "rootMarkers": [
             "pom.xml",
             "build.gradle",

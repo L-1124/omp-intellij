@@ -886,27 +886,18 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             !Number.isFinite(args.timeout) ||
             args.timeout <= 0
           ) {
-            respond(
-              request,
-              false,
-              undefined,
-              'IntelliJ attach timeout must be positive milliseconds',
-            );
+            respond(request, false, undefined, 'IntelliJ attach timeout must be a positive number');
             return;
           }
-          attachTimeout = args.timeout;
+          attachTimeout =
+            args.timeout <= 300 ? Math.round(args.timeout * 1000) : Math.round(args.timeout);
         }
       } else {
         if (
           args.timeout !== undefined &&
           (typeof args.timeout !== 'number' || !Number.isFinite(args.timeout) || args.timeout <= 0)
         ) {
-          respond(
-            request,
-            false,
-            undefined,
-            'IntelliJ launch timeout must be positive milliseconds',
-          );
+          respond(request, false, undefined, 'IntelliJ launch timeout must be a positive number');
           return;
         }
         const program =
@@ -1120,8 +1111,10 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             noDebug: args.noDebug === true,
             stopOnEntry,
           },
-          typeof args.timeout === 'number'
-            ? args.timeout
+          typeof args.timeout === 'number' && Number.isFinite(args.timeout) && args.timeout > 0
+            ? args.timeout <= 300
+              ? Math.round(args.timeout * 1000)
+              : Math.round(args.timeout)
             : isGradleLaunch
               ? (settings.requestWaitTimeoutMs ?? 300000)
               : 15000,

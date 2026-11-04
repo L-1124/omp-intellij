@@ -83,6 +83,9 @@ test('bridge executable answers initialize and forwards semantic requests', {
   );
   const closed = once(child, 'close');
   t.after(async () => {
+    try {
+      child.stdin?.destroy();
+    } catch {}
     if (child.exitCode === null) child.kill();
     await closed;
   });

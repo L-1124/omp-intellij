@@ -612,6 +612,13 @@ test('early configuration is sent after startup and attach uses the JDWP host in
   assert(commands.indexOf('configurationDone') > commands.indexOf('attach'));
   assert.equal(commands.filter((c) => c === 'configurationDone').length, 1);
 });
+test('attach timeout normalizes seconds to milliseconds while preserving millisecond values', async (t) => {
+  const h = await createDapTestHarness(t);
+  await h.request('configurationDone');
+  await h.request('attach', { host: 'remote.example', port: 5005, timeout: 60 });
+  const attach = h.backendRequests.find((r) => r.command === 'attach');
+  assert.equal(attach?.arguments?.timeout, 60000);
+});
 
 test('concurrent backend responses preserve each client request and its failure', async (t) => {
   const pending: DapRequest[] = [];
