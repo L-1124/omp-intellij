@@ -15,13 +15,16 @@ export interface ServerBundle {
 }
 
 // Published archive metadata: https://github.com/JetBrains/intellij-lsp.nvim/blob/HEAD/lua/intellij-lsp/server_bundles.lua
-export const DEFAULT_SERVER_VERSION = '263.7084.0';
+export const DEFAULT_SERVER_VERSION = '271.2085.0';
 export const LATEST_VERSION_URL =
   'https://raw.githubusercontent.com/JetBrains/intellij-lsp.nvim/HEAD/lua/intellij-lsp/server_bundles.lua';
 
 const VERSION_REGEX = /^\d+(?:\.\d+){2,3}$/;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+// The Open VSX package bundles the server manifest inside a ~13.5 MB VSIX.
+const VSX_ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
+const VSX_ARTIFACT_TIMEOUT_MS = 120_000;
 const platforms: Record<
   string,
   { extension: string; hashes: Record<string, string>; sizes: Record<string, number> }
@@ -29,26 +32,26 @@ const platforms: Record<
   darwin: {
     extension: 'sit',
     hashes: {
-      arm64: 'ea728da71e3511939b4cb8e4af4aa5e4dda6e0ab7c2bdd1830a5d110bdf2bbec',
-      x64: '3b31cd867ce0e361bfc763ba78cf4fa1dcb1a5324b97c817a0ec045532278420',
+      arm64: '0b8022627f20cdbe52508afbd5dcb3a6e18afc170fb84d8f70d92ad87b815a78',
+      x64: '860e9ab04b99640790112a96de7f7df024b28bf3d6b573e5102a1a627b8e4a8e',
     },
-    sizes: { arm64: 378499345, x64: 380456870 },
+    sizes: { arm64: 385899733, x64: 387873566 },
   },
   linux: {
     extension: 'tar.gz',
     hashes: {
-      arm64: 'd5df0980acc4eeb35b1e76227caa62639fcda188649064d17b5b0de1077b38c0',
-      x64: '3842f2f457e29e58cd9c37a97482b28255d598a2ff142075753d947206c0b922',
+      arm64: 'ba6d0831043c197edede20518e3137974bc53838ef6601e71c23ff785070fc34',
+      x64: 'fb4fbac78a5043ce568e8b93ec57a1c40c4ba8136db68139d8813d7de3a4f7e4',
     },
-    sizes: { arm64: 385782431, x64: 386777831 },
+    sizes: { arm64: 394206359, x64: 395255755 },
   },
   win32: {
     extension: 'win.zip',
     hashes: {
-      arm64: '2ce197ad10684d55334c5611433c1479ccb574e52d78e41d023e3f2dd0be4704',
-      x64: 'd84629cbdd79d58f021a15a75f05018518398906519a0e830df6f8a8d515e286',
+      arm64: 'b8cab4d3e30849440fe4d318c352981012ffb9b3895b2ceda1f73e430407274f',
+      x64: '9ab4ecd982a8abdfaa1fff1bcdd4246db2d071653168c78555a5869271ee3f9f',
     },
-    sizes: { arm64: 361354713, x64: 381741020 },
+    sizes: { arm64: 368571128, x64: 389022064 },
   },
 };
 
@@ -209,20 +212,21 @@ async function latestVsxVersion(
   if (metadata.files?.download !== expectedUrl) {
     throw new Error('Unexpected Open VSX download URL');
   }
-  let archive = await fetchFn(expectedUrl, { signal, redirect: 'manual' });
+  const artifactSignal = AbortSignal.any([signal, AbortSignal.timeout(VSX_ARTIFACT_TIMEOUT_MS)]);
+  let archive = await fetchFn(expectedUrl, { signal: artifactSignal, redirect: 'manual' });
   if ([301, 302, 303, 307, 308].includes(archive.status)) {
     const location = archive.headers.get('location');
     await archive.body?.cancel();
     const storageUrl = `https://openvsx.eclipsecontent.org/JetBrains/intellij-server/${target}/${metadata.version}/JetBrains.intellij-server-${metadata.version}@${target}.vsix`;
     if (location !== storageUrl) throw new Error('Unexpected Open VSX storage redirect');
-    archive = await fetchFn(storageUrl, { signal, redirect: 'error' });
+    archive = await fetchFn(storageUrl, { signal: artifactSignal, redirect: 'error' });
   }
   if (!archive.ok) {
     await archive.body?.cancel();
     throw new Error(`Open VSX archive: HTTP ${archive.status} ${archive.statusText}`);
   }
-  const bytes = await readBoundedBytes(archive, 4 * 1024 * 1024);
-  signal.throwIfAborted();
+  const bytes = await readBoundedBytes(archive, VSX_ARTIFACT_MAX_BYTES);
+  artifactSignal.throwIfAborted();
   const directory = await mkdtemp(join(tmpdir(), 'omp-intellij-vsx-'));
   try {
     const file = join(directory, 'extension.vsix');
@@ -231,7 +235,12 @@ async function latestVsxVersion(
     const { stdout } = await execFileAsync(
       process.platform === 'linux' ? 'unzip' : 'tar',
       process.platform === 'linux' ? ['-p', file, entry] : ['-xf', file, '-O', entry],
-      { signal, maxBuffer: MAX_RESPONSE_BYTES, encoding: 'utf8', windowsHide: true },
+      {
+        signal: artifactSignal,
+        maxBuffer: MAX_RESPONSE_BYTES,
+        encoding: 'utf8',
+        windowsHide: true,
+      },
     );
     const bundle = JSON.parse(stdout);
     const version = validateServerVersion(bundle?.version);
@@ -316,10 +325,16 @@ export async function resolveServerBundle(
   }
 
   const deadlineSignal = timeoutSignal(options?.signal);
+  // Latest resolution may download the ~13.5 MB Open VSX package, so it needs a wider deadline
+  // than the metadata-only timeout.
+  const latestSignal = AbortSignal.any([
+    deadlineSignal,
+    AbortSignal.timeout(VSX_ARTIFACT_TIMEOUT_MS),
+  ]);
   const targetVersion =
     version === 'latest'
       ? await latestServerVersion({
-          signal: deadlineSignal,
+          signal: latestSignal,
           fetch: options?.fetch,
           platform,
           arch,

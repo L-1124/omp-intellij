@@ -21,12 +21,14 @@ import {
   verifyServerOwnership,
 } from '../src/server/service.js';
 
-async function startFakeServer(systemPath: string): Promise<{
+interface FakeServer {
   child: ChildProcess;
   port: number;
   token: string;
   cleanup: () => Promise<void>;
-}> {
+}
+
+async function startFakeServer(systemPath: string): Promise<FakeServer> {
   await mkdir(systemPath, { recursive: true });
   const portFile = join(systemPath, 'server.port');
   const ownerFile = join(systemPath, 'omp-server.json');
@@ -188,6 +190,27 @@ async function createFakeServerExecutable(dir: string): Promise<string> {
   });
   return exePath;
 }
+
+test('endpoint and status accept the ILS 271 three-line port file (port, pid, build)', async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'omp-portfile-271-'));
+  let fake: FakeServer | null = null;
+
+  t.after(async () => {
+    if (fake) await fake.cleanup();
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  fake = await startFakeServer(tempRoot);
+  // ILS 271 publishes "<port>\n<pid>\n<build>" instead of a bare port.
+  await writeFile(
+    join(tempRoot, 'server.port'),
+    `${fake.port}\n${fake.child.pid}\nILS-271.2085.0\n`,
+    'utf8',
+  );
+
+  assert.equal((await endpoint(tempRoot)).port, fake.port);
+  assert.equal(await status(tempRoot), true);
+});
 
 test('stopServer: successfully stops running verified fake server and frees endpoint/metadata', async (t) => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-stop-'));

@@ -115,13 +115,22 @@ export interface ServerEndpoint {
   port: number;
 }
 
+/**
+ * ILS 263 publishes the port alone; ILS 271 publishes port, PID, then build id.
+ * Only the first line is the port in both formats.
+ */
+export function parsePortFile(text: string): number | null {
+  const first = text.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  if (!/^\d+$/.test(first)) return null;
+  const port = Number(first);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
 export async function endpoint(systemPath: string = settings.systemPath): Promise<ServerEndpoint> {
   const currentPortFile = join(systemPath, 'server.port');
   const currentOwnerFile = join(systemPath, 'omp-server.json');
-  const text = (await readFile(currentPortFile, 'utf8')).trim();
-  const port = Number(text);
-  if (!/^\d+$/.test(text) || port < 1 || port > 65535)
-    throw new Error('Invalid shared server port file');
+  const port = parsePortFile(await readFile(currentPortFile, 'utf8'));
+  if (port === null) throw new Error('Invalid shared server port file');
   const ownerRaw: unknown = JSON.parse(await readFile(currentOwnerFile, 'utf8'));
   const pid =
     ownerRaw && typeof ownerRaw === 'object' && 'pid' in ownerRaw ? (ownerRaw.pid as number) : NaN;
@@ -190,8 +199,8 @@ export async function isServerAlive(
     }
   }
   try {
-    const port = Number((await readFile(join(systemPath, 'server.port'), 'utf8')).trim());
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return { alive: false, pid };
+    const port = parsePortFile(await readFile(join(systemPath, 'server.port'), 'utf8'));
+    if (port === null) return { alive: false, pid };
     const listening = await new Promise<boolean>((resolve) => {
       const socket = net.createConnection({ host: settings.host, port });
       const done = (value: boolean) => {
@@ -362,9 +371,8 @@ export interface ServerOwnershipVerification {
 
 async function isPortListening(systemPath: string): Promise<boolean> {
   try {
-    const portText = (await readFile(join(systemPath, 'server.port'), 'utf8')).trim();
-    const port = Number(portText);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+    const port = parsePortFile(await readFile(join(systemPath, 'server.port'), 'utf8'));
+    if (port === null) return false;
     const { promise, resolve: resolvePromise } = Promise.withResolvers<boolean>();
     const socket = net.createConnection({ host: settings.host, port });
     const done = (value: boolean) => {
