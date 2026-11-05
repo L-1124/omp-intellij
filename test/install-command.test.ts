@@ -761,6 +761,15 @@ test('polling preserves in-flight active install when observed state is null or 
         return null;
       },
     },
+    versionApi: {
+      async selectServerVersion(version) {
+        return {
+          version,
+          executable: 'F:\\managed\\bin\\intellij.bat',
+          installDir: 'F:\\managed',
+        };
+      },
+    },
   });
 
   const cmd2 = pi2.getCommand('intellij');

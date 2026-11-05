@@ -59,6 +59,11 @@ export interface DapEventMessage extends DapBaseMessage {
 
 export type DapMessage = DapRequestMessage | DapResponseMessage | DapEventMessage;
 
+const EVAL_ERROR_SENTINELS: Record<string, true> = {
+  'Evaluation is supported for stack frames only': true,
+  'No active suspend context': true,
+};
+
 class NativeDisconnectCompleted extends Error {}
 
 /**
@@ -500,6 +505,18 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       const request = nativeSeqToClientSeq.get(requestSeq);
       if (request) {
         nativeSeqToClientSeq.delete(requestSeq);
+        if (
+          request.command === 'evaluate' &&
+          msg.success === true &&
+          msg.body &&
+          typeof msg.body === 'object' &&
+          'result' in msg.body &&
+          typeof (msg.body as Record<string, unknown>).result === 'string' &&
+          EVAL_ERROR_SENTINELS[(msg.body as Record<string, unknown>).result as string]
+        ) {
+          msg.success = false;
+          msg.message = (msg.body as Record<string, unknown>).result as string;
+        }
         sendToClient({ ...msg, seq: proxySeq++, request_seq: request.seq });
       }
     } else if (msg.type === 'event') {

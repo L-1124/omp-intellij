@@ -21,7 +21,11 @@
             "*.iml"
           ],
           "warmupTimeoutMs": 30000,
-          "initOptions": { "runMainCodeLens": true },
+          "initOptions": {
+            "runMainCodeLens": true,
+            "intellijExtensions": true,
+            "lazyIntentions": true
+          },
           "settings": {
             "jetbrains.java": {
               "hints.collapse complex types": true,

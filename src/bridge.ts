@@ -147,10 +147,26 @@ export async function startBridge(): Promise<void> {
         const exp = (caps.experimental as Record<string, unknown>) || {};
         exp.licensingUi = true;
         caps.experimental = exp;
+
+        // Enable workDoneProgress so server-initiated progress is emitted.
+        const windowCaps = (caps.window as Record<string, unknown>) || {};
+        windowCaps.workDoneProgress = true;
+        caps.window = windowCaps;
+
         paramsObj.capabilities = caps;
+
         const initializationOptions =
           (paramsObj.initializationOptions as Record<string, unknown>) || {};
         delete initializationOptions.eulaHash;
+
+        // Opt in to intellijExtensions and lazyIntentions so ModCommand quickfixes
+        // are converted to executable LSP commands rather than dropped to null.
+        if (initializationOptions.intellijExtensions === undefined) {
+          initializationOptions.intellijExtensions = true;
+        }
+        if (initializationOptions.lazyIntentions === undefined) {
+          initializationOptions.lazyIntentions = true;
+        }
         rawInitializationOptions = JSON.parse(JSON.stringify(initializationOptions));
         paramsObj.initializationOptions = await applyWorkspaceOptions(
           projectPath,

@@ -29,6 +29,13 @@ test('bridge executable answers initialize and forwards semantic requests', {
         assert.ok('method' in raw);
         if (raw.method === 'initialize') {
           assert.ok('id' in raw);
+          const params = (raw as Record<string, unknown>).params as Record<string, unknown>;
+          const caps = params.capabilities as Record<string, unknown>;
+          const win = caps.window as Record<string, unknown>;
+          assert.equal(win.workDoneProgress, true);
+          const opts = params.initializationOptions as Record<string, unknown>;
+          assert.equal(opts.intellijExtensions, true);
+          assert.equal(opts.lazyIntentions, true);
           socket.write(
             encode({
               jsonrpc: '2.0',

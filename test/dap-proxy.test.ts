@@ -647,6 +647,21 @@ test('concurrent backend responses preserve each client request and its failure'
   assert.match(failed.message ?? '', /Thread no longer exists/);
 });
 
+test('evaluate sentinel text is normalized to DAP failure response', async (t) => {
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'evaluate') {
+        h.respond(request, { result: 'No active suspend context' });
+        return true;
+      }
+    },
+  });
+  await h.request('attach', { port: 5005 });
+  const evalRes = await h.request('evaluate', { expression: 'foo' });
+  assert.equal(evalRes.success, false);
+  assert.equal(evalRes.message, 'No active suspend context');
+});
+
 test('test entry breakpoint is removed on first stop and a failed test is never reported as passed', async (t) => {
   const h = await createDapTestHarness(t);
   assert.equal((await h.request('launch', testLaunchArguments())).success, true);
