@@ -340,82 +340,294 @@ export async function collectPlatformMetadata(version, fetchFn = globalThis.fetc
   return platforms;
 }
 
+export async function fetchVsxPackageJson(options = {}) {
+  const fetchFn = options.fetch ?? fetch;
+  const platform = options.platform ?? 'win32';
+  const arch = options.arch ?? 'x64';
+  const signal = options.signal;
+
+  const base = 'https://open-vsx.org/api/JetBrains/intellij-server';
+  const target = `${platform}-${arch}`;
+
+  const metaSignal = timeoutSignal(DEFAULT_TIMEOUT_MS, signal);
+  const response = await fetchFn(`${base}/${target}/latest`, {
+    signal: metaSignal,
+    redirect: 'error',
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`Open VSX metadata: HTTP ${response.status} ${response.statusText}`);
+  }
+  const metadata = JSON.parse(await readBoundedText(response));
+  if (typeof metadata?.version !== 'string' || !/^\d+(?:\.\d+){1,3}$/.test(metadata.version)) {
+    throw new Error('Invalid Open VSX extension metadata');
+  }
+
+  const expectedUrl = `${base}/${target}/${metadata.version}/file/JetBrains.intellij-server-${metadata.version}@${target}.vsix`;
+  const artifactSignal = timeoutSignal(VSX_ARTIFACT_TIMEOUT_MS, signal);
+  let archive = await fetchFn(expectedUrl, { signal: artifactSignal, redirect: 'manual' });
+  if ([301, 302, 303, 307, 308].includes(archive.status)) {
+    const location = archive.headers.get('location');
+    await archive.body?.cancel();
+    const storageUrl = `https://openvsx.eclipsecontent.org/JetBrains/intellij-server/${target}/${metadata.version}/JetBrains.intellij-server-${metadata.version}@${target}.vsix`;
+    if (location !== storageUrl) throw new Error('Unexpected Open VSX storage redirect');
+    archive = await fetchFn(storageUrl, { signal: artifactSignal, redirect: 'error' });
+  }
+  if (!archive.ok) {
+    await archive.body?.cancel();
+    throw new Error(`Open VSX archive: HTTP ${archive.status} ${archive.statusText}`);
+  }
+  const bytes = await readBoundedBytes(archive, VSX_ARTIFACT_MAX_BYTES);
+  artifactSignal.throwIfAborted();
+  const directory = await mkdtemp(join(tmpdir(), 'omp-intellij-vsx-pkg-'));
+  try {
+    const file = join(directory, 'extension.vsix');
+    await writeFile(file, bytes);
+    const entry = 'extension/package.json';
+    const { stdout } = await execFileAsync(
+      process.platform === 'linux' ? 'unzip' : 'tar',
+      process.platform === 'linux' ? ['-p', file, entry] : ['-xf', file, '-O', entry],
+      {
+        signal: artifactSignal,
+        maxBuffer: 2 * 1024 * 1024,
+        encoding: 'utf8',
+        windowsHide: true,
+      },
+    );
+    return JSON.parse(stdout);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+export function extractVsixConfig(vsixPackageJson) {
+  const activationEvents = Array.isArray(vsixPackageJson?.activationEvents)
+    ? vsixPackageJson.activationEvents
+    : [];
+
+  const rawMarkers = [];
+  for (const event of activationEvents) {
+    const match = event.match(/^workspaceContains:(?:\*\/)?([a-zA-Z0-9_.-]+)$/);
+    if (match?.[1] && !rawMarkers.includes(match[1])) {
+      rawMarkers.push(match[1]);
+    }
+  }
+
+  const knownMarkers = [
+    'pom.xml',
+    'build.gradle',
+    'build.gradle.kts',
+    'settings.gradle',
+    'settings.gradle.kts',
+    'BUILD.bazel',
+    'MODULE.bazel',
+    'WORKSPACE',
+    'WORKSPACE.bazel',
+    '.bazelproject',
+    '.idea',
+    '*.iml',
+  ];
+
+  const rootMarkers = [
+    ...knownMarkers.filter(
+      (m) =>
+        rawMarkers.includes(m) ||
+        ['WORKSPACE', 'WORKSPACE.bazel', '.bazelproject', '.idea', '*.iml'].includes(m),
+    ),
+    ...rawMarkers.filter((m) => !knownMarkers.includes(m)),
+  ];
+
+  const fileTypes = [
+    '.java',
+    '.kt',
+    '.kts',
+    '.xml',
+    '.properties',
+    '.yaml',
+    '.yml',
+    '.bazelproject',
+  ];
+
+  const javaSettings = {};
+  const kotlinSettings = {};
+  const configurations = Array.isArray(vsixPackageJson?.contributes?.configuration)
+    ? vsixPackageJson.contributes.configuration
+    : [];
+
+  for (const config of configurations) {
+    for (const [key, prop] of Object.entries(config.properties || {})) {
+      if (key.startsWith('jetbrains.java.') && prop.default === true) {
+        javaSettings[key.slice('jetbrains.java.'.length)] = true;
+      } else if (key.startsWith('jetbrains.kotlin.') && prop.default === true) {
+        kotlinSettings[key.slice('jetbrains.kotlin.'.length)] = true;
+      }
+    }
+  }
+
+  return {
+    rootMarkers,
+    fileTypes,
+    settings: {
+      'jetbrains.java': javaSettings,
+      'jetbrains.kotlin': kotlinSettings,
+    },
+  };
+}
+
+export function mergeMarketplaceConfig(currentMarketplace, extracted) {
+  const next = JSON.parse(JSON.stringify(currentMarketplace));
+  const plugin = next.plugins?.[0];
+  if (!plugin) throw new Error('Invalid marketplace.json: no plugins found');
+
+  if (plugin.lspServers?.['intellij-server']) {
+    const lsp = plugin.lspServers['intellij-server'];
+    lsp.fileTypes = extracted.fileTypes;
+    lsp.rootMarkers = extracted.rootMarkers;
+    lsp.settings = {
+      ...lsp.settings,
+      ...extracted.settings,
+    };
+  }
+
+  const dapMarkers = extracted.rootMarkers.filter((m) => m !== '*.iml');
+  if (plugin.dapAdapters?.intellij) {
+    plugin.dapAdapters.intellij.rootMarkers = dapMarkers;
+  }
+  if (plugin.dapAdapters?.['intellij-test']) {
+    plugin.dapAdapters['intellij-test'].rootMarkers = dapMarkers;
+  }
+
+  return next;
+}
+
 export async function updateServerBundle(options) {
   const {
     version: requestedVersion,
     check = false,
+    syncMarketplace = false,
     fetch: fetchFn = globalThis.fetch,
     outputPath = resolve(
       fileURLToPath(new URL('../src/server/bundle-metadata.ts', import.meta.url)),
     ),
+    marketplacePath = resolve(
+      fileURLToPath(new URL('../.omp-plugin/marketplace.json', import.meta.url)),
+    ),
   } = options ?? {};
 
-  if (!requestedVersion) {
-    throw new Error('Version argument is required');
+  if (!requestedVersion && !syncMarketplace) {
+    throw new Error('Version argument or --sync-marketplace is required');
   }
 
+  const effectiveVersion = requestedVersion || 'latest';
   const targetVersion =
-    requestedVersion === 'latest'
+    effectiveVersion === 'latest'
       ? await latestServerVersion({ fetch: fetchFn })
-      : validateServerVersion(requestedVersion);
+      : validateServerVersion(effectiveVersion);
 
-  const collectedPlatforms = await collectPlatformMetadata(targetVersion, fetchFn);
-  const renderedText = renderBundleMetadata({
-    version: targetVersion,
-    platforms: collectedPlatforms,
-  });
+  let hasDiff = false;
 
-  let existingText = null;
-  let fileExists = false;
-  try {
-    const s = await stat(outputPath);
-    if (!s.isFile()) {
-      throw new Error(`Target path is not a regular file: ${outputPath}`);
+  if (requestedVersion) {
+    const collectedPlatforms = await collectPlatformMetadata(targetVersion, fetchFn);
+    const renderedText = renderBundleMetadata({
+      version: targetVersion,
+      platforms: collectedPlatforms,
+    });
+
+    let existingText = null;
+    let fileExists = false;
+    try {
+      const s = await stat(outputPath);
+      if (!s.isFile()) {
+        throw new Error(`Target path is not a regular file: ${outputPath}`);
+      }
+      existingText = await readFile(outputPath, 'utf8');
+      fileExists = true;
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+        fileExists = false;
+      } else {
+        throw err;
+      }
     }
-    existingText = await readFile(outputPath, 'utf8');
-    fileExists = true;
-  } catch (err) {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
-      fileExists = false;
+
+    if (check) {
+      if (!fileExists) {
+        console.log(`[check] Target bundle metadata file does not exist: ${outputPath}`);
+        hasDiff = true;
+      } else if (existingText === renderedText) {
+        console.log(`[check] Bundle metadata is up to date: ${targetVersion}`);
+      } else {
+        console.log(`[check] Bundle metadata differs from upstream ${targetVersion}`);
+        hasDiff = true;
+      }
     } else {
-      throw err;
+      if (fileExists && existingText === renderedText) {
+        console.log(`Bundle metadata is already up to date: ${targetVersion}`);
+      } else {
+        const tempFile = join(dirname(outputPath), `.bundle-metadata-${randomUUID()}.tmp`);
+        try {
+          await writeFile(tempFile, renderedText, 'utf8');
+          await replaceFile(tempFile, outputPath);
+          console.log(`Successfully updated bundle metadata to ${targetVersion} at ${outputPath}`);
+        } finally {
+          await rm(tempFile, { force: true }).catch(() => {});
+        }
+      }
     }
   }
 
-  if (check) {
-    if (!fileExists) {
-      console.log(`[check] Target bundle metadata file does not exist: ${outputPath}`);
-      return 1;
+  if (syncMarketplace) {
+    const vsixPackageJson = await fetchVsxPackageJson({
+      fetch: fetchFn,
+      version: targetVersion,
+    });
+    const extracted = extractVsixConfig(vsixPackageJson);
+
+    let currentMarketplace;
+    try {
+      currentMarketplace = JSON.parse(await readFile(marketplacePath, 'utf8'));
+    } catch (err) {
+      throw new Error(`Failed to read marketplace.json at ${marketplacePath}: ${err.message}`);
     }
-    if (existingText === renderedText) {
-      console.log(`[check] Bundle metadata is up to date: ${targetVersion}`);
-      return 0;
+
+    const merged = mergeMarketplaceConfig(currentMarketplace, extracted);
+    const renderedJson = `${JSON.stringify(merged, null, 2)}\n`;
+
+    const isUpToDate = JSON.stringify(currentMarketplace) === JSON.stringify(merged);
+
+    if (check) {
+      if (isUpToDate) {
+        console.log('[check] Marketplace configuration is up to date with upstream VSIX');
+      } else {
+        console.log('[check] Marketplace configuration differs from upstream VSIX');
+        hasDiff = true;
+      }
+    } else {
+      if (isUpToDate) {
+        console.log('Marketplace configuration is already up to date with upstream VSIX');
+      } else {
+        const tempJsonFile = join(dirname(marketplacePath), `.marketplace-${randomUUID()}.tmp`);
+        try {
+          await writeFile(tempJsonFile, renderedJson, 'utf8');
+          await replaceFile(tempJsonFile, marketplacePath);
+          console.log(`Successfully updated marketplace configuration at ${marketplacePath}`);
+        } finally {
+          await rm(tempJsonFile, { force: true }).catch(() => {});
+        }
+      }
     }
-    console.log(`[check] Bundle metadata differs from upstream ${targetVersion}`);
-    return 1;
   }
 
-  if (fileExists && existingText === renderedText) {
-    console.log(`Bundle metadata is already up to date: ${targetVersion}`);
-    return 0;
-  }
-
-  const tempFile = join(dirname(outputPath), `.bundle-metadata-${randomUUID()}.tmp`);
-  try {
-    await writeFile(tempFile, renderedText, 'utf8');
-    await replaceFile(tempFile, outputPath);
-    console.log(`Successfully updated bundle metadata to ${targetVersion} at ${outputPath}`);
-    return 0;
-  } finally {
-    await rm(tempFile, { force: true }).catch(() => {});
-  }
+  return hasDiff ? 1 : 0;
 }
 
 function parseCliArgs(args) {
   let version = null;
   let check = false;
+  let syncMarketplace = false;
   let seenVersion = false;
   let seenCheck = false;
+  let seenSyncMarketplace = false;
 
   let i = 0;
   while (i < args.length) {
@@ -440,23 +652,31 @@ function parseCliArgs(args) {
       }
       seenCheck = true;
       check = true;
+    } else if (arg === '--sync-marketplace') {
+      if (seenSyncMarketplace) {
+        throw new Error('Duplicate --sync-marketplace flag');
+      }
+      seenSyncMarketplace = true;
+      syncMarketplace = true;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
     i++;
   }
 
-  if (!version) {
-    throw new Error('Usage: npm run update-bundle -- --version <build|latest> [--check]');
+  if (!version && !syncMarketplace) {
+    throw new Error(
+      'Usage: npm run update-bundle -- [--version <build|latest>] [--check] [--sync-marketplace]',
+    );
   }
 
-  return { version, check };
+  return { version, check, syncMarketplace };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   try {
-    const { version, check } = parseCliArgs(process.argv.slice(2));
-    const code = await updateServerBundle({ version, check });
+    const { version, check, syncMarketplace } = parseCliArgs(process.argv.slice(2));
+    const code = await updateServerBundle({ version, check, syncMarketplace });
     process.exitCode = code;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

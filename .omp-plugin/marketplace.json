@@ -1,6 +1,8 @@
 {
   "name": "omp-intellij",
-  "owner": { "name": "L-1124" },
+  "owner": {
+    "name": "L-1124"
+  },
   "plugins": [
     {
       "name": "omp-intellij",
@@ -10,13 +12,27 @@
         "intellij-server": {
           "command": "node",
           "args": ["${OMP_PLUGIN_ROOT}/dist/bridge.js"],
-          "fileTypes": [".java", ".kt", ".kts", ".xml"],
+          "fileTypes": [
+            ".java",
+            ".kt",
+            ".kts",
+            ".xml",
+            ".properties",
+            ".yaml",
+            ".yml",
+            ".bazelproject"
+          ],
           "rootMarkers": [
             "pom.xml",
             "build.gradle",
             "build.gradle.kts",
             "settings.gradle",
             "settings.gradle.kts",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            ".bazelproject",
             ".idea",
             "*.iml"
           ],
@@ -40,6 +56,9 @@
               "hints.type.function.return": true,
               "hints.type.function.parameter": true,
               "hints.settings.lambda.return": true,
+              "hints.lambda.receivers.parameters": true,
+              "hints.settings.value.ranges": true,
+              "hints.value.kotlin.time": true,
               "hints.parameters": true,
               "hints.parameters.compiled": true
             }
@@ -58,11 +77,23 @@
             "build.gradle.kts",
             "settings.gradle",
             "settings.gradle.kts",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            ".bazelproject",
             ".idea"
           ],
           "connectMode": "stdio",
-          "launchDefaults": { "console": "internalConsole", "build": true, "stopOnEntry": true },
-          "attachDefaults": { "hostName": "127.0.0.1", "timeout": 30000 }
+          "launchDefaults": {
+            "console": "internalConsole",
+            "build": true,
+            "stopOnEntry": true
+          },
+          "attachDefaults": {
+            "hostName": "127.0.0.1",
+            "timeout": 30000
+          }
         },
         "intellij-gradle": {
           "command": "node",
@@ -85,7 +116,20 @@
             "console": "internalConsole",
             "build": true,
             "stopOnEntry": true
-          }
+          },
+          "rootMarkers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            ".bazelproject",
+            ".idea"
+          ]
         }
       }
     }

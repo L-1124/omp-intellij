@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  extractVsixConfig,
   LATEST_VERSION_URL,
   latestServerVersion,
+  mergeMarketplaceConfig,
   parseLatestVersionFromLua,
   parseSha256Sidecar,
   updateServerBundle,
@@ -328,4 +330,93 @@ test('updateServerBundle fails if HEAD response is missing Content-Length', asyn
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('extractVsixConfig parses activationEvents, markers, fileTypes, and inlay hints', () => {
+  const samplePackageJson = {
+    activationEvents: [
+      'onLanguage:java',
+      'workspaceContains:*/BUILD.bazel',
+      'workspaceContains:MODULE.bazel',
+      'workspaceContains:build.gradle',
+      'workspaceContains:pom.xml',
+    ],
+    contributes: {
+      configuration: [
+        {
+          properties: {
+            'jetbrains.java.hints.collapse complex types': { default: true },
+            'jetbrains.java.hints.unused': { default: false },
+            'jetbrains.kotlin.hints.settings.types.property': { default: true },
+            'jetbrains.kotlin.hints.lambda.receivers.parameters': { default: true },
+            'jetbrains.kotlin.hints.call.chains': { default: false },
+          },
+        },
+      ],
+    },
+  };
+
+  const config = extractVsixConfig(samplePackageJson);
+  assert.ok(config.rootMarkers.includes('BUILD.bazel'));
+  assert.ok(config.rootMarkers.includes('MODULE.bazel'));
+  assert.ok(config.rootMarkers.includes('WORKSPACE'));
+  assert.ok(config.rootMarkers.includes('.bazelproject'));
+  assert.ok(config.fileTypes.includes('.properties'));
+  assert.ok(config.fileTypes.includes('.bazelproject'));
+  assert.equal(config.settings['jetbrains.java']['hints.collapse complex types'], true);
+  assert.equal(config.settings['jetbrains.java']['hints.unused'], undefined);
+  assert.equal(config.settings['jetbrains.kotlin']['hints.settings.types.property'], true);
+  assert.equal(config.settings['jetbrains.kotlin']['hints.lambda.receivers.parameters'], true);
+  assert.equal(config.settings['jetbrains.kotlin']['hints.call.chains'], undefined);
+});
+
+test('mergeMarketplaceConfig merges LSP and DAP configurations correctly', () => {
+  const baseMarketplace = {
+    name: 'omp-intellij',
+    plugins: [
+      {
+        name: 'omp-intellij',
+        lspServers: {
+          'intellij-server': {
+            fileTypes: ['.java'],
+            rootMarkers: ['pom.xml'],
+            settings: {},
+          },
+        },
+        dapAdapters: {
+          intellij: { rootMarkers: ['pom.xml'] },
+          'intellij-test': { rootMarkers: ['pom.xml'] },
+        },
+      },
+    ],
+  };
+
+  const extracted = {
+    rootMarkers: ['pom.xml', 'BUILD.bazel', '*.iml'],
+    fileTypes: ['.java', '.kt', '.bazelproject'],
+    settings: {
+      'jetbrains.java': { 'hints.types.local variable': true },
+    },
+  };
+
+  const merged = mergeMarketplaceConfig(baseMarketplace, extracted);
+  assert.deepEqual(merged.plugins[0].lspServers['intellij-server'].fileTypes, [
+    '.java',
+    '.kt',
+    '.bazelproject',
+  ]);
+  assert.deepEqual(merged.plugins[0].lspServers['intellij-server'].rootMarkers, [
+    'pom.xml',
+    'BUILD.bazel',
+    '*.iml',
+  ]);
+  assert.deepEqual(merged.plugins[0].lspServers['intellij-server'].settings['jetbrains.java'], {
+    'hints.types.local variable': true,
+  });
+  // DAP adapters filter out *.iml
+  assert.deepEqual(merged.plugins[0].dapAdapters.intellij.rootMarkers, ['pom.xml', 'BUILD.bazel']);
+  assert.deepEqual(merged.plugins[0].dapAdapters['intellij-test'].rootMarkers, [
+    'pom.xml',
+    'BUILD.bazel',
+  ]);
 });

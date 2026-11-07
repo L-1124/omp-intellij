@@ -160,22 +160,22 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
 1. **第一梯次：原生 LSP 接口与 `xd://lsp` 14 项标准化动作优先**
    所有针对通用代码智能的请求，优先通过标准 LSP 方法与 `xd://lsp` 原生动作执行：
 
-   | `xd://lsp` 动作 | 对应 LSP 方法 / 协议机制 | 语义与映射约束 |
-   | :--- | :--- | :--- |
-   | `diagnostics` | 宿主诊断动作，支持文件、glob 或 `file: "*"` | 实际使用 pull、已有诊断还是宿主项目检查取决于适配器；不能把工具动作直接等同为 `workspace/diagnostic`。ILS 的 `workspaceDiagnostics: false` 不禁止多文件逐一拉取 |
-   | `definition` | `textDocument/definition` | 代码符号声明跳转，优先于任何上层文本检索 |
-   | `references` | `textDocument/references` | 语义引用查询；受 `context.includeDeclaration` 控制 |
-   | `hover` | `textDocument/hover` | 悬停文档、类型推断与签名提示 |
-   | `symbols` | `file` -> 文档符号；`file: "*"` + `query` -> 工作区符号搜索 | JSON-RPC 大纲结果为 DocumentSymbol[] 或 SymbolInformation[]；Flow 仅是 ILS 内部 Provider 类型。按真实客户端能力验收格式 |
-   | `rename` | `textDocument/rename` | 跨文件安全重命名（默认直接应用，`apply: false` 预览） |
-   | `rename_file` | `workspace/willRenameFiles` | 文件重命名并同步重写项目所有引用与导入语句 |
-   | `code_actions` | `textDocument/codeAction` | 查询并应用 QuickFix（包括 ModCommand） |
-   | `type_definition` | `textDocument/typeDefinition` | 跳转至类型定义位置 |
-   | `implementation` | `textDocument/implementation` | 跳转至接口实现或抽象重写位置 |
-   | `status` | 宿主管理的语言服务状态 | 区分 ready 与 configured/not started；不把它单独当作工程已导入、索引已完成或全部请求健康的证明 |
-   | `reload` | 宿主重载操作 | 指定文件重载相关服务；`file: "*"` 重载全部并重读配置；不是 LSP 标准 RPC，也不等于工程 workspace reload |
-   | `capabilities` | `initialize` 响应解析 | 检查服务端所声明的全部 capabilities 与扩展能力 |
-   | `request` | 原始 JSON-RPC 请求通道 | 底层透传通道，`query` 为方法名，`payload` 为 JSON 参数字符串 |
+   | `xd://lsp` 动作   | 对应 LSP 方法 / 协议机制                                    | 语义与映射约束                                                                                                                                                  |
+   | :---------------- | :---------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | `diagnostics`     | 宿主诊断动作，支持文件、glob 或 `file: "*"`                 | 实际使用 pull、已有诊断还是宿主项目检查取决于适配器；不能把工具动作直接等同为 `workspace/diagnostic`。ILS 的 `workspaceDiagnostics: false` 不禁止多文件逐一拉取 |
+   | `definition`      | `textDocument/definition`                                   | 代码符号声明跳转，优先于任何上层文本检索                                                                                                                        |
+   | `references`      | `textDocument/references`                                   | 语义引用查询；受 `context.includeDeclaration` 控制                                                                                                              |
+   | `hover`           | `textDocument/hover`                                        | 悬停文档、类型推断与签名提示                                                                                                                                    |
+   | `symbols`         | `file` -> 文档符号；`file: "*"` + `query` -> 工作区符号搜索 | JSON-RPC 大纲结果为 DocumentSymbol[] 或 SymbolInformation[]；Flow 仅是 ILS 内部 Provider 类型。按真实客户端能力验收格式                                         |
+   | `rename`          | `textDocument/rename`                                       | 跨文件安全重命名（默认直接应用，`apply: false` 预览）                                                                                                           |
+   | `rename_file`     | `workspace/willRenameFiles`                                 | 文件重命名并同步重写项目所有引用与导入语句                                                                                                                      |
+   | `code_actions`    | `textDocument/codeAction`                                   | 查询并应用 QuickFix（包括 ModCommand）                                                                                                                          |
+   | `type_definition` | `textDocument/typeDefinition`                               | 跳转至类型定义位置                                                                                                                                              |
+   | `implementation`  | `textDocument/implementation`                               | 跳转至接口实现或抽象重写位置                                                                                                                                    |
+   | `status`          | 宿主管理的语言服务状态                                      | 区分 ready 与 configured/not started；不把它单独当作工程已导入、索引已完成或全部请求健康的证明                                                                  |
+   | `reload`          | 宿主重载操作                                                | 指定文件重载相关服务；`file: "*"` 重载全部并重读配置；不是 LSP 标准 RPC，也不等于工程 workspace reload                                                          |
+   | `capabilities`    | `initialize` 响应解析                                       | 检查服务端所声明的全部 capabilities 与扩展能力                                                                                                                  |
+   | `request`         | 原始 JSON-RPC 请求通道                                      | 底层透传通道，`query` 为方法名，`payload` 为 JSON 参数字符串                                                                                                    |
 
 2. **第二梯次：标准扩展方法与已广告 MCP 工具（经 `xd://lsp:request`）**
    - **标准扩展 LSP 方法**：通过 `request` 动作直接调用服务端已广告的标准扩展协议，如调用层次结构（`textDocument/prepareCallHierarchy`、`callHierarchy/incomingCalls`、`callHierarchy/outgoingCalls`）、类型层次结构（`textDocument/prepareTypeHierarchy`、`typeHierarchy/supertypes`、`typeHierarchy/subtypes`）、语义高亮（`textDocument/semanticTokens/full`）、代码格式化（`textDocument/formatting`、`textDocument/rangeFormatting`）等；
@@ -188,17 +188,17 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
 
 ### 4.1 模块分工
 
-| 文件/模块                                                        | 职责                                                                                |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `jvm/android-ls-extension/` 的工程上下文                         | 从当前 Project 的模块、SDK、依赖和源码取得 Android 上下文，供导航、引用与 Lint 共用 |
-| JVM XML 大纲 Provider                                            | 基于当前 XML PSI 实现阶段 A，注册到既有 `"xml"` 语言                                |
-| JVM definition/references Provider 与查询服务                    | 识别 Manifest 类属性、资源声明和代码 R 引用，解析目标、校验来源、执行语义搜索       |
-| 同一 JVM 模块的 Compose suppressor、`OmpLintDiagnosticProvider`  | 阶段 D/H，保持现有范围                                                              |
-| `src/shared/navigation-relay.ts`、`src/bridge.ts`                | 通用文档/请求生命周期及必要的符号结果展平；严格维护 Bridge 取消/ID/版本一致性，严禁用 `AbortController` 替代标准 LSP 生命周期；不解析 XML，不推导 Android 身份          |
-| 旧 `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 对照现有行为迁移到 JVM；切换后删除被替代的实现、`saxes` 依赖和 Bridge 业务拦截      |
-| `src/android/debug-attach.ts`、`debug-attach-cli.ts`             | ADB 设备、PID、forward 和租约管理，仍放在 TS                                        |
-| `src/debug/dap-proxy.ts`                                         | 超时单位、异步 attach/关闭钩子和物理栈帧透传，不导入 ADB 业务                       |
-| `src/plugin.ts`、发布配置、服务启动层                            | 精确版本的 JAR 资产、runtime hash 与加载参数                                        |
+| 文件/模块                                                        | 职责                                                                                                                                                           |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jvm/android-ls-extension/` 的工程上下文                         | 从当前 Project 的模块、SDK、依赖和源码取得 Android 上下文，供导航、引用与 Lint 共用                                                                            |
+| JVM XML 大纲 Provider                                            | 基于当前 XML PSI 实现阶段 A，注册到既有 `"xml"` 语言                                                                                                           |
+| JVM definition/references Provider 与查询服务                    | 识别 Manifest 类属性、资源声明和代码 R 引用，解析目标、校验来源、执行语义搜索                                                                                  |
+| 同一 JVM 模块的 Compose suppressor、`OmpLintDiagnosticProvider`  | 阶段 D/H，保持现有范围                                                                                                                                         |
+| `src/shared/navigation-relay.ts`、`src/bridge.ts`                | 通用文档/请求生命周期及必要的符号结果展平；严格维护 Bridge 取消/ID/版本一致性，严禁用 `AbortController` 替代标准 LSP 生命周期；不解析 XML，不推导 Android 身份 |
+| 旧 `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 对照现有行为迁移到 JVM；切换后删除被替代的实现、`saxes` 依赖和 Bridge 业务拦截                                                                                 |
+| `src/android/debug-attach.ts`、`debug-attach-cli.ts`             | ADB 设备、PID、forward 和租约管理，仍放在 TS                                                                                                                   |
+| `src/debug/dap-proxy.ts`                                         | 超时单位、异步 attach/关闭钩子和物理栈帧透传，不导入 ADB 业务                                                                                                  |
+| `src/plugin.ts`、发布配置、服务启动层                            | 精确版本的 JAR 资产、runtime hash 与加载参数                                                                                                                   |
 
 修改导出接口前查询 references，迁移所有调用方，不保留旧签名或探针兼容路径。迁移包含已有 definition，不只新增 A/B 后继续保留两套解析逻辑。
 
@@ -649,17 +649,17 @@ npm pack --dry-run --json --ignore-scripts
 
 ### 13.3 最终验收矩阵
 
-| 阶段              | 完成条件                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A | 真实安装链的标准 documentSymbol 返回 §5 的正式符号树；优先采用原生，原生不满足时才加载自有 JVM Provider。范围、未保存内容、层级/平面、错误 XML 和非 Android 行为均通过 |
-| B/definition 迁移 | 三组件 false/true 精确到位置，包含当前属性且无无关类；KDoc 和别名语义保持；原有 R/XML 与 Manifest definition 无回归；TS XML 业务链已删除                                                                                                                                                                                                                                    |
-| C                 | 三处 nav_settings、合法零引用、限定符/变体/模块隔离、来源失效、内存多文件真实搜索中取消全部通过                                                                                                                                                                                                                                                                             |
-| D                 | 七项正反例及 TestFunctionName、注册生命周期和取消通过，无普通诊断回归                                                                                                                                                                                                                                                                                                       |
-| E                 | 实际设备双场景断点、栈、变量、单步、detach、forward 所有权和失败清理通过                                                                                                                                                                                                                                                                                                    |
-| F                 | 故障后旧请求结束、资源释放，新会话真实语义查询可用，其他工程不受影响                                                                                                                                                                                                                                                                                                        |
-| G                 | 默认开启 intellijExtensions 协议扩展，Rename 与 ModCommand 正常生成与执行；不新增 Bridge 黑名单                                                                                                                                                                                                                                                                             |
-| H | 标准 textDocument/diagnostic 满足原生编译诊断、Java/Kotlin NewApi 及 Compose 规则正反例；缺口分支另验 6 JAR、模型前提、lint.xml、故障隔离和缓存。MCP 多文件检查不代替标准请求验收，不重复加载已存在的规则 |
-| 发布 | npm 入口与实际启用的版本资产完整；自有 JAR 字节改变使 runtime hash 改变；本地安装发现与精确 ABI 验收通过。只有采用自有 Lint 分支时分发对应 6 个依赖 JAR |
+| 阶段              | 完成条件                                                                                                                                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A                 | 真实安装链的标准 documentSymbol 返回 §5 的正式符号树；优先采用原生，原生不满足时才加载自有 JVM Provider。范围、未保存内容、层级/平面、错误 XML 和非 Android 行为均通过                                    |
+| B/definition 迁移 | 三组件 false/true 精确到位置，包含当前属性且无无关类；KDoc 和别名语义保持；原有 R/XML 与 Manifest definition 无回归；TS XML 业务链已删除                                                                  |
+| C                 | 三处 nav_settings、合法零引用、限定符/变体/模块隔离、来源失效、内存多文件真实搜索中取消全部通过                                                                                                           |
+| D                 | 七项正反例及 TestFunctionName、注册生命周期和取消通过，无普通诊断回归                                                                                                                                     |
+| E                 | 实际设备双场景断点、栈、变量、单步、detach、forward 所有权和失败清理通过                                                                                                                                  |
+| F                 | 故障后旧请求结束、资源释放，新会话真实语义查询可用，其他工程不受影响                                                                                                                                      |
+| G                 | 默认开启 intellijExtensions 协议扩展，Rename 与 ModCommand 正常生成与执行；不新增 Bridge 黑名单                                                                                                           |
+| H                 | 标准 textDocument/diagnostic 满足原生编译诊断、Java/Kotlin NewApi 及 Compose 规则正反例；缺口分支另验 6 JAR、模型前提、lint.xml、故障隔离和缓存。MCP 多文件检查不代替标准请求验收，不重复加载已存在的规则 |
+| 发布              | npm 入口与实际启用的版本资产完整；自有 JAR 字节改变使 runtime hash 改变；本地安装发现与精确 ABI 验收通过。只有采用自有 Lint 分支时分发对应 6 个依赖 JAR                                                   |
 
 生产完成后更新 README 并清除临时产物；不自动提交或覆盖远端。文档包含：
 1. **能力与环境**：A–H 的 LSP 方法、DAP 指令、CLI 命令和已验收环境；
@@ -785,14 +785,14 @@ npm pack --dry-run --json --ignore-scripts
 
 在 `server.withAnalysisContext` 读操作内先读取当前变体的已导入模型、SDK、库表与 PSI。已导入模型中有明确属性时直接采用，不再解析构建脚本。下表是模型确实缺字段时的补充来源；263 探针只证明列出的字面量/产物可读，不证明动态 DSL 求值完整。每个属性记录来源、变体与快照；无法唯一确认则标记前提缺失，不猜默认值。
 
-| 属性                          | 第一优先级（导入后的内存模型/源码）                                                                                                                                                             | 第二优先级（已构建产物补充）                                                            | 第三优先级（保底）                                                                                                   |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **所属 `Module`**             | `ProjectFileIndex.getInstance(project).getModuleForFile(virtualFile)`（如 `MyHook.app.debug`）                                                                                                  | —                                                                                       | 无模块则跳过 Android Lint                                                                                            |
-| **SDK 根目录与 `compileSdk`** | 从模块依赖库表定位 `Gradle: android:android-sdk:null` 的 `platforms/android-<ver>/android.jar`，推导 `sdkHome` 并读取同目录 `source.properties` 的 `AndroidVersion.ApiLevel`（如 `37.0`）       | `build/intermediates/lint_report_lint_model/<variant>/.../module.xml` (`compileTarget`) | —                                                                                                                    |
-| **AAR `lint.jar` 列表**       | 遍历模块 `OrderEnumerator.orderEntries(module).librariesOnly()` 中所有 `.../transformed/<lib>/jars/classes.jar`，收集存在的同级 `jars/lint.jar`（MyHook 中共 24 个 JAR，含 13 个 Compose 模块） | `debug-artifact-libraries.xml` 中的 `lintJar`                                           | —                                                                                                                    |
-| **namespace** | 当前变体导入模型的明确 namespace 字段；模型缺失时读取所属 KtFile 中已确认且无覆盖歧义的字面量 | 具备明确 namespace 语义且快照一致的构建模型字段 | 源码 Manifest package 仅在已确认与 namespace 一致时采用；否则保留缺失，merged package 不替代 namespace |
-| **minSdkVersion** | 当前变体导入模型的明确 minSdk；模型缺失时只接受已证明无动态/flavor 覆盖歧义的 KtFile 字面量 | 当前变体有效 lint model / merged Manifest | 源码 uses-sdk 仅在已确认有效时采用；无法确认则报告模型前提缺失，跳过依赖 minSdk 的规则，不虚构 1 |
-| **targetSdkVersion** | 当前变体导入模型的明确 targetSdk；模型缺失时只接受已证明无覆盖歧义的 KtFile 字面量 | 当前变体有效 lint model / merged Manifest | 无可靠值则报告模型前提缺失并跳过依赖规则，不虚构 compileSdk |
+| 属性                          | 第一优先级（导入后的内存模型/源码）                                                                                                                                                             | 第二优先级（已构建产物补充）                                                            | 第三优先级（保底）                                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **所属 `Module`**             | `ProjectFileIndex.getInstance(project).getModuleForFile(virtualFile)`（如 `MyHook.app.debug`）                                                                                                  | —                                                                                       | 无模块则跳过 Android Lint                                                                              |
+| **SDK 根目录与 `compileSdk`** | 从模块依赖库表定位 `Gradle: android:android-sdk:null` 的 `platforms/android-<ver>/android.jar`，推导 `sdkHome` 并读取同目录 `source.properties` 的 `AndroidVersion.ApiLevel`（如 `37.0`）       | `build/intermediates/lint_report_lint_model/<variant>/.../module.xml` (`compileTarget`) | —                                                                                                      |
+| **AAR `lint.jar` 列表**       | 遍历模块 `OrderEnumerator.orderEntries(module).librariesOnly()` 中所有 `.../transformed/<lib>/jars/classes.jar`，收集存在的同级 `jars/lint.jar`（MyHook 中共 24 个 JAR，含 13 个 Compose 模块） | `debug-artifact-libraries.xml` 中的 `lintJar`                                           | —                                                                                                      |
+| **namespace**                 | 当前变体导入模型的明确 namespace 字段；模型缺失时读取所属 KtFile 中已确认且无覆盖歧义的字面量                                                                                                   | 具备明确 namespace 语义且快照一致的构建模型字段                                         | 源码 Manifest package 仅在已确认与 namespace 一致时采用；否则保留缺失，merged package 不替代 namespace |
+| **minSdkVersion**             | 当前变体导入模型的明确 minSdk；模型缺失时只接受已证明无动态/flavor 覆盖歧义的 KtFile 字面量                                                                                                     | 当前变体有效 lint model / merged Manifest                                               | 源码 uses-sdk 仅在已确认有效时采用；无法确认则报告模型前提缺失，跳过依赖 minSdk 的规则，不虚构 1       |
+| **targetSdkVersion**          | 当前变体导入模型的明确 targetSdk；模型缺失时只接受已证明无覆盖歧义的 KtFile 字面量                                                                                                              | 当前变体有效 lint model / merged Manifest                                               | 无可靠值则报告模型前提缺失并跳过依赖规则，不虚构 compileSdk                                            |
 
 构建脚本归属与模型前置约束：
 - **严禁虚构保底数值**：严禁在缺少证据时虚构 `minSdk=1` 或 `targetSdk=compileSdk` 等分析保底值。虚构 `minSdk=1` 会导致新 API 检查大面积虚报或在条件分支中引发误判与假阴性。当 Gradle 导入模型、KtFile AST 字面量、构建产物与源码 Manifest 均无法确认可靠版本时，必须显式标记模型前置条件缺失，在日志或诊断中说明跳过依赖该属性的规则（如 `NewApi`），不使用虚假数值保底进行分析。
@@ -844,32 +844,32 @@ npm pack --dry-run --json --ignore-scripts
 
 对照 `JetBrains/android`（提交 `544c9ef8`），官方桌面插件采用「`LintExternalAnnotator` 单次分析并缓存 `LintProblemData` → 100+ 个 `AndroidLint<IssueId> extends AndroidLintInspectionBase` 读取缓存生成 `ProblemDescriptor` → `InspectionProfileImpl` 动态注册」的三段式架构，强依赖 `AndroidFacet`、`AndroidModel`/`LintModel` 与 `StudioResourceRepository`。ILS 发行包不含 `org.jetbrains.android` 且诊断出口为 `textDocument/diagnostic`，故按 LSP 承载点分层映射如下：
 
-| 官方能力             | 官方实现                                                      | ILS 承载点                                                  | 实施方案                                                                      | 状态                             |
-| -------------------- | ------------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------- |
-| 单文件 Lint 诊断     | `LintExternalAnnotator` + `LintProblemData`                   | `LSDiagnosticProvider`（`Flow<Diagnostic>`）                | `OmpLintClient` + `LintDriver` 单次执行 + 内部结果缓存                        | 阶段 H 计划；263 探针通过        |
-| Lint 快速修复        | `LintIdeQuickFix`                                             | `LSCodeActionProvider` / `LSSimpleCodeActionProvider`       | 阶段 H 预填 `Diagnostic.data`，修复转换留作独立后续扩展                       | 未纳入本次交付                   |
-| 抑制与配置           | `SuppressLintQuickFix`、`lint.xml`、`InspectionProfile`       | `LanguageInspectionSuppressors` + `LintXmlConfiguration`    | 阶段 D 抑制器 + `PositionXmlParser` 支撑 `lint.xml`                           | 阶段 D/H 计划                    |
-| 第三方规则装载       | `ensureInspectionsRegistered` + `LintModel`                   | `JarFileIssueRegistry` + `CompositeIssueRegistry`           | 从库表中 classes.jar 的同级目录发现 jars/lint.jar                             | 阶段 H 计划；263 探针通过        |
-| 模型属性解析         | `GradleAndroidModel` / `AndroidModuleSystem`                  | 共享 Android 工程上下文、库表、KtFile 与 Manifest PSI       | 导入模型优先，源码字面量与已构建产物补充；记录动态 DSL 限制                   | 阶段 H 计划                      |
-| 资源与 Manifest 导航 | `StudioResourceRepository`、`PackageClassConverter`           | XML PSI、原生 definition/references/documentSymbol Provider | 阶段 A–C 与既有 definition 共用 JVM 服务；保留 AGP 来源校验，删除 TS XML 业务 | PSI/大纲接入已测，生产语义待验收 |
-| 全工作区单次请求诊断 | `GlobalInspectionTool` / `AndroidLintGlobalInspectionContext` | 无（ILS 未提供 `workspace/diagnostic`；`workspaceDiagnostics: false`） | 仅代表不支持单次 `workspace/diagnostic` 请求，不禁止多文件并发/批量拉取 `textDocument/diagnostic` 或 MCP `lint_files`，但通用 MCP 不含 Android 规则，跨文件合并分析交由 Gradle `lintDebug` 执行 | 边界外 |
+| 官方能力             | 官方实现                                                      | ILS 承载点                                                             | 实施方案                                                                                                                                                                                        | 状态                             |
+| -------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| 单文件 Lint 诊断     | `LintExternalAnnotator` + `LintProblemData`                   | `LSDiagnosticProvider`（`Flow<Diagnostic>`）                           | `OmpLintClient` + `LintDriver` 单次执行 + 内部结果缓存                                                                                                                                          | 阶段 H 计划；263 探针通过        |
+| Lint 快速修复        | `LintIdeQuickFix`                                             | `LSCodeActionProvider` / `LSSimpleCodeActionProvider`                  | 阶段 H 预填 `Diagnostic.data`，修复转换留作独立后续扩展                                                                                                                                         | 未纳入本次交付                   |
+| 抑制与配置           | `SuppressLintQuickFix`、`lint.xml`、`InspectionProfile`       | `LanguageInspectionSuppressors` + `LintXmlConfiguration`               | 阶段 D 抑制器 + `PositionXmlParser` 支撑 `lint.xml`                                                                                                                                             | 阶段 D/H 计划                    |
+| 第三方规则装载       | `ensureInspectionsRegistered` + `LintModel`                   | `JarFileIssueRegistry` + `CompositeIssueRegistry`                      | 从库表中 classes.jar 的同级目录发现 jars/lint.jar                                                                                                                                               | 阶段 H 计划；263 探针通过        |
+| 模型属性解析         | `GradleAndroidModel` / `AndroidModuleSystem`                  | 共享 Android 工程上下文、库表、KtFile 与 Manifest PSI                  | 导入模型优先，源码字面量与已构建产物补充；记录动态 DSL 限制                                                                                                                                     | 阶段 H 计划                      |
+| 资源与 Manifest 导航 | `StudioResourceRepository`、`PackageClassConverter`           | XML PSI、原生 definition/references/documentSymbol Provider            | 阶段 A–C 与既有 definition 共用 JVM 服务；保留 AGP 来源校验，删除 TS XML 业务                                                                                                                   | PSI/大纲接入已测，生产语义待验收 |
+| 全工作区单次请求诊断 | `GlobalInspectionTool` / `AndroidLintGlobalInspectionContext` | 无（ILS 未提供 `workspace/diagnostic`；`workspaceDiagnostics: false`） | 仅代表不支持单次 `workspace/diagnostic` 请求，不禁止多文件并发/批量拉取 `textDocument/diagnostic` 或 MCP `lint_files`，但通用 MCP 不含 Android 规则，跨文件合并分析交由 Gradle `lintDebug` 执行 | 边界外                           |
 
 下表是协议要求与计划条款的对应关系，“已覆盖”指计划已写明，不代表生产验收通过。
 
-| LSP 义务                                                                                             | 协议依据                                                            | 本文对应条款                                  | 状态               |
-| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------- | ------------------ |
-| 能力协商：仅声明已实现能力，不广告 `workspace/diagnostic`                                            | `ServerCapabilities.diagnosticProvider` / `textDocument.diagnostic` | §14.3 第 1、6 条；§14.6 第 5 条               | 已覆盖             |
-| 诊断字段完整度：`range` / `severity` / `code` / `source` / `message` / `relatedInformation` / `data` | `Diagnostic` 结构                                                   | §14.3 第 2 条                                 | 已覆盖             |
-| 不使用无来源字段：`codeDescription` / `tags` 保持 `null`                                             | `Diagnostic.codeDescription` / `DiagnosticTag`                      | §14.3 第 2 条                                 | 已覆盖             |
-| 无位置事件过滤：跳过 `Location.NONE` 与零长度区间                                                    | `Diagnostic.range` 语义                                             | §14.3 第 2 条                                 | 已覆盖             |
-| 已禁用规则过滤：跳过 `Severity.IGNORE`                                                               | `Configuration.isEnabled`                                           | §14.3 第 2、4 条                              | 已覆盖             |
-| 文档版本一致性：输出前复核 `Document` 版本                                                           | `TextDocumentItem.version`、`ContentModified(-32801)`               | §14.3 第 3 条                                 | 已覆盖             |
-| 取消传播：`$/cancelRequest` → `-32800`                                                               | `RequestCancelled(-32800)`                                          | §14.6 第 3 条；§7.5 取消验收                  | 已覆盖             |
-| 非阻塞调度：读操作内访问 PSI，`Flow` 在 IO 调度器收集                                                | LSP 请求并发语义                                                    | §14.3 第 3 条                                 | 已覆盖             |
-| 报告类型约束：合并报告固定 `full`，不用 `resultId` / `unchanged`                                     | `DocumentDiagnosticReport.kind`                                     | §14.3 第 5 条                                 | 已覆盖             |
-| 多根隔离：缓存以 `project.locationHash` 分区                                                         | `workspaceFolders` 语义                                             | §14.3 第 5 条                                 | 已覆盖             |
-| 错误码映射：`RequestFailed(-32803)` / `ProtocolMismatch`                                             | JSON-RPC error 语义                                                 | §4.4 错误表；§7.2 协议版本                    | 已覆盖             |
-| 快速修复通道：`textDocument/codeAction` + `WorkspaceEdit`                                            | `CodeAction` / `WorkspaceEdit`                                      | §14.7 承载点表（预留 `LSCodeActionProvider`） | **未纳入本次交付** |
+| LSP 义务                                                                                             | 协议依据                                                            | 本文对应条款                                                         | 状态               |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------ |
+| 能力协商：仅声明已实现能力，不广告 `workspace/diagnostic`                                            | `ServerCapabilities.diagnosticProvider` / `textDocument.diagnostic` | §14.3 第 1、6 条；§14.6 第 5 条                                      | 已覆盖             |
+| 诊断字段完整度：`range` / `severity` / `code` / `source` / `message` / `relatedInformation` / `data` | `Diagnostic` 结构                                                   | §14.3 第 2 条                                                        | 已覆盖             |
+| 不使用无来源字段：`codeDescription` / `tags` 保持 `null`                                             | `Diagnostic.codeDescription` / `DiagnosticTag`                      | §14.3 第 2 条                                                        | 已覆盖             |
+| 无位置事件过滤：跳过 `Location.NONE` 与零长度区间                                                    | `Diagnostic.range` 语义                                             | §14.3 第 2 条                                                        | 已覆盖             |
+| 已禁用规则过滤：跳过 `Severity.IGNORE`                                                               | `Configuration.isEnabled`                                           | §14.3 第 2、4 条                                                     | 已覆盖             |
+| 文档版本一致性：输出前复核 `Document` 版本                                                           | `TextDocumentItem.version`、`ContentModified(-32801)`               | §14.3 第 3 条                                                        | 已覆盖             |
+| 取消传播：`$/cancelRequest` → `-32800`                                                               | `RequestCancelled(-32800)`                                          | §14.6 第 3 条；§7.5 取消验收                                         | 已覆盖             |
+| 非阻塞调度：读操作内访问 PSI，`Flow` 在 IO 调度器收集                                                | LSP 请求并发语义                                                    | §14.3 第 3 条                                                        | 已覆盖             |
+| 报告类型约束：合并报告固定 `full`，不用 `resultId` / `unchanged`                                     | `DocumentDiagnosticReport.kind`                                     | §14.3 第 5 条                                                        | 已覆盖             |
+| 多根隔离：缓存以 `project.locationHash` 分区                                                         | `workspaceFolders` 语义                                             | §14.3 第 5 条                                                        | 已覆盖             |
+| 错误码映射：`RequestFailed(-32803)` / `ProtocolMismatch`                                             | JSON-RPC error 语义                                                 | §4.4 错误表；§7.2 协议版本                                           | 已覆盖             |
+| 快速修复通道：`textDocument/codeAction` + `WorkspaceEdit`                                            | `CodeAction` / `WorkspaceEdit`                                      | §14.7 承载点表（预留 `LSCodeActionProvider`）                        | **未纳入本次交付** |
 | 全工作区单次诊断：`workspace/diagnostic`                                                             | `WorkspaceDiagnosticReport`                                         | 无 ILS 原生承载点（不影响多文件并发/批量 `textDocument/diagnostic`） | 单次请求不可得     |
 
 AGP 兼容矩阵：

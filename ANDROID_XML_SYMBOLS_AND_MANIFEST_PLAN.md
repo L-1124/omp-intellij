@@ -21,28 +21,28 @@ Agent 可使用现有 `xd://lsp request` 完成发现与调用，不要求为这
 
 `xd://lsp` 的现有入口分工如下；它是宿主工具，不能将其 action 名称全部等同为 LSP 标准方法：
 
-| 任务 | 入口 |
-| --- | --- |
-| 服务发现、协商、重载 | `status`、`capabilities`、`reload`；ready 不能单独证明工程索引就绪 |
-| 文件大纲、全工作区符号 | `symbols`；指定 file 查文件，`file: "*"` 配合 query 查工作区 |
-| 定义、类型、实现、引用、文档 | `definition`、`type_definition`、`implementation`、`references`、`hover` |
-| 重构与修复 | `rename`（默认应用，可预览）、`rename_file`、`code_actions`（默认列举） |
-| 诊断 | `diagnostics`，支持文件、glob 与工作区；具体获取机制取决于适配器 |
-| 无独立 action 的标准方法、已广告私有命令 | `request`，query 为方法名、payload 为 JSON 参数字符串；不限于私有协议 |
+| 任务                                     | 入口                                                                     |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
+| 服务发现、协商、重载                     | `status`、`capabilities`、`reload`；ready 不能单独证明工程索引就绪       |
+| 文件大纲、全工作区符号                   | `symbols`；指定 file 查文件，`file: "*"` 配合 query 查工作区             |
+| 定义、类型、实现、引用、文档             | `definition`、`type_definition`、`implementation`、`references`、`hover` |
+| 重构与修复                               | `rename`（默认应用，可预览）、`rename_file`、`code_actions`（默认列举）  |
+| 诊断                                     | `diagnostics`，支持文件、glob 与工作区；具体获取机制取决于适配器         |
+| 无独立 action 的标准方法、已广告私有命令 | `request`，query 为方法名、payload 为 JSON 参数字符串；不限于私有协议    |
 
 目标服务端已广告调用层级、类型层级、语义高亮和格式化时，可经 request 使用对应标准方法；先核对 capability 与方法参数，不为这些能力另设 Bridge 业务接口。标准方法经 request 调用仍属于第一优先级。按 file 选择服务端；位置类动作使用工具要求的 file、1 基 line 与明确 symbol。
 
 
 ### 1.2 已观察能力与边界
 
-| 入口 | 本会话证据 | 本专项可用范围 |
-| --- | --- | --- |
-| `list-mcp-tools` | 返回含说明与 inputSchema 的 22 项工具 | 原生功能发现；工具集合随服务端版本/工程能力变化，不固定数量为协议契约 |
-| `get_project_modules` | 临时 Maven marker 工程返回模块 name/type | 模块概览；没有实测源码根、namespace、资源根或变体字段，不能替代 Android 上下文 |
-| `get_project_dependencies` | 上述工程返回空 dependencies | 依赖入口已可调用；不证明 Android 依赖、模块边和作用域完整 |
-| `list_directory_tree` | 当前工程返回 `The project directory cannot be determined.` | 仅记录失败；不能宣称目录树或包视图已验收 |
-| `analyze_calls` / `search_symbol` | 清单含 schema，未在 Android 场景验收 | 分别用于调用关系/定位候选；不能替代包含 import、KDoc 的 references 或证明唯一类身份 |
-| `exportWorkspace` | 现有代码已调用并读取 workspace.json；主计划保留导入实验 | 导出已导入工作区模型，不是 XML PSI、AST 或包树；体积/耗时按实际文件测量 |
+| 入口                              | 本会话证据                                                 | 本专项可用范围                                                                      |
+| --------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `list-mcp-tools`                  | 返回含说明与 inputSchema 的 22 项工具                      | 原生功能发现；工具集合随服务端版本/工程能力变化，不固定数量为协议契约               |
+| `get_project_modules`             | 临时 Maven marker 工程返回模块 name/type                   | 模块概览；没有实测源码根、namespace、资源根或变体字段，不能替代 Android 上下文      |
+| `get_project_dependencies`        | 上述工程返回空 dependencies                                | 依赖入口已可调用；不证明 Android 依赖、模块边和作用域完整                           |
+| `list_directory_tree`             | 当前工程返回 `The project directory cannot be determined.` | 仅记录失败；不能宣称目录树或包视图已验收                                            |
+| `analyze_calls` / `search_symbol` | 清单含 schema，未在 Android 场景验收                       | 分别用于调用关系/定位候选；不能替代包含 import、KDoc 的 references 或证明唯一类身份 |
+| `exportWorkspace`                 | 现有代码已调用并读取 workspace.json；主计划保留导入实验    | 导出已导入工作区模型，不是 XML PSI、AST 或包树；体积/耗时按实际文件测量             |
 
 主计划记录 271 的原生 XML 空结果及自有 PSI 大纲探针。实施时在同一目标版本、真实 Android 导入与实际文档上复核，不能用临时 marker 工程证明 Android 能力。
 
@@ -54,14 +54,14 @@ Agent 可使用现有 `xd://lsp request` 完成发现与调用，不要求为这
 
 ## 二、实现分工与切换
 
-| 位置 | 实施内容 |
-| --- | --- |
-| `jvm/android-ls-extension/`（拟新增，按主计划构建/加载） | Android 工程上下文、XML PSI 大纲和 Manifest 类目标解析；仅实现经原生验收确认的缺口 |
-| JVM definition/references 共享服务（拟新增） | 当前模块依赖范围内解析真实 Java/Kotlin 目标，复用平台语义搜索，统一位置与去重 |
-| `src/bridge.ts` | 保留标准请求、文档同步、错误和取消转发；若仍有层级兼容问题，仅转换符号响应格式 |
-| `src/shared/navigation-relay.ts` | 删除切换后已被 JVM 覆盖的 Android 业务中继；其他仍存在的内部请求保留完整 ID 归属和清理 |
+| 位置                                                          | 实施内容                                                                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `jvm/android-ls-extension/`（拟新增，按主计划构建/加载）      | Android 工程上下文、XML PSI 大纲和 Manifest 类目标解析；仅实现经原生验收确认的缺口               |
+| JVM definition/references 共享服务（拟新增）                  | 当前模块依赖范围内解析真实 Java/Kotlin 目标，复用平台语义搜索，统一位置与去重                    |
+| `src/bridge.ts`                                               | 保留标准请求、文档同步、错误和取消转发；若仍有层级兼容问题，仅转换符号响应格式                   |
+| `src/shared/navigation-relay.ts`                              | 删除切换后已被 JVM 覆盖的 Android 业务中继；其他仍存在的内部请求保留完整 ID 归属和清理           |
 | `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 对照原有行为迁移；验收完成后删除被替代实现、无用类型/测试及 `saxes` 依赖，不保留 TS 备用解析路径 |
-| 现有 Node 与隔离 ILS 测试 | 协议边界留在 Node；Android 身份、XML/代码语义迁到真实 JVM/ILS 行为验收 |
+| 现有 Node 与隔离 ILS 测试                                     | 协议边界留在 Node；Android 身份、XML/代码语义迁到真实 JVM/ILS 行为验收                           |
 
 不新建 `src/android/document-symbols.ts` 或 `src/android/references.ts` 的 TS 业务实现。修改导出接口先查 LSP references；迁移所有调用方。精确版本资产、插件依赖、SPI、加载失败的报告和安全重启均使用主计划 §12，不向共享服务热塞 JAR。
 
@@ -116,14 +116,14 @@ A/B 使用 ILS Provider 的分析上下文、平台可取消读操作和请求�
 
 既有通用内部 RPC 若仍存在，继续绑定父/子 ID、一次响应、超时、迟到帧隔离及清理；AbortController 只传递本地取消信号，不能自动发送 `$/cancelRequest` 或替代响应归属。删除旧 Android 业务链时同步删除仅服务该链的状态，不删除其他消费者仍需的协议保护。
 
-| 情况 | 契约 |
-| --- | --- |
-| 非 Android/未支持节点 | 扩展不贡献结果，沿用原生处理 |
-| 已识别语义查询缺前提或歧义 | `-32803`，具体 model_unavailable / target_unresolved / ambiguous_target 等 reason |
-| 取消 / 内容改变 | `-32800` / `-32801`，不吞成 [] |
-| 超时 | `-32803 timeout` 并结束相关工作 |
-| 合法零引用 | 返回约定的成功集合，与目标未解析区分 |
-| Provider 未加载或 ABI 不匹配 | 启动/状态层明确报告不可用；不伪造逐请求错误或恢复 TS 解析 |
+| 情况                         | 契约                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------------- |
+| 非 Android/未支持节点        | 扩展不贡献结果，沿用原生处理                                                      |
+| 已识别语义查询缺前提或歧义   | `-32803`，具体 model_unavailable / target_unresolved / ambiguous_target 等 reason |
+| 取消 / 内容改变              | `-32800` / `-32801`，不吞成 []                                                    |
+| 超时                         | `-32803 timeout` 并结束相关工作                                                   |
+| 合法零引用                   | 返回约定的成功集合，与目标未解析区分                                              |
+| Provider 未加载或 ABI 不匹配 | 启动/状态层明确报告不可用；不伪造逐请求错误或恢复 TS 解析                         |
 
 原生错误不在 Bridge 改写；新增 Provider 的失败如何参与原生聚合，须在切换前验证。已有 definition 的源码优先级、原生字节码目标并存和可选增强失败语义未验收前，不删除可用旧链。
 
