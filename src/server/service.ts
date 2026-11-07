@@ -794,7 +794,7 @@ async function resolveStartConfiguration(options: {
       });
       if (!installed) {
         throw new Error(
-          `IntelliJ server ${configuration.version ?? DEFAULT_SERVER_VERSION} is not installed at "${configuration.installDir}". Run /intellij install to download and install it explicitly.`,
+          `IntelliJ server ${configuration.version ?? DEFAULT_SERVER_VERSION} is not installed at "${configuration.installDir}". Run /intellij install to install and select the bundled version, or /intellij versions to inspect local installations.`,
         );
       }
       executable = installed.executable;

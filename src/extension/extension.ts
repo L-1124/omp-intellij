@@ -17,13 +17,7 @@ import {
 } from '../project/readiness.js';
 import type { DiscoveredJdkItem } from '../project/workspace.js';
 import * as defaultWorkspaceApi from '../project/workspace.js';
-import {
-  DEFAULT_SERVER_VERSION,
-  latestServerVersion as defaultLatestServerVersion,
-  resolveServerBundle as defaultResolveServerBundle,
-  serverBundle,
-  validateServerVersion,
-} from '../server/bundles.js';
+import { DEFAULT_SERVER_VERSION, serverBundle } from '../server/bundles.js';
 import {
   defaultInstallDir as defaultDefaultInstallDir,
   readObservedInstallState as defaultReadObservedInstallState,
@@ -175,8 +169,6 @@ export interface ExtensionOverrides {
   }>;
   versionApi?: Partial<{
     selectServerVersion: typeof defaultSelectServerVersion;
-    resolveServerBundle: typeof defaultResolveServerBundle;
-    latestServerVersion: typeof defaultLatestServerVersion;
   }>;
   pollIntervalMs?: number;
   configFile?: string;
@@ -217,8 +209,6 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
   };
   const versionApi = {
     selectServerVersion: overrides.versionApi?.selectServerVersion ?? defaultSelectServerVersion,
-    resolveServerBundle: overrides.versionApi?.resolveServerBundle ?? defaultResolveServerBundle,
-    latestServerVersion: overrides.versionApi?.latestServerVersion ?? defaultLatestServerVersion,
   };
   const pollIntervalMs = overrides.pollIntervalMs ?? 500;
   const configOptions = overrides.configFile ? { configFile: overrides.configFile } : {};
@@ -639,15 +629,14 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
         ctx.ui?.notify(parts.join('; '), 'info');
       } else if (sub === 'install') {
-        startObserver(ctx);
-        const commandGen = generation;
         const remainder = rawArgs.trim().slice('install'.length);
-        const { dir, version: requestedVersion, error } = parseInstallArgs(remainder);
+        const { dir, error } = parseInstallArgs(remainder);
         if (error) {
           ctx.ui?.notify(error, 'warning');
           return;
         }
-
+        startObserver(ctx);
+        const commandGen = generation;
         const ownedAbort = new AbortController();
         activeCommandAbort = ownedAbort;
         let targetDir = dir;
@@ -665,28 +654,12 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             }
           }
 
-          let targetVersion = requestedVersion;
-          if (!targetVersion) {
-            if (currentConfig.mode === 'managed' && currentConfig.version) {
-              targetVersion = currentConfig.version;
-            } else {
-              targetVersion = DEFAULT_SERVER_VERSION;
-            }
-          }
-
-          const cachedVersion =
-            targetVersion === 'latest' ? null : validateServerVersion(targetVersion);
-          let result = cachedVersion
-            ? await installApi.findInstalled(targetDir, { version: cachedVersion })
-            : null;
+          let result = await installApi.findInstalled(targetDir, {
+            version: DEFAULT_SERVER_VERSION,
+          });
           await configApi.trackInstallation(targetDir, configOptions);
           if (!result) {
-            const bundle =
-              targetVersion === DEFAULT_SERVER_VERSION
-                ? serverBundle()
-                : await versionApi.resolveServerBundle(targetVersion, {
-                    signal: ownedAbort.signal,
-                  });
+            const bundle = serverBundle();
             result = await installApi.ensureInstalled(targetDir, {
               bundle,
               signal: ownedAbort.signal,
@@ -728,7 +701,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           if (selectionBlockedError) {
             const retryDirArg = dir ? ` --dir "${result.installDir}"` : '';
             ctx.ui?.notify(
-              `IntelliJ server installed: ${result.version} at ${result.executable}, but not selected: ${selectionBlockedError}. Stop the server and re-run /intellij install --version ${result.version}${retryDirArg} to switch to this installation.`,
+              `IntelliJ server installed: ${result.version} at ${result.executable}, but not selected: ${selectionBlockedError}. Stop the server and re-run /intellij install${retryDirArg} to switch to this installation.`,
               'warning',
             );
           } else {
@@ -762,14 +735,9 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else if (sub === 'versions') {
         const remainder = rawArgs.trim().slice('versions'.length).trim();
-        let queryRemote = false;
         if (remainder) {
-          if (remainder === '--remote') {
-            queryRemote = true;
-          } else {
-            ctx.ui?.notify('Usage: /intellij versions [--remote]', 'warning');
-            return;
-          }
+          ctx.ui?.notify('Usage: /intellij versions', 'warning');
+          return;
         }
 
         try {
@@ -820,15 +788,6 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             `Installation directory: ${installDir}`,
           );
           lines.push(`Server status: ${serverRunningDesc}`);
-
-          if (queryRemote) {
-            try {
-              const latest = await versionApi.latestServerVersion();
-              lines.push(`Latest remote version: ${latest}`);
-            } catch (err: unknown) {
-              lines.push(`Latest remote version: error (${getErrorMessage(err)})`);
-            }
-          }
 
           ctx.ui?.notify(lines.join('; '), 'info');
         } catch (err: unknown) {
@@ -1600,7 +1559,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|stop|restart|doctor|install [--version <build|latest>] [--dir <path>]|versions [--remote]|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop|restart|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }

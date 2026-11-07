@@ -10,6 +10,7 @@ import {
   parseInstallArgs,
 } from '../src/extension/install-status.js';
 import type { ProjectStateResult } from '../src/project/connection-state.js';
+import { DEFAULT_SERVER_VERSION, serverBundle } from '../src/server/bundles.js';
 import type { ServerConfiguration } from '../src/server/config.js';
 import type { InstallResult, InstallState } from '../src/server/install.js';
 import { createMockCtx, createMockPi } from './helpers.js';
@@ -45,52 +46,12 @@ test('parseInstallArgs preserves paths with spaces across quoting styles', () =>
   assert.equal(typeof unknownFlag.error, 'string');
   assert.match(unknownFlag.error ?? '', /Usage/i);
 
-  // Both flag orders and version parsing
-  assert.deepEqual(parseInstallArgs('--version 263.7084.0 --dir "C:\\Program Files\\IntelliJ"'), {
-    version: '263.7084.0',
-    dir: 'C:\\Program Files\\IntelliJ',
-  });
-  assert.deepEqual(parseInstallArgs('--dir "C:\\Program Files\\IntelliJ" --version 263.7084.0'), {
-    version: '263.7084.0',
-    dir: 'C:\\Program Files\\IntelliJ',
-  });
-  assert.deepEqual(parseInstallArgs('--version=263.7084.0 --dir="D:/tools"'), {
-    version: '263.7084.0',
-    dir: 'D:/tools',
-  });
-  assert.deepEqual(parseInstallArgs('--version 263.7084.0 --dir F:\\path with spaces\\dir'), {
-    version: '263.7084.0',
-    dir: 'F:\\path with spaces\\dir',
-  });
-  assert.deepEqual(parseInstallArgs('--dir F:\\path with spaces\\dir --version 263.7084.0'), {
-    version: '263.7084.0',
-    dir: 'F:\\path with spaces\\dir',
-  });
-  assert.deepEqual(parseInstallArgs('--version latest'), {
-    version: 'latest',
-  });
-  assert.match(parseInstallArgs('--version').error ?? '', /version must not be empty/i);
-  assert.match(parseInstallArgs('--version ""').error ?? '', /version must not be empty/i);
-  assert.match(
-    parseInstallArgs('--version --dir "D:/tools"').error ?? '',
-    /version must not be empty/i,
-  );
-  assert.match(
-    parseInstallArgs('--dir --version 263.7084.0').error ?? '',
-    /directory must not be empty/i,
-  );
-  assert.match(
-    parseInstallArgs('--version 1.0.0 --version 2.0.0').error ?? '',
-    /duplicate --version/i,
-  );
+  assert.match(parseInstallArgs('--version').error ?? '', /Usage: \/intellij install/i);
+  assert.match(parseInstallArgs('--version 271.2085.0').error ?? '', /Unknown flag: --version/i);
+  assert.match(parseInstallArgs('--version latest').error ?? '', /Unknown flag: --version/i);
   assert.match(parseInstallArgs('--dir /a --dir /b').error ?? '', /duplicate --dir/i);
-  assert.match(
-    parseInstallArgs('--version 263.7084.0 extra').error ?? '',
-    /unexpected argument: extra/i,
-  );
   assert.match(parseInstallArgs('--dir "C:/dir" extra').error ?? '', /unexpected argument: extra/i);
   assert.ok(parseInstallArgs('--dir "unfinished directory').error);
-  assert.ok(parseInstallArgs("--version '263.7084.0").error);
 });
 
 test('formatInstallStatusText and formatInstallDescription format known vs unknown totalBytes', () => {
@@ -989,64 +950,15 @@ test('/intellij install never implicitly accepts EULA or writes eula acceptance 
   }
 });
 
-test('/intellij install --version resolves bundle, passes it to ensureInstalled, and pins version', async () => {
-  let resolvedVersionArg = '';
-  let installedBundleVersion = '';
-  let selectedVersion = '';
-  const fakeTargetDir = 'F:\\managed\\intellij';
+test('/intellij install rejects --version and does not trigger installation', async () => {
+  let ensureInstalledCalled = false;
 
   const pi = createMockPi();
   extension(pi, {
-    serverConfigApi: {
-      async readServerConfig() {
-        return { mode: 'managed', installDir: fakeTargetDir };
-      },
-      async trackInstallation() {},
-      async saveServerConfig() {},
-      defaultInstallDir: () => fakeTargetDir,
-      async readObservedInstallState() {
-        return null;
-      },
-    },
-    versionApi: {
-      async resolveServerBundle(version) {
-        resolvedVersionArg = version;
-        return {
-          version,
-          url: `https://download.jetbrains.com/test/${version}.zip`,
-          sha256: 'a'.repeat(64),
-          archive: 'zip',
-        };
-      },
-      async selectServerVersion(version) {
-        selectedVersion = version;
-        return {
-          installDir: fakeTargetDir,
-          version,
-          executable: `${fakeTargetDir}\\bin\\intellij.bat`,
-        };
-      },
-    },
     serverInstallApi: {
-      async ensureInstalled(dir, opts) {
-        installedBundleVersion = opts?.bundle?.version ?? '';
-        return {
-          installDir: dir,
-          version: opts?.bundle?.version ?? '263.7084.0',
-          executable: `${dir}\\bin\\intellij.bat`,
-        };
-      },
-      async readInstallState(dir) {
-        return {
-          installId: 'inst-custom-ver',
-          pid: process.pid,
-          installDir: dir,
-          version: '263.8000.0',
-          phase: 'ready',
-          downloadedBytes: 100,
-          totalBytes: 100,
-          updatedAt: Date.now(),
-        };
+      async ensureInstalled() {
+        ensureInstalledCalled = true;
+        throw new Error('Must not be called');
       },
     },
   });
@@ -1056,22 +968,21 @@ test('/intellij install --version resolves bundle, passes it to ensureInstalled,
     assert.ok(cmd);
     const ctx = createMockCtx('F:\\my-project');
 
-    await cmd.handler('install --version 263.8000.0', ctx);
-
-    assert.equal(resolvedVersionArg, '263.8000.0');
-    assert.equal(installedBundleVersion, '263.8000.0');
-    assert.equal(selectedVersion, '263.8000.0');
+    await cmd.handler('install --version 271.2085.0', ctx);
+    assert.equal(ensureInstalledCalled, false);
     assert.equal(ctx.notifications.length, 1);
-    assert.match(ctx.notifications[0].msg, /IntelliJ server installed: 263\.8000\.0/);
-    assert.match(ctx.notifications[0].msg, /configured\/selected; start explicitly/);
+    assert.match(ctx.notifications[0].msg, /Unknown flag: --version/);
+
+    await cmd.handler('install --version=latest', ctx);
+    assert.equal(ensureInstalledCalled, false);
   } finally {
     pi.emit('session_shutdown');
   }
 });
 
-test('/intellij install without --version defaults to existing managed pin rather than bundled default', async () => {
-  let resolvedVersionArg = '';
+test('/intellij install always installs bundled DEFAULT_SERVER_VERSION regardless of existing managed pin', async () => {
   let installedBundleVersion = '';
+  let selectedVersion = '';
   const fakeTargetDir = 'F:\\managed\\intellij';
 
   const pi = createMockPi();
@@ -1088,16 +999,8 @@ test('/intellij install without --version defaults to existing managed pin rathe
       },
     },
     versionApi: {
-      async resolveServerBundle(version) {
-        resolvedVersionArg = version;
-        return {
-          version,
-          url: `https://download.jetbrains.com/test/${version}.zip`,
-          sha256: 'b'.repeat(64),
-          archive: 'zip',
-        };
-      },
       async selectServerVersion(version) {
+        selectedVersion = version;
         return {
           installDir: fakeTargetDir,
           version,
@@ -1110,7 +1013,7 @@ test('/intellij install without --version defaults to existing managed pin rathe
         installedBundleVersion = opts?.bundle?.version ?? '';
         return {
           installDir: dir,
-          version: opts?.bundle?.version ?? '263.9999.0',
+          version: opts?.bundle?.version ?? DEFAULT_SERVER_VERSION,
           executable: `${dir}\\bin\\intellij.bat`,
         };
       },
@@ -1119,7 +1022,7 @@ test('/intellij install without --version defaults to existing managed pin rathe
           installId: 'inst-pin-preserve',
           pid: process.pid,
           installDir: dir,
-          version: '263.9999.0',
+          version: DEFAULT_SERVER_VERSION,
           phase: 'ready',
           downloadedBytes: 100,
           totalBytes: 100,
@@ -1136,8 +1039,8 @@ test('/intellij install without --version defaults to existing managed pin rathe
 
     await cmd.handler('install', ctx);
 
-    assert.equal(resolvedVersionArg, '263.9999.0', 'Must resolve existing pinned version');
-    assert.equal(installedBundleVersion, '263.9999.0');
+    assert.equal(installedBundleVersion, DEFAULT_SERVER_VERSION);
+    assert.equal(selectedVersion, DEFAULT_SERVER_VERSION);
   } finally {
     pi.emit('session_shutdown');
   }
@@ -1208,14 +1111,14 @@ test('/intellij install when selectServerVersion is blocked notifies installed-b
     assert.match(ctx.notifications[0].msg, /IntelliJ server installed: 263\.7084\.0 at/);
     assert.match(ctx.notifications[0].msg, /not selected/);
     assert.match(ctx.notifications[0].msg, /Run \/intellij stop first/);
-    assert.match(ctx.notifications[0].msg, /re-run \/intellij install --version/);
+    assert.match(ctx.notifications[0].msg, /re-run \/intellij install/);
+    assert.equal(ctx.notifications[0].msg.includes('--version'), false);
   } finally {
     pi.emit('session_shutdown');
   }
 });
 
-test('/intellij versions lists installed, selected version, path, running status, and avoids network without --remote', async () => {
-  let latestCalled = false;
+test('/intellij versions lists installed, selected version, path, and running status', async () => {
   const fakeDir = 'F:\\managed\\store';
 
   const pi = createMockPi();
@@ -1241,12 +1144,6 @@ test('/intellij versions lists installed, selected version, path, running status
         ];
       },
     },
-    versionApi: {
-      async latestServerVersion() {
-        latestCalled = true;
-        return '263.9000.0';
-      },
-    },
   });
 
   try {
@@ -1256,7 +1153,6 @@ test('/intellij versions lists installed, selected version, path, running status
 
     await cmd.handler('versions', ctx);
 
-    assert.equal(latestCalled, false, 'latestServerVersion must NOT be called without --remote');
     assert.equal(ctx.notifications.length, 1);
     const msg = ctx.notifications[0].msg;
     assert.match(msg, /Selected version: 263\.7084\.0/);
@@ -1267,8 +1163,7 @@ test('/intellij versions lists installed, selected version, path, running status
   }
 });
 
-test('/intellij versions --remote explicitly queries remote latest version', async () => {
-  let latestCalled = false;
+test('/intellij versions rejects extra arguments like --remote', async () => {
   const fakeDir = 'F:\\managed\\store';
 
   const pi = createMockPi();
@@ -1276,23 +1171,6 @@ test('/intellij versions --remote explicitly queries remote latest version', asy
     serverConfigApi: {
       async readServerConfig() {
         return { mode: 'managed', installDir: fakeDir, version: '263.7084.0' };
-      },
-    },
-    serverInstallApi: {
-      async listInstalledVersions() {
-        return [
-          {
-            version: '263.7084.0',
-            installDir: fakeDir,
-            executable: `${fakeDir}\\bin\\intellij.bat`,
-          },
-        ];
-      },
-    },
-    versionApi: {
-      async latestServerVersion() {
-        latestCalled = true;
-        return '263.9000.0';
       },
     },
   });
@@ -1304,9 +1182,9 @@ test('/intellij versions --remote explicitly queries remote latest version', asy
 
     await cmd.handler('versions --remote', ctx);
 
-    assert.equal(latestCalled, true);
     assert.equal(ctx.notifications.length, 1);
-    assert.match(ctx.notifications[0].msg, /Latest remote version: 263\.9000\.0/);
+    assert.equal(ctx.notifications[0].level, 'warning');
+    assert.equal(ctx.notifications[0].msg, 'Usage: /intellij versions');
   } finally {
     pi.emit('session_shutdown');
   }
@@ -1440,7 +1318,7 @@ test('cached installation and rollback commands preserve selected receipts offli
   const installDir = join(root, 'installation');
   const systemPath = join(root, 'system');
   const configFile = join(root, 'intellij.json');
-  const versions = ['263.3000.0', '263.4000.0'];
+  const versions = [DEFAULT_SERVER_VERSION, '263.4000.0'];
   const launcherName = process.platform === 'win32' ? 'intellij-server.exe' : 'intellij-server';
   await mkdir(root, { recursive: true });
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1453,7 +1331,7 @@ test('cached installation and rollback commands preserve selected receipts offli
       join(versionDir, 'receipt.json'),
       JSON.stringify({
         version,
-        sha256: 'a'.repeat(64),
+        sha256: version === DEFAULT_SERVER_VERSION ? serverBundle().sha256 : 'a'.repeat(64),
         platform: process.platform,
         arch: process.arch,
         launcher: `bin/${launcherName}`,
@@ -1472,14 +1350,6 @@ test('cached installation and rollback commands preserve selected receipts offli
   extension(pi, {
     configFile,
     systemPath,
-    versionApi: {
-      async resolveServerBundle() {
-        throw new Error('Cached install must remain offline');
-      },
-      async latestServerVersion() {
-        throw new Error('Local listing must remain offline');
-      },
-    },
     serverInstallApi: {
       async ensureInstalled() {
         throw new Error('An installed version must not be downloaded again');

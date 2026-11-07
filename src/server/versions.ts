@@ -44,7 +44,7 @@ export async function selectServerVersion(
       const installed = await findInstalled(installDir, { version });
       if (!installed) {
         throw new Error(
-          `IntelliJ server ${version} is not installed or its receipt is invalid at "${installDir}". Run /intellij install --version ${version} first.`,
+          `IntelliJ server ${version} is not installed or its receipt is invalid at "${installDir}". Run /intellij versions to list installed versions; /intellij install installs the bundled version.`,
         );
       }
       await saveServerConfig(

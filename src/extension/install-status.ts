@@ -32,11 +32,10 @@ export function formatStatusText(
 
 export interface ParsedInstallArgs {
   dir?: string;
-  version?: string;
   error?: string;
 }
 
-const INSTALL_USAGE = 'Usage: /intellij install [--version <build|latest>] [--dir <path>]';
+const INSTALL_USAGE = 'Usage: /intellij install [--dir <path>]';
 
 function stripQuotes(value: string): string {
   let s = value.trim();
@@ -85,10 +84,7 @@ export function parseInstallArgs(rawRemainder: string): ParsedInstallArgs {
   }
 
   let dir: string | undefined;
-  let version: string | undefined;
   let seenDir = false;
-  let seenVersion = false;
-
   let i = 0;
   while (i < rawTokens.length) {
     const token = rawTokens[i];
@@ -148,30 +144,6 @@ export function parseInstallArgs(rawRemainder: string): ParsedInstallArgs {
         return { error: 'IntelliJ installation directory must not be empty' };
       }
       dir = stripped;
-    } else if (token === '--version' || token.startsWith('--version=')) {
-      if (seenVersion) {
-        return { error: `Duplicate --version flag. ${INSTALL_USAGE}` };
-      }
-      seenVersion = true;
-
-      let rawVal = '';
-      if (token.startsWith('--version=')) {
-        rawVal = token.slice(10);
-        i++;
-      } else {
-        i++;
-        if (i >= rawTokens.length || rawTokens[i].startsWith('-')) {
-          return { error: 'IntelliJ server version must not be empty' };
-        }
-        rawVal = rawTokens[i];
-        i++;
-      }
-
-      const stripped = stripQuotes(rawVal);
-      if (!stripped) {
-        return { error: 'IntelliJ server version must not be empty' };
-      }
-      version = stripped;
     } else {
       if (token.startsWith('-')) {
         return { error: `Unknown flag: ${token}. ${INSTALL_USAGE}` };
@@ -182,7 +154,6 @@ export function parseInstallArgs(rawRemainder: string): ParsedInstallArgs {
 
   return {
     ...(dir !== undefined ? { dir } : {}),
-    ...(version !== undefined ? { version } : {}),
   };
 }
 
