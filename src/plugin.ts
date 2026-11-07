@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -35,10 +35,41 @@ const assets = await Promise.all(
     text: await readFile(join(root, name), 'utf8'),
   })),
 );
+async function collectBinaryAssets(
+  dir: string,
+  base: string = root,
+): Promise<Array<{ name: string; buffer: Buffer }>> {
+  const items: Array<{ name: string; buffer: Buffer }> = [];
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        items.push(...(await collectBinaryAssets(full, base)));
+      } else if (entry.isFile()) {
+        const rel = relative(base, full).replace(/\\/g, '/');
+        items.push({
+          name: rel,
+          buffer: await readFile(full),
+        });
+      }
+    }
+  } catch (error: unknown) {
+    if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT')
+      throw error;
+  }
+  return items.sort((a, b) => a.name.localeCompare(b.name));
+}
+const binaryAssets = await collectBinaryAssets(join(root, 'resources', 'ils'));
+
 const hash = createHash('sha256').update('node-transpile-v1');
 for (const input of [...inputs, ...assets])
   hash.update(input.name).update('\0').update(input.text).update('\0');
-const runtimeRoot = join(root, '.runtime', hash.digest('hex'));
+for (const binAsset of binaryAssets)
+  hash.update(binAsset.name).update('\0').update(binAsset.buffer).update('\0');
+const runtimeBase = join(root, '.runtime');
+const runtimeRoot = join(runtimeBase, hash.digest('hex'));
+
 const marker = join(runtimeRoot, '.complete');
 if ((await readFile(marker, 'utf8').catch(() => '')) !== 'ready') {
   const staging = `${runtimeRoot}.${randomUUID()}.tmp`;
@@ -53,6 +84,11 @@ if ((await readFile(marker, 'utf8').catch(() => '')) !== 'ready') {
       const target = join(staging, asset.name);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, asset.text);
+    }
+    for (const binAsset of binaryAssets) {
+      const target = join(staging, binAsset.name);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, binAsset.buffer);
     }
     await writeFile(join(staging, '.complete'), 'ready');
     await mkdir(dirname(runtimeRoot), { recursive: true });

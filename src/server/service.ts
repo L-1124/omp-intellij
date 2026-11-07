@@ -5,6 +5,7 @@ import net from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from '../project/metadata.js';
+import { mergeIjJavaOptions, resolveAndroidExtension } from './android-extension.js';
 import { DEFAULT_SERVER_VERSION } from './bundles.js';
 import { readServerConfig, trackInstallation } from './config.js';
 import { requireAcceptedEula } from './eula.js';
@@ -830,6 +831,18 @@ async function internalStartServer(
 
   const log = await open(join(systemPath, 'launcher.log'), 'a');
   try {
+    const extension = await resolveAndroidExtension(executable);
+    if (extension.pluginPath) {
+      await log.write(`[android-extension] Staged plugin path: ${extension.pluginPath}\n`);
+    } else if (extension.reason) {
+      await log.write(`[android-extension] Unavailable: ${extension.reason}\n`);
+    }
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(extension.pluginPath
+        ? { IJ_JAVA_OPTIONS: mergeIjJavaOptions(process.env.IJ_JAVA_OPTIONS, extension.pluginPath) }
+        : {}),
+    };
     child = spawn(
       executable,
       [
@@ -841,7 +854,7 @@ async function internalStartServer(
         '--data-sharing=none',
         `--eula=${eulaHash}`,
       ],
-      { detached: true, windowsHide: true, stdio: ['ignore', log.fd, log.fd] },
+      { detached: true, windowsHide: true, stdio: ['ignore', log.fd, log.fd], env },
     );
     const {
       promise: spawnPromise,

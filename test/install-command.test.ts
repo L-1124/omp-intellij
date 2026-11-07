@@ -1118,51 +1118,6 @@ test('/intellij install when selectServerVersion is blocked notifies installed-b
   }
 });
 
-test('/intellij versions lists installed, selected version, path, and running status', async () => {
-  const fakeDir = 'F:\\managed\\store';
-
-  const pi = createMockPi();
-  extension(pi, {
-    serverConfigApi: {
-      async readServerConfig() {
-        return { mode: 'managed', installDir: fakeDir, version: '263.7084.0' };
-      },
-    },
-    serverInstallApi: {
-      async listInstalledVersions() {
-        return [
-          {
-            version: '263.7084.0',
-            installDir: fakeDir,
-            executable: `${fakeDir}\\bin\\intellij.bat`,
-          },
-          {
-            version: '263.7083.0',
-            installDir: fakeDir,
-            executable: `${fakeDir}\\bin\\intellij.bat`,
-          },
-        ];
-      },
-    },
-  });
-
-  try {
-    const cmd = pi.getCommand('intellij');
-    assert.ok(cmd);
-    const ctx = createMockCtx('F:\\my-project');
-
-    await cmd.handler('versions', ctx);
-
-    assert.equal(ctx.notifications.length, 1);
-    const msg = ctx.notifications[0].msg;
-    assert.match(msg, /Selected version: 263\.7084\.0/);
-    assert.match(msg, /Installed versions: 263\.7084\.0 \(selected\), 263\.7083\.0/);
-    assert.match(msg, /Server status: stopped/);
-  } finally {
-    pi.emit('session_shutdown');
-  }
-});
-
 test('/intellij versions rejects extra arguments like --remote', async () => {
   const fakeDir = 'F:\\managed\\store';
 

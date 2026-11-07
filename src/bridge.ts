@@ -4,7 +4,6 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import type net from 'node:net';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AndroidNavigation } from './android/navigation.js';
 import {
   loadDefaultPluginSettings,
   loadProjectConfiguration,
@@ -27,7 +26,7 @@ import {
 } from './project/metadata.js';
 import { applyWorkspaceOptions } from './project/workspace.js';
 import { connectWithLease, settings } from './server/service.js';
-import { NavigationRelay } from './shared/navigation-relay.js';
+import { DocumentSymbolAdapter } from './shared/document-symbols.js';
 import { asyncFramedStream, encode } from './shared/protocol.js';
 import { type FailureDetail, sanitizeStatus, sanitizeString } from './shared/runtime-status.js';
 
@@ -78,22 +77,7 @@ export async function startBridge(): Promise<void> {
   let initializeTimer: NodeJS.Timeout | null = null;
 
   const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
-  const navigationRelay = new NavigationRelay({
-    sendServer: (message, frame) => barrier.fromClient(message, frame),
-    sendClient: (frame) => downstream.push(frame),
-    resolve: (input) =>
-      navigation.resolve({
-        ...input,
-        projectRoot: canonicalizeProject(projectPath).nativePath,
-      }),
-    invalidate: () => navigation.invalidate(),
-    timeoutMs: requestWaitTimeoutMs,
-  });
-  const navigation = new AndroidNavigation(
-    navigationRelay.request,
-    navigationRelay.readDocument,
-    navigationRelay.documentPaths,
-  );
+  const documentSymbols = new DocumentSymbolAdapter();
 
   let socket: net.Socket;
   try {
@@ -117,6 +101,7 @@ export async function startBridge(): Promise<void> {
 
   const upstream = asyncFramedStream(async (messageRaw: unknown, frame: Buffer) => {
     const message = messageRaw as Record<string, unknown> | null;
+    if (message) documentSymbols.fromClient(message);
     if (message?.method === 'initialize') {
       const p = message.params as
         | { rootUri?: string; rootPath?: string; workspaceFolders?: Array<{ uri: string }> }
@@ -288,7 +273,6 @@ export async function startBridge(): Promise<void> {
         await recordConfigurationItems(settings.systemPath, id, items, message.result);
       }
     }
-    if (message) await navigationRelay.fromClient(message);
 
     if (message) {
       barrier.fromClient(message, frame);
@@ -322,13 +306,13 @@ export async function startBridge(): Promise<void> {
         pendingConfigRequests.set(message.id, params.items);
       }
     }
-    barrier.fromServer(message, frame);
+    barrier.fromServer(message, documentSymbols.fromServer(message) ? encode(message) : frame);
   });
 
   barrier = new IndexBarrier({
     requestWaitTimeoutMs,
     sendServer: (frame: Buffer) => upstream.push(frame),
-    sendClient: (frame: Buffer) => navigationRelay.receive(frame),
+    sendClient: (frame: Buffer) => downstream.push(frame),
     onStateChange: (state: StateRecord) => {
       connState
         .update({
@@ -349,7 +333,7 @@ export async function startBridge(): Promise<void> {
   ) {
     if (closing) return;
     closing = true;
-    navigationRelay.close();
+    documentSymbols.close();
 
     if (initializeTimer) {
       clearTimeout(initializeTimer);

@@ -4,7 +4,7 @@
 
 在 `omp-intellij` 中补齐 Android XML 符号、XML 到 Java/Kotlin 引用查询、Compose 命名检查适配、内嵌官方 Android/Compose Lint 实时诊断和设备端 JDWP 编排。复用 IntelliJ 的 PSI、K2 UAST、索引和调试器，参考 Android 官方插件的资源身份、作用域、规则装载和会话所有权设计。
 
-本文区分探针实测、生产实现和验收要求。临时探针未安装到共享服务，MyHook 生产源码未修改。XML 解析、结构和导航迁入 JVM 扩展，复用已有 Android 导入结果与 XML PSI；不再扩建 TS XML 解析层。
+本文区分探针实测、生产实现和验收要求。临时探针未安装到共享服务，MyHook 生产源码未修改。阶段 A、阶段 B 与既有 Android definition 已迁入 `271.2085.0` 的 JVM 扩展并通过隔离实测，旧 TS XML/Gradle 解析链与 `saxes` 已删除；阶段 C/D/E/H 按各自章节继续推进。
 
 ### 1.1 交付项
 
@@ -194,8 +194,8 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
 | JVM XML 大纲 Provider                                            | 基于当前 XML PSI 实现阶段 A，注册到既有 `"xml"` 语言                                                                                                           |
 | JVM definition/references Provider 与查询服务                    | 识别 Manifest 类属性、资源声明和代码 R 引用，解析目标、校验来源、执行语义搜索                                                                                  |
 | 同一 JVM 模块的 Compose suppressor、`OmpLintDiagnosticProvider`  | 阶段 D/H，保持现有范围                                                                                                                                         |
-| `src/shared/navigation-relay.ts`、`src/bridge.ts`                | 通用文档/请求生命周期及必要的符号结果展平；严格维护 Bridge 取消/ID/版本一致性，严禁用 `AbortController` 替代标准 LSP 生命周期；不解析 XML，不推导 Android 身份 |
-| 旧 `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 对照现有行为迁移到 JVM；切换后删除被替代的实现、`saxes` 依赖和 Bridge 业务拦截                                                                                 |
+| `src/shared/document-symbols.ts`、`src/bridge.ts`                | 通用文档/请求生命周期及客户端不支持层级符号时的 DFS 展平；已删除 `navigation-relay.ts` 的 Android 拦截，不解析 XML，不推导 Android 身份                        |
+| 旧 `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 已迁移至 JVM 并连同 `types.ts`、旧测试和 `saxes` 依赖一并删除                                                                                                  |
 | `src/android/debug-attach.ts`、`debug-attach-cli.ts`             | ADB 设备、PID、forward 和租约管理，仍放在 TS                                                                                                                   |
 | `src/debug/dap-proxy.ts`                                         | 超时单位、异步 attach/关闭钩子和物理栈帧透传，不导入 ADB 业务                                                                                                  |
 | `src/plugin.ts`、发布配置、服务启动层                            | 精确版本的 JAR 资产、runtime hash 与加载参数                                                                                                                   |
@@ -571,23 +571,23 @@ RenameFix 曾出现的丢失现象已查明根因并解决：服务端在转换�
 - 编译 classpath 取自同一 ILS 发行包的 core、analysis、projectModel、UAST、language-server API/analyzer、Java PSI/UAST、Kotlin 分析 API，以及 `plugins/xml/lib/modules/` 中的 XML PSI/parser/DOM 和 Provider 基类所在模块。以实际插件描述符和 JAR 校验依赖，不沿用 263 的根 lib 布局；Lint 另加 §14.2 的 6 个核心 JAR。
 - 使用该精确发行包的 JBR25 工具链。新增 `jvm/android-ls-extension/build.mjs`，执行 `npm run build:jvm -- --ils-home <已安装的ILS目录>`，用 javac/JAR 工具构建，固定条目顺序和时间戳。
 - `package.json` 配置调整：
-  - **保留 `dist/` 契约**：`"files"` 列表必须保留 `"dist/"`，以满足 `"main": "dist/index.js"`、`"types": "dist/index.d.ts"` 与 `"bin": {"omp-intellij-lsp": "./dist/bridge.js", "omp-intellij-dap": "./dist/debug/dap-proxy.js"}` 的 npm/二进制入口契约；列表变更为：`["dist/", "src/", "jvm/android-ls-extension/", "resources/ils/", "settings.json", ".omp-plugin/marketplace.json", "README.md"]`，严禁盲目移除 `"dist/"`；
-  - `"scripts"` 新增 `"build:jvm": "node jvm/android-ls-extension/build.mjs"`、`"check:assets": "node jvm/android-ls-extension/check-assets.mjs"` 与维护命令 `"update-bundle": "npm run build && node scripts/update-server-bundle.mjs"`；
-  - `"prepack"` 脚本变更为 `"npm run build && npm run check:assets"`（静态校验 `resources/ils/` 下发布的 7 个 JAR 资产均存在且 SHA-256 吻合，不强求打包机存在 JDK25/ILS 编译环境）。
+  - **保留 `dist/` 契约**：`"files"` 列表保留 `"dist/"`，以满足 `"main": "dist/index.js"`、`"types": "dist/index.d.ts"` 与 `"bin": {"omp-intellij-lsp": "./dist/bridge.js", "omp-intellij-dap": "./dist/debug/dap-proxy.js"}` 的入口契约；列表为：`["dist/", "src/", "jvm/android-ls-extension/", "resources/ils/", "scripts/clean-runtime.mjs", "settings.json", ".omp-plugin/marketplace.json", "README.md"]`；
+  - `"scripts"` 包含 `"build:jvm": "node jvm/android-ls-extension/build.mjs"`、`"check:assets": "node jvm/android-ls-extension/check-assets.mjs"`、`"clean:runtime": "node scripts/clean-runtime.mjs"` 与维护命令 `"update-bundle": "npm run build && node scripts/update-server-bundle.mjs"`；
+  - `"prepack"` 脚本为 `"npm run build && npm run check:assets"`（校验当前阶段发布的精确版本 JAR、ABI、体积、清单与 `.sha256` 旁挂文件，不强求打包机存在 JDK25/ILS 编译环境）。
 - 复制 Apache-2.0 参考代码及分发 Apache-2.0 Lint 运行库时保留必要版权与许可证声明；整个 ILS/Kotlin 发行包继续沿用既有下载和 EULA 流程。
 
 ### 12.2 安装资产链与插件目录布局
 
-1. 本次完整扩展的发布目录为 `resources/ils/271.2085.0/android-ls-extension/lib/`，包含自有 `android-ls-extension.jar`、§14.2 的 6 个 Lint 依赖 JAR（依赖合计约 10.84 MiB）和协议/ABI/SHA-256 清单。XML Provider 已在 271 探针验证；Compose、Lint 和完整导航须重跑验收后才能发布。
-2. 通过 `npm pack --dry-run --json --ignore-scripts` 检查包清单，确认 `dist/` 编译产物、自有 JAR 与 6 个 Lint 依赖 JAR 均在发布归档内。
+1. 发布目录为 `resources/ils/271.2085.0/android-ls-extension/lib/`。当前 A/B 与 definition 交付仅包含自有 `android-ls-extension.jar`（`145970` 字节，SHA-256 `04083921499f260a4d238abcd64cbee8fb0be314eff5a4e770a275f7ca4d8bf4`）、`manifest.json` 和 `.sha256` 校验文件；阶段 H 验收后再按 §14.2 纳入 6 个 Lint 依赖 JAR。
+2. 通过 `npm pack --dry-run --json --ignore-scripts` 检查包清单，确认 `dist/` 编译产物、JVM 扩展源码/脚本与已启用 JAR 资产均在发布归档内。
 3. `src/plugin.ts` 二进制与文本分流资产链：
    - 文本资产（`settings.json`、`marketplace.json`、`package.json`）按 `utf8` 字符串参与 hash 与复制；
    - 二进制资产（`resources/ils/**/*.jar`）通过 `readFile` 直接作为 `Buffer` 读取，二进制字节注入 SHA-256，随后在 staging 阶段以 `writeFile` 字节原样复制至 `.runtime/<hash>/resources/...`，严禁经过 UTF-8 解码；
    - 任意 JAR 字节改变必须产生新 runtime hash。
 4. `.runtime/` 目录生命周期与治理：
    - 遵循 `settings.json` 中 `cachePolicy.automaticDeletion = false` 的原则，启动时不静默批量删除历史目录（避免误删并行会话正在使用的旧 runtime）；
-   - `src/plugin.ts` 启动时仅清理生成时间超过 1 小时的 `.tmp` 暂存孤儿目录（崩溃残留）；
-   - 提供显式 `npm run clean:runtime` 命令供开发者或升级通道主动清理不使用的历史 hash 目录。
+   - 启动时不自动删除 `.runtime/` 下的历史目录或 `.tmp` 目录；
+   - 提供显式 `npm run clean:runtime` 预览及关闭消费者后的 `node scripts/clean-runtime.mjs --apply` 清理不使用的历史 hash 目录与超过 1 小时的 `.tmp` 孤儿目录。
 5. 通用服务启动层接收版本匹配的扩展目录路径，通过已验证的 `IJ_JAVA_OPTIONS=-Dplugin.path=<插件目录>` 机制加载（使自有 JAR 与同目录 `lib/` 下的 6 个 Lint JAR 处于同一个 `PluginClassLoader` 中）；保留用户其他 JVM options，正确处理 Windows 空格和正斜杠路径。
 6. 现有服务已经运行时不热塞新 JAR；遵循租约/debug session/owner 校验及显式安全重启，不能杀共享用户会话。
 7. 缺少精确版本资产时不加载其他版本 JAR，也不恢复 TS XML 实现；在启动/状态层报告扩展不可用，原生 Java/Kotlin LSP 与 DAP 保留。Android A–D/H 不宣称可用；§4.3 说明未加载 Provider 时的请求行为。
@@ -638,7 +638,7 @@ omp plugin install --force omp-intellij@omp-intellij
 
 ```sh
 npm run pretest
-node --test --test-timeout=30000 dist-test/test/android-navigation.test.js dist-test/test/navigation-relay.test.js dist-test/test/dap-proxy.test.js
+node --test --test-timeout=30000 dist-test/test/android-extension.test.js dist-test/test/document-symbols.test.js dist-test/test/dap-proxy.test.js
 npm run build
 npm test
 npm run test:integration
@@ -667,7 +667,7 @@ npm pack --dry-run --json --ignore-scripts
 3. **13 项错误码与排查**：环境、目标、租约、协议的状态及恢复建议；
 4. **Android Lint 边界**：单文件 pull 诊断、`Scope.JAVA_FILE` 源码规则、第三方规则白名单；
 5. **AGP 兼容范围**：区分 MyHook AGP `9.4.1` 的实测、其他版本待验收项，以及动态 DSL、flavor 和自定义资源根的限制；
-6. **资产清单**：记录目标版本 `resources/ils/271.2085.0/` 下 7 个 JAR 的版本、体积与 SHA-256。
+6. **资产清单**：记录目标版本 `resources/ils/271.2085.0/` 下当前发布的 `android-ls-extension.jar` 及后续阶段 H 启用时的 6 个 Lint 依赖 JAR 的版本、体积与 SHA-256。
 
 ### 13.4 研究证据索引
 

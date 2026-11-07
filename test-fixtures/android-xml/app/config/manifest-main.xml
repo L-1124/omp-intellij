@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:customandroid="http://schemas.android.com/apk/res/android">
+
+    <instrumentation
+        android:name="com.example.app.AppInstrumentation"
+        android:targetPackage="com.example.app" />
+
+    <application
+        android:name=".MainApplication"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.example.app.TargetActivity"
+            android:exported="false" />
+
+        <service
+            android:name=".MainActivity$InnerService"
+            android:exported="false" />
+
+        <activity
+            android:name=".ZeroUseActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".DuplicateActivity"
+            android:exported="false" />
+
+        <activity-alias
+            android:name=".AliasActivity"
+            android:targetActivity=".TargetActivity"
+            android:exported="true" />
+
+        <activity
+            android:name="com.example.lib.LibActivity"
+            android:exported="false" />
+
+        <activity
+            customandroid:name=".CustomPrefixActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".SecondaryActivity"
+            android:exported="false" />
+
+    </application>
+
+</manifest>

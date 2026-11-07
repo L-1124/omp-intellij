@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android XML Fixture</string>
+    <string name="hello_message">Hello &lt;World&gt; &#x2764;</string>
+    <string name="entity_&#x0031;">Raw Numeric Entity One</string>
+    <string name="emoji_greeting">👋 Welcome to Android! 🎉</string>
+    <string name="quoted_text">It\'s a &quot;test&quot;</string>
+</resources>

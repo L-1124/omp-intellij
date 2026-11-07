@@ -1,0 +1,15 @@
+<idea-plugin>
+  <id>org.omp.intellij.android</id>
+  <name>OMP Android Language Extension</name>
+  <version>2026.1107.0</version>
+  <vendor>L-1124</vendor>
+  <idea-version since-build="271"/>
+  <depends>org.jetbrains.ls.core</depends>
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.java</depends>
+  <depends>org.jetbrains.ls.plugin.kotlin</depends>
+  <depends>org.jetbrains.ls.feature.xml</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <lang.directNavigationProvider implementation="org.omp.intellij.android.AndroidResourceNavigation"/>
+  </extensions>
+</idea-plugin>

@@ -205,7 +205,7 @@ export async function createIntegrationSandbox(
     OMP_INTELLIJ_SETTINGS: settingsFile,
     GRADLE_USER_HOME: gradleUserHome,
     JAVA_HOME: prerequisites.jdk21Path,
-    IJ_JAVA_OPTIONS: `-Dintellij.server.eula.persistence=false -Didea.config.path=${configDir} -Didea.log.path=${logDir}`,
+    IJ_JAVA_OPTIONS: `-Dintellij.server.eula.persistence=false -Didea.config.path=${configDir.replace(/\\/g, '/')} -Didea.log.path=${logDir.replace(/\\/g, '/')}`,
   };
   const previousEnvironment = {
     OMP_INTELLIJ_CONFIG: process.env.OMP_INTELLIJ_CONFIG,

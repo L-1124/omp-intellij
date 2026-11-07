@@ -11,6 +11,9 @@
   "files": [
     "dist/",
     "src/",
+    "jvm/android-ls-extension/",
+    "resources/ils/",
+    "scripts/clean-runtime.mjs",
     "settings.json",
     ".omp-plugin/marketplace.json",
     "README.md"
@@ -22,7 +25,10 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "prepack": "npm run build",
+    "prepack": "npm run build && npm run check:assets",
+    "build:jvm": "node jvm/android-ls-extension/build.mjs",
+    "check:assets": "node jvm/android-ls-extension/check-assets.mjs",
+    "clean:runtime": "node scripts/clean-runtime.mjs",
     "watch": "tsc -w",
     "pretest": "node -e \"require('node:fs').rmSync('dist-test', { recursive: true, force: true })\" && npm run build && tsc -p tsconfig.test.json",
     "test": "node --test --test-timeout=30000 \"dist-test/test/*.test.js\" \"test/*.test.mjs\"",
@@ -65,8 +71,5 @@
     "extensions": [
       "./src/plugin.ts"
     ]
-  },
-  "dependencies": {
-    "saxes": "^6.0.0"
   }
 }

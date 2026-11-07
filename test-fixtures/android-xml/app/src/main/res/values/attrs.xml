@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <declare-styleable name="CustomComponent">
+        <attr name="customAttribute" format="string" />
+        <attr name="customDimension" format="dimension" />
+    </declare-styleable>
+    <attr name="globalAttr" format="boolean" />
+    <attr name="colorPrimary" format="color" />
+    <item type="id" name="custom_view_id" />
+    <bool name="feature_enabled">true</bool>
+    <integer name="max_retry_count">3</integer>
+    <string-array name="planets">
+        <item>Mercury</item>
+        <item>Venus</item>
+    </string-array>
+    <plurals name="items_count">
+        <item quantity="one">%d item</item>
+        <item quantity="other">%d items</item>
+    </plurals>
+</resources>

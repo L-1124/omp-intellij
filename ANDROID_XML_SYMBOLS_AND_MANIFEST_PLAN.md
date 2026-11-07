@@ -2,7 +2,7 @@
 
 ## 目标、优先级与当前状态
 
-以 `plan.md` §§4–6 为契约，交付 A（Android XML 文档符号）与 B（Manifest 类属性触发 Java/Kotlin references），并迁移已有 Android definition。目标服务端为锁定的 ILS `271.2085.0`。本文件是待实施规格，不表示生产 Provider 已存在。
+以 `plan.md` §§4–6 为契约，已在锁定的 ILS `271.2085.0` 上完成 A（Android XML 文档符号）、B（Manifest 类属性触发 Java/Kotlin references）及既有 Android definition 的 JVM 迁移，并删除被替代的 TS XML/Gradle 解析链。
 
 实现优先级固定为：**现有标准 LSP → 已广告且实测满足契约的私有命令/内置 MCP → 仅对剩余 Android 缺口补 JVM Provider**。XML 解析、位置换算、类解析和语义搜索复用服务端当前 PSI、Document、索引与模块模型。Bridge 负责协议中继和已证实必要的格式适配，不新增 TS XML/Gradle 解析器，也不再基于空原生响应启动 TS Android 查询。
 
@@ -56,8 +56,8 @@ Agent 可使用现有 `xd://lsp request` 完成发现与调用，不要求为这
 
 | 位置                                                          | 实施内容                                                                                         |
 | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `jvm/android-ls-extension/`（拟新增，按主计划构建/加载）      | Android 工程上下文、XML PSI 大纲和 Manifest 类目标解析；仅实现经原生验收确认的缺口               |
-| JVM definition/references 共享服务（拟新增）                  | 当前模块依赖范围内解析真实 Java/Kotlin 目标，复用平台语义搜索，统一位置与去重                    |
+| `jvm/android-ls-extension/`                                   | Android 工程上下文、XML PSI 大纲和 Manifest 类目标解析；仅实现经原生验收确认的缺口               |
+| JVM definition/references 共享服务                            | 当前模块依赖范围内解析真实 Java/Kotlin 目标，复用平台语义搜索，统一位置与去重                    |
 | `src/bridge.ts`                                               | 保留标准请求、文档同步、错误和取消转发；若仍有层级兼容问题，仅转换符号响应格式                   |
 | `src/shared/navigation-relay.ts`                              | 删除切换后已被 JVM 覆盖的 Android 业务中继；其他仍存在的内部请求保留完整 ID 归属和清理           |
 | `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 对照原有行为迁移；验收完成后删除被替代实现、无用类型/测试及 `saxes` 依赖，不保留 TS 备用解析路径 |
@@ -144,3 +144,14 @@ A/B 使用 ILS Provider 的分析上下文、平台可取消读操作和请求�
 真实烟测使用独立 systemPath 和已安装的 271，复用相同 hash 的既有 EULA 记录，不自动接受新条款。通过真实 Bridge 完成 initialize→initialized→导入/就绪，再 didOpen 临时 Android 工程副本的 strings.xml/Manifest，查询 A/B 与既有 definition，核对 URI、当前属性、代码引用和声明集合。先比原生基线；有上游实现则验证其等价行为，不为凑数覆盖它。
 
 263 的 MainActivity 3/4、HookLogProvider 2/3、McpForegroundService 9/10（含当前属性）仅作为历史证据，不能固定为 271 预期。271 使用真实位置集合验收，包含仅 didChange 未保存修改、并行 hover、搜索中取消和新会话恢复。最后关闭客户端、停止自有沙箱服务并清理自有临时资产；不触碰共享服务和 MyHook 生产文件。交付原生/扩展的能力与协议证据，不能用单元测试或本计划代替生产验收。
+
+## 八、271.2085.0 实测验收记录
+
+| 项目 | 271.2085.0 证据 |
+| --- | --- |
+| 原生基线 | 未加载扩展时，MyHook 副本的 Manifest 与 `strings.xml` 的 `documentSymbol`、`definition`、`references` 均返回 `[]`；`MyHookBottomBar.kt` 的 `R.string.nav_settings` 仅返回 `R.jar` 字节码；MCP `get_project_modules` 仅返回模块名称/类型。 |
+| A：XML 大纲 | Manifest、values 全部 10 类 SymbolKind、style/styleable 子项、CRLF、emoji、数字实体、单双引号、多行属性、自定义 `res`/`manifest.srcFile`、干净无 `R.jar` 工程、局部损坏 XML 与无网络外部实体均通过；不支持层级符号时由 `DocumentSymbolAdapter` 展平。 |
+| B：Manifest references | 7 类支持属性、`$` 内部类、跨模块依赖、qualified KDoc、合法零引用、`false`/`true` 声明集合与源码原生请求逐项一致；过滤原生 FQN 的带引号 XML 命中后仅追加一次无引号当前属性。非类属性与 `${...}` 返回 `[]`；未解析类/无源码库类/歧义/缺 namespace 返回 `-32803`。 |
+| Definition 迁移 | XML `@string/...` 与 Kotlin/Java `R.*`（通过 `DirectNavigationProvider` 优先于 `R.jar`）跳至真实 AGP 合并来源；声明改名/删除、未构建覆盖或损坏 blame/merger 时保留原生 `R.jar` 目标。已移除 `src/android/navigation.ts`、`resource-resolver.ts`、`xml.ts`、`types.ts`、`src/shared/navigation-relay.ts` 与 `saxes`。 |
+| 并发与恢复 | `jcmd Thread.print` 确认 `KotlinFindUsagesHandler` 搜索在途时：同连接/跨工程 `hover` 正常返回，`$/cancelRequest` 单次返回 `-32800`，运行中 `didChange` 因 `LSDocuments.getVersion` 变化单次返回 `-32801` 且不提交旧类结果；关闭重连或从损坏资产恢复后导航正常。 |
+| 打包与加载 | `resources/ils/271.2085.0/android-ls-extension/lib/android-ls-extension.jar`（Java 25 / classfile 69，`145970` 字节，SHA-256 `04083921499f260a4d238abcd64cbee8fb0be314eff5a4e770a275f7ca4d8bf4`）确定性构建并经 `check:assets`、含空格 `.runtime/<hash>` 路径、保留既有 `-Dplugin.path` 与 `clean:runtime` 预览/占用拒绝验证。 |

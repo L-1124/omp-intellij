@@ -81,15 +81,34 @@ omp plugin install --force omp-intellij@omp-intellij
 
 `doctor` 检查配置与运行条件；`wait` 等待索引就绪；`reload` 重新导入工程；`model` 查询源文件所属模块、SDK、Classpath 与构建命令。`status`、`wait` 和 `doctor` 不会启动服务端。
 
-### Android 源码导航
+### Android XML 与源码导航
 
-独立的 `src/android/` 适配层补充 `R.*` 到资源声明、Manifest 组件类到 Java/Kotlin 源码的定义跳转。已有原生源码目标和错误响应保持不变；同一资源的不同限定符可以返回多个声明。
+ILS `271.2085.0` 的独立 JVM 扩展提供：
 
-资源来源读取对应模块、变体的 AGP 合并产物，已在 AGP 9.4.1 上验证。先通过工程的真实 Gradle 构建生成产物；导航不会自动构建，也不会全仓扫描同名资源。缺失产物、无法确认归属、资源成员或覆盖关系已改变时，保留原生结果。
+- Manifest、values XML 的文档符号，包含资源类型、层级与原始名称选择范围；不要求 R.jar。
+- 从 Manifest 类属性查询 Java/Kotlin 语义引用，保留原生代码/KDoc 范围及 `includeDeclaration`，追加一次当前属性；alias 使用 `targetActivity`。
+- Manifest 类 definition，以及 `R.*` / XML 资源引用到源码声明的 definition。同一资源的不同限定符可返回多个声明；已确认资源源码优先于生成的 R 字节码。
 
-客户端同步的未保存文档参与定位。值资源使用 XML 结构重新定位当前属性位置，不直接复用历史行号；新增资源或覆盖需要重新构建。框架资源、无法证实的依赖资源及变体保持原生导航。
+解析使用当前 XML/Kotlin PSI、Document、模块及依赖索引。Bridge 仅在客户端不支持层级符号时展平响应；旧 TS XML/Gradle 解析、Android 子 RPC 和 `saxes` 已删除。
 
-待上游能原生按模块、变体将资源引用和 Manifest 组件解析到源码后，移除 Android 适配层及 Bridge 接入点，保留通用的协议与文档同步修复。
+资源 definition 使用对应模块、变体的真实 AGP merger/blame，已在 AGP `9.4.1` 验证。先通过工程的 Gradle 任务生成产物；查询不会自动构建。来源缺失、声明删除/改名、新增覆盖或元数据失效时保留原生目标。未保存文档参与名称与位置校验。
+
+Android 身份来自已导入模块。导入器缺失的 namespace、资源根和 Manifest 位置由当前 `build.gradle.kts` 的确定字面量补充；支持已确认源集的自定义目录与 Manifest 文件名，动态 DSL、外部脚本及无法确认的变体保持未知。已识别的 Manifest 类无法解析时返回具体 `-32803` 错误；取消保留 `-32800`。
+
+构建与发布：
+
+```sh
+npm run build:jvm -- --ils-home "<已安装的 ILS 271.2085.0 目录>"
+npm run check:assets
+npm run build
+npm pack --dry-run --json --ignore-scripts
+```
+
+编译使用目标发行包的 JBR 25 `javac`；缺少 JAR 工具时使用 `JAVA_HOME` 或 PATH 中的完整 JDK 25。发布包包含一个自有 JAR、ABI/SHA-256 清单和校验文件，二进制原样进入 `.runtime/<hash>`。本次未加入资源声明 references、Compose 抑制或 Android Lint。
+
+启动层校验精确版本与资产摘要，并合并已有 `IJ_JAVA_OPTIONS` / `plugin.path`。不可用原因写入 `<systemPath>/launcher.log`；原生 LSP/DAP 保留。已有共享服务不热加载新 JAR，启用更新须先关闭消费者，再安全重启。
+
+`npm run clean:runtime` 仅预览历史 runtime 清理；实际清理在关闭 OMP、Bridge、DAP 和 ILS 后执行 `node scripts/clean-runtime.mjs --apply`。当前声明引用的 hash 保留，启动时不自动回收历史或临时目录。
 
 ### 运行与调试
 
