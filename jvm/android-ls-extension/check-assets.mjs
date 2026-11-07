@@ -177,6 +177,11 @@ function verifyAssets(version = TARGET_VERSION) {
       `"META-INF/plugin.xml" inside "${targetJarName}" does not declare entry point "org.omp.intellij.android.AndroidResourceNavigation"`,
     );
   }
+  if (!pluginXmlContent.includes('org.omp.intellij.android.ComposeSuppressor')) {
+    throw new Error(
+      `"META-INF/plugin.xml" inside "${targetJarName}" does not declare entry point "org.omp.intellij.android.ComposeSuppressor"`,
+    );
+  }
 
   // SPI verification
   const spiEntry = entries.find(
@@ -202,6 +207,7 @@ function verifyAssets(version = TARGET_VERSION) {
   const requiredEntryClasses = [
     'org/omp/intellij/android/AndroidExtension.class',
     'org/omp/intellij/android/AndroidResourceNavigation.class',
+    'org/omp/intellij/android/ComposeSuppressor.class',
   ];
   for (const entryClass of requiredEntryClasses) {
     if (!entries.some((e) => e.name === entryClass)) {

@@ -11,5 +11,6 @@
   <depends>org.jetbrains.ls.feature.xml</depends>
   <extensions defaultExtensionNs="com.intellij">
     <lang.directNavigationProvider implementation="org.omp.intellij.android.AndroidResourceNavigation"/>
+    <lang.inspectionSuppressor language="kotlin" implementationClass="org.omp.intellij.android.ComposeSuppressor"/>
   </extensions>
 </idea-plugin>

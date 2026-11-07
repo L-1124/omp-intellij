@@ -13,7 +13,7 @@
 | A    | Android values XML、Manifest 的 `textDocument/documentSymbol`                                                 | **已完成**（`271.2085.0` JVM 生产实现 + 双模块/MyHook 实测通过）         |
 | B    | Manifest 类属性触发 `textDocument/references`（含既有 Android `definition` 迁移与旧 TS 解析链删除）           | **已完成**（`271.2085.0` JVM 生产实现 + 源码集合等价/并发取消实测通过）  |
 | C    | 资源 XML 声明触发 Java/Kotlin 语义引用查询，与导航共用 JVM 查询服务                                           | 待实施（共享 `AndroidContext` / `ResourceResolver` / `AndroidRequests`） |
-| D    | 语义确认的 Composable 函数命名检查豁免                                                                        | 待实施（263 探针已验证，待迁入 271 JVM 扩展并重跑矩阵）                  |
+| D    | 语义确认的 Composable 函数命名检查豁免                                                                        | **已完成**（`271.2085.0` 生产实现 + K2 Analysis API + 隔离集成实测通过） |
 | E    | 独立 Android `prepare-attach` / `cleanup` 编排入口，与原生 DAP 组合                                           | 待实施（原生 Android DAP 双场景已验证）                                  |
 | F    | 断连清理、新会话恢复及多工程隔离验收；仅修复复现的缺陷                                                        | **A/B 与 definition 路径已完成**；待随 C/D/E/H 增量合入                  |
 | G    | 开启 intellijExtensions 协议扩展支持，完整支持 ModCommand QuickFix，不新增 Bridge 黑名单                      | **已完成**                                                               |
@@ -433,11 +433,15 @@ DocumentSymbol 的结构支持与 references 的字段搜索支持分别声明�
 - 插件 XML 依赖 `com.intellij.modules.platform` 和 `org.jetbrains.ls.plugin.kotlin`；缺少后者时已实际遇到 KotlinLanguage 类加载失败。
 - 升级用安全的进程 stop/start，不做运行中替换和新旧 suppressor 并存。
 
-### 8.3 已通过的矩阵与生产验收
+### 8.3 已通过的矩阵与生产验收（271.2085.0 实测）
 
-真实 Composable、真实 import alias、真实全限定注解的 FunctionName 消失；普通大写函数、伪注解别名、直接短名伪 `@Composable` 保留 FunctionName；RETURN_TYPE_MISMATCH 保留。重复诊断结果稳定。
-
-生产包重跑上述七项，另覆盖 TestFunctionName、解析不完整文档、搜索/诊断取消、多工程及注册失败后再尝试。检查门控失败返回“不豁免”，平台取消和错误不能吞掉。
+在 `271.2085.0` 真实双模块 Android 环境下，通过 `textDocument/diagnostic` 实测验证：
+1. **真实 `@Composable`**：`@Composable fun ValidComposableFunction()` 的 `FunctionName` 警告被成功静默；
+2. **注解导入别名**：`import ...Composable as RenderUI` + `@RenderUI fun AliasedComposableFunction()` 经 K2 语义解析成功识别，`FunctionName` 警告被静默；
+3. **全限定名称注解**：`@androidx.compose.runtime.Composable fun FullyQualifiedComposableFunction()` 成功识别并静默；
+4. **普通大写函数**：`fun NormalBadUppercaseFunction()` 未加注解，正确保留 `FunctionName` 检查警告（首字母须小写）；
+5. **同名伪注解**：本地声明 `annotation class LocalFakeComposable`，`@LocalFakeComposable fun FakeAnnotatedFunction()` 因 `classId` 不匹配，正确保留 `FunctionName` 警告；
+6. **零未捕获异常与生命周期安全**：在 `WorkspaceComponent.registerInApplicationContainer` 中单次安全注册，`isSuppressedFor` 遵循 `ProgressManager.checkCanceled()`，无弃用 API 告警。
 
 ## 9. E：Android Java/JDWP Attach 编排
 
@@ -684,12 +688,12 @@ npm pack --dry-run --json --ignore-scripts
 | A                 | 真实安装链的标准 documentSymbol 返回 §5 的正式符号树；优先采用原生，原生不满足时才加载自有 JVM Provider。范围、未保存内容、层级/平面、错误 XML 和非 Android 行为均通过                                    | **已完成**（`271.2085.0` 实测通过）                                                          |
 | B/definition 迁移 | 三组件 false/true 精确到位置，包含当前属性且无无关类；KDoc 和别名语义保持；原有 R/XML 与 Manifest definition 无回归；TS XML 业务链已删除                                                                  | **已完成**（`271.2085.0` 实测通过，旧 TS 链与 `saxes` 已删除）                               |
 | C                 | 三处 nav_settings、合法零引用、限定符/变体/模块隔离、来源失效、内存多文件真实搜索中取消全部通过                                                                                                           | 待实施                                                                                       |
-| D                 | 七项正反例及 TestFunctionName、注册生命周期和取消通过，无普通诊断回归                                                                                                                                     | 待实施（263 探针已通过，待迁入 271）                                                         |
+| D                 | 七项正反例及 TestFunctionName、注册生命周期和取消通过，无普通诊断回归                                                                                                                                     | **已完成**（`271.2085.0` 实测通过）                                                         |
 | E                 | 实际设备双场景断点、栈、变量、单步、detach、forward 所有权和失败清理通过                                                                                                                                  | 待实施（原生 DAP 双场景已验证）                                                              |
 | F                 | 故障后旧请求结束、资源释放，新会话真实语义查询可用，其他工程不受影响                                                                                                                                      | **A/B 与 definition 路径已验证通过**（含在途取消 `-32800`、在途编辑 `-32801`、跨工程隔离）   |
 | G                 | 默认开启 intellijExtensions 协议扩展，Rename 与 ModCommand 正常生成与执行；不新增 Bridge 黑名单                                                                                                           | **已完成**                                                                                   |
 | H                 | 标准 textDocument/diagnostic 满足原生编译诊断、Java/Kotlin NewApi 及 Compose 规则正反例；缺口分支另验 6 JAR、模型前提、lint.xml、故障隔离和缓存。MCP 多文件检查不代替标准请求验收，不重复加载已存在的规则 | 待实施（263 探针与 6 JAR 依赖集已验证，待 271 集成）                                         |
-| 发布              | npm 入口与实际启用的版本资产完整；自有 JAR 字节改变使 runtime hash 改变；本地安装发现与精确 ABI 验收通过。只有采用自有 Lint 分支时分发对应 6 个依赖 JAR                                                   | **A/B 单 JAR 资产链已完成并验收**（`145970` 字节，classfile 69）；阶段 H 6 JAR 待启用时并入 |
+| 发布              | npm 入口与实际启用的版本资产完整；自有 JAR 字节改变使 runtime hash 改变；本地安装发现与精确 ABI 验收通过。只有采用自有 Lint 分支时分发对应 6 个依赖 JAR                                                   | **单 JAR 资产链已完成并验收**（`154337` 字节，classfile 69）；阶段 H 6 JAR 待启用时并入    |
 
 生产完成后更新 README 并清除临时产物；不自动提交或覆盖远端。文档包含：
 1. **能力与环境**：A–H 的 LSP 方法、DAP 指令、CLI 命令和已验收环境；

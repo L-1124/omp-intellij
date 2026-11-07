@@ -34,5 +34,5 @@ android {
 
 dependencies {
     implementation(project(":lib"))
-    implementation(files("libs/no-sources.jar"))
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
 }

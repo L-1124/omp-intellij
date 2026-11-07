@@ -83,13 +83,13 @@ omp plugin install --force omp-intellij@omp-intellij
 
 ### Android XML 与源码导航
 
-ILS `271.2085.0` 的独立 JVM 扩展提供：
+- Manifest、values XML 的文档符号，包含资源类型、层级与原始名称选择范围；
 
-- Manifest、values XML 的文档符号，包含资源类型、层级与原始名称选择范围；不要求 R.jar。
 - 从 Manifest 类属性查询 Java/Kotlin 语义引用，保留原生代码/KDoc 范围及 `includeDeclaration`，追加一次当前属性；alias 使用 `targetActivity`。
-- Manifest 类 definition，以及 `R.*` / XML 资源引用到源码声明的 definition。同一资源的不同限定符可返回多个声明；已确认资源源码优先于生成的 R 字节码。
 
-解析使用当前 XML/Kotlin PSI、Document、模块及依赖索引。Bridge 仅在客户端不支持层级符号时展平响应；旧 TS XML/Gradle 解析、Android 子 RPC 和 `saxes` 已删除。
+- Manifest 类 definition，以及 `R.*` / XML 资源引用到源码声明的 definition。同一资源的不同限定符可返回多个声明；
+
+- Composable 函数命名检查豁免：
 
 资源 definition 使用对应模块、变体的真实 AGP merger/blame，已在 AGP `9.4.1` 验证。先通过工程的 Gradle 任务生成产物；查询不会自动构建。来源缺失、声明删除/改名、新增覆盖或元数据失效时保留原生目标。未保存文档参与名称与位置校验。
 
@@ -104,7 +104,7 @@ npm run build
 npm pack --dry-run --json --ignore-scripts
 ```
 
-编译使用目标发行包的 JBR 25 `javac`；缺少 JAR 工具时使用 `JAVA_HOME` 或 PATH 中的完整 JDK 25。发布包包含一个自有 JAR、ABI/SHA-256 清单和校验文件，二进制原样进入 `.runtime/<hash>`。本次未加入资源声明 references、Compose 抑制或 Android Lint。
+编译使用目标发行包的 JBR 25 `javac`；缺少 JAR 工具时使用 `JAVA_HOME` 或 PATH 中的完整 JDK 25。发布包包含一个自有 JAR、ABI/SHA-256 清单和校验文件，二进制原样进入 `.runtime/<hash>`。本次已加入阶段 A/B（XML 符号与 Manifest 引用）、阶段 D（Compose 命名检查豁免）与既有 definition 迁移；阶段 C 与阶段 H 待后续启用。
 
 启动层校验精确版本与资产摘要，并合并已有 `IJ_JAVA_OPTIONS` / `plugin.path`。不可用原因写入 `<systemPath>/launcher.log`；原生 LSP/DAP 保留。已有共享服务不热加载新 JAR，启用更新须先关闭消费者，再安全重启。
 

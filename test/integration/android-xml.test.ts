@@ -204,6 +204,31 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
       `${name}: ${result.error ?? ''}\n${result.stdout}\n${result.stderr}`,
     );
   }
+  const composeInputs = join(sandbox.sandboxDir, 'compose-library');
+  const composeClasses = join(composeInputs, 'classes');
+  const composeJar = join(targetDir, 'app', 'libs', 'compose-runtime.jar');
+  await mkdir(composeClasses, { recursive: true });
+  const composeSource = join(composeInputs, 'Composable.java');
+  await writeFile(
+    composeSource,
+    'package androidx.compose.runtime; import java.lang.annotation.*; @Retention(RetentionPolicy.CLASS) public @interface Composable {}',
+  );
+  for (const [name, args] of [
+    ['javac', ['--release', '21', '-d', composeClasses, composeSource]],
+    ['jar', ['--create', '--file', composeJar, '-C', composeClasses, '.']],
+  ] as const) {
+    const binary = join(
+      sandbox.prerequisites.jdk21Path,
+      'bin',
+      process.platform === 'win32' ? `${name}.exe` : name,
+    );
+    const result = spawnSync(binary, args, { encoding: 'utf8', timeout: 30000 });
+    assert.equal(
+      result.status,
+      0,
+      `${name}: ${result.error ?? ''}\n${result.stdout}\n${result.stderr}`,
+    );
+  }
 
   const wrapperJar = join(targetWrapperDir, 'gradle-wrapper.jar');
   const buildResult = spawnSync(
@@ -249,6 +274,7 @@ async function startLspClient(
         references: { dynamicRegistration: false },
         definition: { dynamicRegistration: false },
         synchronization: { dynamicRegistration: false },
+        diagnostic: { dynamicRegistration: false },
       },
       window: { workDoneProgress: true },
       experimental: { licensingUi: true },
@@ -1042,6 +1068,91 @@ test('Android XML symbols and manifest references integration', {
         changeStrings(stringsText);
       }
     });
+
+    await t.test(
+      'Compose: suppress FunctionName inspection on Composable functions and preserve on regular functions',
+      async () => {
+        const probePath = join(appDir, 'java', 'com', 'example', 'app', 'ComposeProbe.kt');
+        const probeUri = pathToFileURL(probePath).href;
+        const probeText = [
+          'package com.example.app',
+          '',
+          'import androidx.compose.runtime.Composable',
+          'import androidx.compose.runtime.Composable as RenderUI',
+          '',
+          '@Composable',
+          'fun ValidComposableFunction() {}',
+          '',
+          '@RenderUI',
+          'fun AliasedComposableFunction() {}',
+          '',
+          '@androidx.compose.runtime.Composable',
+          'fun FullyQualifiedComposableFunction() {}',
+          '',
+          'fun NormalBadUppercaseFunction() {}',
+          '',
+          'annotation class LocalFakeComposable',
+          '@LocalFakeComposable',
+          'fun FakeAnnotatedFunction() {}',
+          '',
+        ].join('\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: probeUri, languageId: 'kotlin', version: 1, text: probeText },
+        });
+
+        try {
+          const report = (await client.request('textDocument/diagnostic', {
+            textDocument: { uri: probeUri },
+          })) as { items?: Array<{ code?: string; message?: string; range: LspRange }> };
+
+          const items = report?.items ?? [];
+          const functionNameWarnings = items.filter(
+            (d) =>
+              d.code === 'FunctionName' ||
+              d.message?.includes('should start with a lowercase letter') ||
+              d.message?.includes('Function name'),
+          );
+
+          const probeLines = probeText.split('\n');
+          const normalBadLine = probeLines.findIndex((l) =>
+            l.includes('NormalBadUppercaseFunction'),
+          );
+          const fakeBadLine = probeLines.findIndex((l) => l.includes('FakeAnnotatedFunction'));
+          const validLine = probeLines.findIndex((l) => l.includes('ValidComposableFunction'));
+          const aliasedLine = probeLines.findIndex((l) => l.includes('AliasedComposableFunction'));
+          const qualifiedLine = probeLines.findIndex((l) =>
+            l.includes('FullyQualifiedComposableFunction'),
+          );
+
+          const badLines = functionNameWarnings.map((d) => d.range.start.line);
+
+          assert.ok(
+            badLines.includes(normalBadLine),
+            'NormalBadUppercaseFunction must report FunctionName warning',
+          );
+          assert.ok(
+            badLines.includes(fakeBadLine),
+            'FakeAnnotatedFunction must report FunctionName warning',
+          );
+
+          assert.ok(
+            !badLines.includes(validLine),
+            'ValidComposableFunction FunctionName warning must be suppressed',
+          );
+          assert.ok(
+            !badLines.includes(aliasedLine),
+            'AliasedComposableFunction FunctionName warning must be suppressed',
+          );
+          assert.ok(
+            !badLines.includes(qualifiedLine),
+            'FullyQualifiedComposableFunction FunctionName warning must be suppressed',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: probeUri } });
+        }
+      },
+    );
   } finally {
     if (flatDriver) {
       try {
