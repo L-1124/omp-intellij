@@ -6,6 +6,12 @@ import net from 'node:net';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import {
+  ANDROID_DEBUG_COMMANDS,
+  claimAndroidDebug,
+  releaseAndroidDebug,
+  supportsAndroidDebugCommand,
+} from '../android/debug-attach.js';
 import { settings } from '../server/service.js';
 import { encode, frameParser } from '../shared/protocol.js';
 import {
@@ -207,6 +213,9 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
   const onExit = options.onExit ?? ((code: number) => process.stdout.end(() => process.exit(code)));
   const openLspSession = options.createLspSession ?? createLspSession;
   const sessionAbortController = new AbortController();
+  const lspInitializationController = new AbortController();
+  let androidClaim: Promise<void> | null = null;
+  let androidCleanupKey: string | null = null;
   let lspSession: LspSession | null = null;
   let dapSocket: net.Socket | null = null;
   let backendClosed: Promise<boolean> | null = null;
@@ -350,6 +359,9 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     shutdownPromise = (async () => {
       clearTimeout(shutdownTimer);
       sessionAbortController.abort(new Error('Session shutdown'));
+      if (!lspSession) lspInitializationController.abort(new Error('Session shutdown'));
+      // A claim owns resources even when shutdown wins the response race.
+      await androidClaim?.catch(() => {});
       connectingSocket?.destroy();
       for (const pending of nativePending.values()) {
         clearTimeout(pending.timer);
@@ -415,6 +427,17 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       dapSocket?.destroy();
       entryFunctionBreakpointOwned = false;
       backendInitialized = false;
+      if (lspSession && androidCleanupKey) {
+        const key = androidCleanupKey;
+        androidCleanupKey = null;
+        try {
+          await releaseAndroidDebug(lspSession, key, 10000);
+        } catch (error: unknown) {
+          cleanupError = `Android debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+          output(`${cleanupError}\n`);
+          exitCode = 1;
+        }
+      }
       if (lspSession) {
         const session = lspSession;
         lspSession = null;
@@ -568,10 +591,12 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
   }
 
   async function openProject(projectRoot: string): Promise<LspSession> {
-    const session = await openLspSession(projectRoot, { signal: sessionAbortController.signal });
-    if (sessionAbortController.signal.aborted) {
+    const session = await openLspSession(projectRoot, {
+      signal: lspInitializationController.signal,
+    });
+    if (isShuttingDown) {
       await session.close();
-      sessionAbortController.signal.throwIfAborted();
+      throw new Error('Session shutdown');
     }
     lspSession = session;
     return session;
@@ -960,7 +985,20 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           return;
         }
         if (command === 'attach') {
-          await openProject(projectRoot);
+          const session = await openProject(projectRoot);
+          if (
+            ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(hostName.toLowerCase()) &&
+            supportsAndroidDebugCommand(session, ANDROID_DEBUG_COMMANDS.claim)
+          ) {
+            androidClaim = claimAndroidDebug(session, {
+              host: hostName,
+              port: Number(args.port),
+            }).then((result) => {
+              if (result.claimed) androidCleanupKey = result.cleanupKey;
+            });
+            await androidClaim;
+          }
+          sessionAbortController.signal.throwIfAborted();
           await connectBackend();
           if (!supportsThreadDump) {
             throw new Error('IntelliJ backend does not support threadDump readiness checks');

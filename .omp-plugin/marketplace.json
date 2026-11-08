@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "omp-intellij",
-      "description": "IntelliJ language intelligence, JVM execution and debugging for OMP",
+      "description": "IntelliJ language intelligence, JVM execution and debugging, with Android JDWP attach for OMP",
       "source": "./",
       "lspServers": {
         "intellij-server": {

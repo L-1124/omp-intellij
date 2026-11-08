@@ -45,6 +45,7 @@ export type DapMessage = DapRequest | DapResponse | DapEvent;
 export interface DapHarnessOptions {
   onDapRequest?: (request: DapRequest) => boolean | undefined;
   onLspRequest?: (method: string, params: unknown) => unknown;
+  onLspClose?: () => void;
   capabilities?: Record<string, unknown>;
   defaultMainClass?: string;
   fakeJavaExec?: string;
@@ -264,7 +265,10 @@ export async function createDapTestHarness(
 
   const lspServer = net.createServer((socket) => {
     sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
+    socket.on('close', () => {
+      sockets.delete(socket);
+      options.onLspClose?.();
+    });
     socket.on('error', () => {});
 
     socket.on(
@@ -280,12 +284,26 @@ export async function createDapTestHarness(
         if (options.onLspRequest) {
           const custom = options.onLspRequest(msg.method, msg.params);
           if (custom !== undefined) {
-            sendLsp({ id: msg.id, result: custom }, socket);
-            if (msg.method === 'initialize') {
-              setImmediate(() => {
-                sendLsp({ method: 'intellij/ready-for-test', params: {} }, socket);
-              });
-            }
+            void Promise.resolve(custom).then(
+              (result) => {
+                sendLsp({ id: msg.id, result }, socket);
+                if (msg.method === 'initialize') {
+                  setImmediate(() => {
+                    sendLsp({ method: 'intellij/ready-for-test', params: {} }, socket);
+                  });
+                }
+              },
+              (error: unknown) => {
+                const failure = error instanceof Error ? error : new Error(String(error));
+                sendLsp(
+                  {
+                    id: msg.id,
+                    error: { code: -32803, message: failure.message },
+                  },
+                  socket,
+                );
+              },
+            );
             return;
           }
         }

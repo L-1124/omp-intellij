@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import {
   detectServerVersion,
   formatPluginOption,
@@ -114,316 +114,90 @@ test('resolveAndroidExtension rejects invalid characters in extension directory'
   }
 });
 
-test('resolveAndroidExtension rejects missing manifest or asset file', async () => {
-  const ilsDir = await mkdtemp(join(tmpdir(), 'omp-ils-'));
-  const extDir = await mkdtemp(join(tmpdir(), 'omp-ext-'));
+const assetNames = ['intellij-android.jar', 'adblib-9.4.1.jar', 'adblib-tools-9.4.1.jar'];
+
+async function extensionFixture(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-assets-'));
+  const extension = join(directory, 'extension');
   const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-  try {
-    await writeFile(join(ilsDir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
-    const executable = join(ilsDir, 'bin', 'intellij-server');
-    process.env.OMP_ANDROID_LS_EXTENSION_DIR = extDir;
+  t.after(async () => {
+    if (originalEnv === undefined) delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
+    else process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
+    await rm(directory, { recursive: true, force: true });
+  });
+  await cp('resources/ils/271.2085.0/intellij-android', extension, { recursive: true });
+  await writeFile(join(directory, 'build.txt'), 'ILS-271.2085.0\n');
+  process.env.OMP_ANDROID_LS_EXTENSION_DIR = extension;
+  const executable = join(directory, 'bin', 'intellij-server');
+  const manifestPath = join(extension, 'manifest.json');
+  return { extension, executable, manifestPath };
+}
 
-    // Missing manifest.json
-    const resNoManifest = await resolveAndroidExtension(executable);
-    assert.equal(resNoManifest.pluginPath, undefined);
-    assert.match(resNoManifest.reason ?? '', /Android extension unavailable/);
-
-    // Manifest present, but lib/android-ls-extension.jar missing
-    const manifest = {
-      serverVersion: '271.2085.0',
-      classFileVersion: 69,
-      targetJavaVersion: 25,
-      assets: [
-        {
-          name: 'android-ls-extension.jar',
-          path: 'lib/android-ls-extension.jar',
-          sha256: 'a'.repeat(64),
-          size: 100,
-        },
-      ],
-    };
-    await writeFile(join(extDir, 'manifest.json'), JSON.stringify(manifest), 'utf8');
-
-    const resNoJar = await resolveAndroidExtension(executable);
-    assert.equal(resNoJar.pluginPath, undefined);
-    assert.match(resNoJar.reason ?? '', /Android extension unavailable/);
-  } finally {
-    if (originalEnv !== undefined) {
-      process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
-    } else {
-      delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-    }
-    await rm(ilsDir, { recursive: true, force: true });
-    await rm(extDir, { recursive: true, force: true });
-  }
+test('matching published extension assets resolve for the exact ILS build', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  assert.deepEqual(await resolveAndroidExtension(executable), { pluginPath: extension });
 });
 
-test('resolveAndroidExtension rejects SHA-256 or size mismatch', async () => {
-  const ilsDir = await mkdtemp(join(tmpdir(), 'omp-ils-'));
-  const extDir = await mkdtemp(join(tmpdir(), 'omp-ext-'));
-  const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-  try {
-    await writeFile(join(ilsDir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
-    const executable = join(ilsDir, 'bin', 'intellij-server');
-    process.env.OMP_ANDROID_LS_EXTENSION_DIR = extDir;
-
-    const libDir = join(extDir, 'lib');
-    await mkdir(libDir, { recursive: true });
-    const jarBytes = Buffer.from('test-jar-bytes-content');
-    await writeFile(join(libDir, 'android-ls-extension.jar'), jarBytes);
-
-    // Wrong SHA-256
-    const manifestWrongSha = {
-      serverVersion: '271.2085.0',
-      classFileVersion: 69,
-      assets: [
-        {
-          name: 'android-ls-extension.jar',
-          path: 'lib/android-ls-extension.jar',
-          sha256: '0'.repeat(64),
-          size: jarBytes.length,
-        },
-      ],
-    };
-    await writeFile(join(extDir, 'manifest.json'), JSON.stringify(manifestWrongSha), 'utf8');
-    const resSha = await resolveAndroidExtension(executable);
-    assert.equal(resSha.pluginPath, undefined);
-    assert.equal(resSha.reason, 'Android extension asset SHA-256 mismatch');
-
-    // Correct SHA but wrong size
-    const actualSha = createHash('sha256').update(jarBytes).digest('hex');
-    const manifestWrongSize = {
-      serverVersion: '271.2085.0',
-      classFileVersion: 69,
-      assets: [
-        {
-          name: 'android-ls-extension.jar',
-          path: 'lib/android-ls-extension.jar',
-          sha256: actualSha,
-          size: jarBytes.length + 999,
-        },
-      ],
-    };
-    await writeFile(join(extDir, 'manifest.json'), JSON.stringify(manifestWrongSize), 'utf8');
-    const resSize = await resolveAndroidExtension(executable);
-    assert.equal(resSize.pluginPath, undefined);
-    assert.equal(resSize.reason, 'Android extension asset SHA-256 mismatch');
-  } finally {
-    if (originalEnv !== undefined) {
-      process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
-    } else {
-      delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-    }
-    await rm(ilsDir, { recursive: true, force: true });
-    await rm(extDir, { recursive: true, force: true });
+for (const name of assetNames) {
+  for (const mutation of [
+    'missing',
+    'tampered',
+    'companion-missing',
+    'companion-malformed',
+    'companion-wrong',
+  ] as const) {
+    test(`extension rejects ${name} ${mutation}`, async (t) => {
+      const { extension, executable } = await extensionFixture(t);
+      const asset = join(extension, 'lib', name);
+      if (mutation === 'missing') await rm(asset);
+      else if (mutation === 'tampered') await writeFile(asset, 'tampered');
+      else if (mutation === 'companion-missing') await rm(`${asset}.sha256`);
+      else if (mutation === 'companion-malformed')
+        await writeFile(`${asset}.sha256`, 'invalid checksum');
+      else await writeFile(`${asset}.sha256`, `${'0'.repeat(64)} *${name}\n`);
+      const result = await resolveAndroidExtension(executable);
+      assert.equal(result.pluginPath, undefined);
+      assert.equal(typeof result.reason, 'string');
+    });
   }
+}
+
+test('extension rejects additional runtime libraries', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(join(extension, 'lib', 'unexpected.jar'), 'extra');
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
 });
 
-test('resolveAndroidExtension rejects manifest ABI or version mismatch', async () => {
-  const ilsDir = await mkdtemp(join(tmpdir(), 'omp-ils-'));
-  const extDir = await mkdtemp(join(tmpdir(), 'omp-ext-'));
-  const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-  try {
-    await writeFile(join(ilsDir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
-    const executable = join(ilsDir, 'bin', 'intellij-server');
-    process.env.OMP_ANDROID_LS_EXTENSION_DIR = extDir;
+for (const mutation of [
+  'missing',
+  'duplicate',
+  'traversal',
+  'wrong-name',
+  'wrong-version',
+  'wrong-java',
+  'wrong-abi',
+  'wrong-size',
+] as const) {
+  test(`extension rejects manifest ${mutation}`, async (t) => {
+    const { executable, manifestPath } = await extensionFixture(t);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    if (mutation === 'missing') manifest.assets.pop();
+    else if (mutation === 'duplicate') manifest.assets[1] = manifest.assets[0];
+    else if (mutation === 'traversal') manifest.assets[0].path = '../../secret.jar';
+    else if (mutation === 'wrong-name') manifest.assets[0].name = 'unexpected.jar';
+    else if (mutation === 'wrong-version') manifest.serverVersion = '263.7084.0';
+    else if (mutation === 'wrong-java') manifest.targetJavaVersion = 21;
+    else if (mutation === 'wrong-abi') manifest.classFileVersion = 65;
+    else manifest.assets[1].size++;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  });
+}
 
-    // Wrong serverVersion in manifest
-    await writeFile(
-      join(extDir, 'manifest.json'),
-      JSON.stringify({ serverVersion: '263.7084.0', classFileVersion: 69, assets: [{}] }),
-      'utf8',
-    );
-    const resVer = await resolveAndroidExtension(executable);
-    assert.equal(resVer.reason, 'Android extension manifest version or ABI mismatch');
-
-    // Wrong classFileVersion in manifest
-    await writeFile(
-      join(extDir, 'manifest.json'),
-      JSON.stringify({ serverVersion: '271.2085.0', classFileVersion: 65, assets: [{}] }),
-      'utf8',
-    );
-    const resClass = await resolveAndroidExtension(executable);
-    assert.equal(resClass.reason, 'Android extension manifest version or ABI mismatch');
-
-    // Unexpected assets count in manifest
-    await writeFile(
-      join(extDir, 'manifest.json'),
-      JSON.stringify({
-        serverVersion: '271.2085.0',
-        classFileVersion: 69,
-        assets: [{ name: 'a' }, { name: 'b' }],
-      }),
-      'utf8',
-    );
-    const resCount = await resolveAndroidExtension(executable);
-    assert.equal(resCount.reason, 'Android extension manifest version or ABI mismatch');
-
-    // Invalid asset name in manifest
-    await writeFile(
-      join(extDir, 'manifest.json'),
-      JSON.stringify({
-        serverVersion: '271.2085.0',
-        classFileVersion: 69,
-        assets: [
-          {
-            name: 'other.jar',
-            path: 'lib/android-ls-extension.jar',
-            sha256: 'a'.repeat(64),
-            size: 10,
-          },
-        ],
-      }),
-      'utf8',
-    );
-    const resName = await resolveAndroidExtension(executable);
-    assert.equal(resName.reason, 'Invalid Android extension asset manifest');
-  } finally {
-    if (originalEnv !== undefined) {
-      process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
-    } else {
-      delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-    }
-    await rm(ilsDir, { recursive: true, force: true });
-    await rm(extDir, { recursive: true, force: true });
-  }
-});
-
-test('resolveAndroidExtension rejects asset path escaping extension directory', async () => {
-  const ilsDir = await mkdtemp(join(tmpdir(), 'omp-ils-'));
-  const extDir = await mkdtemp(join(tmpdir(), 'omp-ext-'));
-  const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-  try {
-    await writeFile(join(ilsDir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
-    const executable = join(ilsDir, 'bin', 'intellij-server');
-    process.env.OMP_ANDROID_LS_EXTENSION_DIR = extDir;
-
-    await writeFile(
-      join(extDir, 'manifest.json'),
-      JSON.stringify({
-        serverVersion: '271.2085.0',
-        classFileVersion: 69,
-        assets: [
-          {
-            name: 'android-ls-extension.jar',
-            path: '../../secret.jar',
-            sha256: 'a'.repeat(64),
-            size: 10,
-          },
-        ],
-      }),
-      'utf8',
-    );
-    const resEscape = await resolveAndroidExtension(executable);
-    assert.equal(resEscape.pluginPath, undefined);
-    assert.equal(resEscape.reason, 'Invalid Android extension asset manifest');
-  } finally {
-    if (originalEnv !== undefined) {
-      process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
-    } else {
-      delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-    }
-    await rm(ilsDir, { recursive: true, force: true });
-    await rm(extDir, { recursive: true, force: true });
-  }
-});
-
-test('resolveAndroidExtension accepts exact identity with matching assets and companion SHA', async () => {
-  const ilsDir = await mkdtemp(join(tmpdir(), 'omp-ils-'));
-  const extDir = await mkdtemp(join(tmpdir(), 'omp-ext-'));
-  const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-  try {
-    await writeFile(join(ilsDir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
-    const executable = join(ilsDir, 'bin', 'intellij-server');
-    process.env.OMP_ANDROID_LS_EXTENSION_DIR = extDir;
-
-    const libDir = join(extDir, 'lib');
-    await mkdir(libDir, { recursive: true });
-    const jarBytes = Buffer.from('exact-identity-test-bytes');
-    const jarSha = createHash('sha256').update(jarBytes).digest('hex');
-    await writeFile(join(libDir, 'android-ls-extension.jar'), jarBytes);
-    await writeFile(
-      join(libDir, 'android-ls-extension.jar.sha256'),
-      `${jarSha} *android-ls-extension.jar\n`,
-      'utf8',
-    );
-
-    const manifest = {
-      serverVersion: '271.2085.0',
-      classFileVersion: 69,
-      targetJavaVersion: 25,
-      assets: [
-        {
-          name: 'android-ls-extension.jar',
-          path: 'lib/android-ls-extension.jar',
-          sha256: jarSha,
-          size: jarBytes.length,
-        },
-      ],
-    };
-    await writeFile(join(extDir, 'manifest.json'), JSON.stringify(manifest), 'utf8');
-
-    const res = await resolveAndroidExtension(executable);
-    assert.equal(res.reason, undefined);
-    assert.equal(res.pluginPath, extDir);
-  } finally {
-    if (originalEnv !== undefined) {
-      process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
-    } else {
-      delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-    }
-    await rm(ilsDir, { recursive: true, force: true });
-    await rm(extDir, { recursive: true, force: true });
-  }
-});
-
-test('resolveAndroidExtension rejects mismatched companion SHA file', async () => {
-  const ilsDir = await mkdtemp(join(tmpdir(), 'omp-ils-'));
-  const extDir = await mkdtemp(join(tmpdir(), 'omp-ext-'));
-  const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-  try {
-    await writeFile(join(ilsDir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
-    const executable = join(ilsDir, 'bin', 'intellij-server');
-    process.env.OMP_ANDROID_LS_EXTENSION_DIR = extDir;
-
-    const libDir = join(extDir, 'lib');
-    await mkdir(libDir, { recursive: true });
-    const jarBytes = Buffer.from('exact-identity-test-bytes');
-    const jarSha = createHash('sha256').update(jarBytes).digest('hex');
-    await writeFile(join(libDir, 'android-ls-extension.jar'), jarBytes);
-    await writeFile(
-      join(libDir, 'android-ls-extension.jar.sha256'),
-      `badbadbad${'0'.repeat(55)} *android-ls-extension.jar\n`,
-      'utf8',
-    );
-
-    const manifest = {
-      serverVersion: '271.2085.0',
-      classFileVersion: 69,
-      targetJavaVersion: 25,
-      assets: [
-        {
-          name: 'android-ls-extension.jar',
-          path: 'lib/android-ls-extension.jar',
-          sha256: jarSha,
-          size: jarBytes.length,
-        },
-      ],
-    };
-    await writeFile(join(extDir, 'manifest.json'), JSON.stringify(manifest), 'utf8');
-
-    const res = await resolveAndroidExtension(executable);
-    assert.equal(res.pluginPath, undefined);
-    assert.equal(res.reason, 'Android extension asset companion SHA-256 mismatch');
-  } finally {
-    if (originalEnv !== undefined) {
-      process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
-    } else {
-      delete process.env.OMP_ANDROID_LS_EXTENSION_DIR;
-    }
-    await rm(ilsDir, { recursive: true, force: true });
-    await rm(extDir, { recursive: true, force: true });
-  }
+test('extension rejects a missing manifest', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  await rm(manifestPath);
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
 });
 
 test('formatPluginOption normalizes slashes and quotes path', () => {
@@ -555,3 +329,19 @@ test('Windows plugin paths retain filesystem case-insensitive identity', {
     '-Dplugin.path="c:/Existing,C:/EXT"',
   );
 });
+
+for (const name of ['adblib-9.4.1.jar', 'adblib-tools-9.4.1.jar']) {
+  test(`extension rejects substituted ${name} even with a self-consistent manifest`, async (t) => {
+    const { extension, executable, manifestPath } = await extensionFixture(t);
+    const bytes = Buffer.from('substituted dependency');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    await writeFile(join(extension, 'lib', name), bytes);
+    await writeFile(join(extension, 'lib', `${name}.sha256`), `${sha256} *${name}\n`);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const asset = manifest.assets.find((item: { name: string }) => item.name === name);
+    asset.sha256 = sha256;
+    asset.size = bytes.length;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  });
+}
