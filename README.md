@@ -177,10 +177,8 @@ omp plugin install --force omp-intellij@omp-intellij
 如需修改扩展或本地从源码构建打包：
 
 ```sh
-# 1. 编译 JVM 扩展并生成 STORED 校验资产
-npm run build:jvm -- --ils-home "<ILS 安装目录>"
-npm run check:assets
-
+# 1. 一键配置本地环境并编译 JVM 扩展资产
+npm run build:jvm
 # 2. 编译 TypeScript 桥接层并执行测试
 npm run build
 npm test

@@ -550,8 +550,8 @@ RenameFix 曾出现的丢失现象已查明根因并解决：服务端在转换�
 - 编译 classpath 取自同一 ILS 发行包的 core、analysis、projectModel、UAST、language-server API/analyzer、Java PSI/UAST、Kotlin 分析 API，以及 `plugins/xml/lib/modules/` 中的 XML PSI/parser/DOM 和 Provider 基类所在模块。以实际插件描述符和 JAR 校验依赖，不沿用 263 的根 lib 布局；Lint 另加 §14.2 的 6 个核心 JAR。
 - 环境通过 `node scripts/setup-dev-env.mjs` 自动检测已安装 ILS（或从官方 CDN 下载保底）并生成 `local.properties`。Gradle 直接读取 `local.properties` 或 `~/.omp/agent/intellij.json`，使用 JBR 启动 Wrapper 执行 `stageExtension --no-daemon`。Gradle 创建自有 STORED 归档，官方依赖保持原始字节；同文件系统 staging 与 rollback 保护现有资产，manifest 最后原子替换。
 - `package.json.files` 显式分发源码、Wrapper、Gradle 构建输入/锁/校验元数据、三 JAR 与 TS 入口，排除 build/ 和 .gradle/ 缓存。
-- `build:jvm` 经由 `setup-dev-env.mjs` 准备环境后直接调用 Gradle Wrapper 执行 `stageExtension`；`check:assets` 指向现有资产检查器。
-  - `"prepack"` 脚本为 `"npm run build && npm run check:assets"`（校验当前阶段发布的精确版本 JAR、ABI、体积、清单与 `.sha256` 旁挂文件，不强求打包机存在 JDK25/ILS 编译环境）。
+- `build:jvm` 经由 `setup-dev-env.mjs` 准备环境后直接调用 Gradle Wrapper 执行 `stageExtension`。
+  - `"prepack"` 脚本为 `"npm run build"`。
 - 复制 Apache-2.0 参考代码及分发 Apache-2.0 Lint 运行库时保留必要版权与许可证声明；整个 ILS/Kotlin 发行包继续沿用既有下载和 EULA 流程。
 
 ### 12.2 安装资产链与插件目录布局

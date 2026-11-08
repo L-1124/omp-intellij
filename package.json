@@ -19,7 +19,6 @@
     "jvm/intellij-android/settings.gradle.kts",
     "jvm/intellij-android/gradle.properties",
     "jvm/intellij-android/gradle.lockfile",
-    "jvm/intellij-android/check-assets.mjs",
     "resources/ils/",
     "scripts/setup-dev-env.mjs",
     "scripts/clean-runtime.mjs",
@@ -35,9 +34,8 @@
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
-    "prepack": "npm run build && npm run check:assets",
+    "prepack": "npm run build",
     "build:jvm": "node scripts/setup-dev-env.mjs && node -e \"const { spawnSync } = require('node:child_process'); const isWin = process.platform === 'win32'; const cmd = isWin ? 'gradlew.bat' : './gradlew'; const res = spawnSync(cmd, ['stageExtension', '--no-daemon'], { cwd: 'jvm/intellij-android', stdio: 'inherit', shell: isWin }); process.exit(res.status ?? 0);\"",
-    "check:assets": "node jvm/intellij-android/check-assets.mjs",
     "clean:runtime": "node scripts/clean-runtime.mjs",
     "watch": "tsc -w",
     "pretest": "node -e \"require('node:fs').rmSync('dist-test', { recursive: true, force: true })\" && npm run build && tsc -p tsconfig.test.json",

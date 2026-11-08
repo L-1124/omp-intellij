@@ -20,7 +20,7 @@
 | `compose` | Compose 命名检查抑制 |
 | `debug` | JDWP 附加、调试命令、监听器与字段过滤 |
 
-跨包调用的类和成员显式公开；包内辅助方法保留包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 和 `check-assets.mjs` 使用迁移后的入口路径。
+跨包调用的类和成员显式公开；包内辅助方法保留包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 使用迁移后的入口路径。
 
 
 ---
@@ -313,21 +313,13 @@ cd jvm/intellij-android
 2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
 3. 生成 STORED（零压缩）的 `intellij-android.jar` 及伴随的 `.sha256` 旁挂文件。
 
-### 2. 资产门禁核验（`check:assets`）
+### 2. 构建产物验证
 
-在打包发布前，运行资产一致性门禁检查：
-
-```bash
-npm run check:assets
-```
-
-`check-assets.mjs` 会逐一验证：
-1. `intellij-android.jar` 内部所有 `.class` 文件的 Major Version 必须精确为 `69`（Java 25）；
-2. 检查 ZIP 格式，校验所有条目的 `entryCompression` 方式；
-3. 计算每个 JAR 的 SHA-256，核对 `.sha256` 伴随文件及 `manifest.json`；
-4. 校验 `adblib` 与 `adblib-tools` 的 SHA-256 必须严格与锁定上游常量一致：
-   - `adblib-9.4.1.jar`: `ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9`
-   - `adblib-tools-9.4.1.jar`: `2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c`
+构建产物规范由 Gradle 原生保证：
+1. `build.gradle.kts` 的 `options.release.set(25)` 强制保证 classfile 为 Java 25（Major 69）；
+2. `entryCompression = ZipEntryCompression.STORED` 保证零压缩；
+3. `gradle/verification-metadata.xml` 自动校验上游官方库的 SHA-256；
+4. `stageExtension` 任务自动生成 `manifest.json` 与伴随的 `.sha256` 签名文件。
 
 ### 3. 反编译器选型横评与技术适用边界
 
