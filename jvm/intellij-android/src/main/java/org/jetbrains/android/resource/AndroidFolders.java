@@ -1,8 +1,8 @@
-package org.jetbrains.android;
+package org.jetbrains.android.resource;
 
 import java.util.regex.Pattern;
 
-final class AndroidFolders {
+public final class AndroidFolders {
     private static final Pattern VALUES = Pattern.compile("values"
             + "(?:-mcc[0-9]{3})?(?:-mnc[0-9]{1,3})?"
             + "(?:-(?:[a-z]{2,3}(?:-r(?:[A-Z]{2}|[0-9]{3}))?|b\\+[A-Za-z0-9]+(?:\\+[A-Za-z0-9]+)*))?"
@@ -19,7 +19,7 @@ final class AndroidFolders {
     private AndroidFolders() {
     }
 
-    static boolean isValues(String name) {
+    public static boolean isValues(String name) {
         return VALUES.matcher(name).matches();
     }
 }

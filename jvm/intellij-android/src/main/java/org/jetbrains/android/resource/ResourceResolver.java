@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.resource;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -11,12 +11,7 @@ import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.psi.PsiClass;
-import com.intellij.psi.PsiDocumentManager;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiField;
-import com.intellij.psi.PsiFile;
-import com.intellij.psi.PsiReference;
+import com.intellij.psi.*;
 import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.psi.xml.XmlAttribute;
 import com.intellij.psi.xml.XmlAttributeValue;
@@ -27,17 +22,13 @@ import com.jetbrains.ls.api.core.util.PositionKt;
 import com.jetbrains.lsp.protocol.Location;
 import com.jetbrains.lsp.protocol.Position;
 import com.jetbrains.lsp.protocol.Range;
-
+import org.jetbrains.android.context.AndroidContext;
+import org.jetbrains.android.context.AndroidQueryException;
+import org.jetbrains.android.xml.AndroidXml;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 public final class ResourceResolver {
     private static final java.util.regex.Pattern RESOURCE_TYPE = java.util.regex.Pattern.compile("[a-z][a-z0-9_]*");

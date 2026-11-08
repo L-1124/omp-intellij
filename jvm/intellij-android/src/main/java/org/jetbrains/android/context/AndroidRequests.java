@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.context;
 
 import com.intellij.openapi.application.CoroutinesKt;
 import com.intellij.openapi.editor.Document;
@@ -12,21 +12,21 @@ import com.jetbrains.ls.api.core.LSServer;
 import com.jetbrains.ls.api.core.util.PositionKt;
 import com.jetbrains.lsp.protocol.Position;
 import com.jetbrains.lsp.protocol.TextDocumentIdentifier;
-
-import java.util.List;
-
 import kotlinx.coroutines.flow.Flow;
 import kotlinx.coroutines.flow.FlowKt;
+import org.jetbrains.android.resource.AndroidSources;
+import java.util.List;
 
-final class AndroidRequests {
+
+public final class AndroidRequests {
     private AndroidRequests() {
     }
 
-    interface Query<T> {
+    public interface Query<T> {
         List<T> run(Project project, PsiFile file, int offset);
     }
 
-    static <T> Flow<T> query(LSServer server, TextDocumentIdentifier identifier, Position position, Query<T> query) {
+    public static <T> Flow<T> query(LSServer server, TextDocumentIdentifier identifier, Position position, Query<T> query) {
         Flow<List<T>> batches = FlowKt.flow((collector, continuation) ->
                 AndroidRequests.<List<T>>chain(next -> server.withAnalysisContext((context, scope, result) ->
                                 CoroutinesKt.readAction(() -> {

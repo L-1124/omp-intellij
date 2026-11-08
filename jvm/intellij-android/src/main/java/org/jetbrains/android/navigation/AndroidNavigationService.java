@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.navigation;
 
 import com.intellij.find.findUsages.FindUsagesHandler;
 import com.intellij.find.findUsages.FindUsagesManager;
@@ -13,7 +13,12 @@ import com.intellij.psi.xml.XmlFile;
 import com.jetbrains.ls.api.core.features.LSDefinitionLocation;
 import com.jetbrains.ls.api.core.util.PositionKt;
 import com.jetbrains.lsp.protocol.Location;
-
+import org.jetbrains.android.context.AndroidContext;
+import org.jetbrains.android.context.AndroidFileInfo;
+import org.jetbrains.android.context.AndroidFileRole;
+import org.jetbrains.android.context.AndroidQueryException;
+import org.jetbrains.android.resource.ResourceReference;
+import org.jetbrains.android.resource.ResourceResolver;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;

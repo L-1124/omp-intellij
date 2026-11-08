@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.navigation;
 
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.util.TextRange;

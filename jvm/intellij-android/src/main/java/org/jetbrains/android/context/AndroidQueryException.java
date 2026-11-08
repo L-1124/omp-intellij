@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.context;
 
 /**
  * Runtime exception representing recognized Android LSP semantic query failures

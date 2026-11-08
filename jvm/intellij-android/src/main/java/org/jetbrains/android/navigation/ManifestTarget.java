@@ -1,21 +1,20 @@
-package org.jetbrains.android;
+package org.jetbrains.android.navigation;
 
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.TextRange;
-import com.intellij.psi.JavaPsiFacade;
-import com.intellij.psi.PsiClass;
-import com.intellij.psi.PsiCompiledElement;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiErrorElement;
-import com.intellij.psi.PsiFile;
+import com.intellij.psi.*;
 import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.psi.xml.XmlAttribute;
 import com.intellij.psi.xml.XmlAttributeValue;
 import com.intellij.psi.xml.XmlFile;
 import com.intellij.psi.xml.XmlTag;
-
+import org.jetbrains.android.context.AndroidContext;
+import org.jetbrains.android.context.AndroidFileInfo;
+import org.jetbrains.android.context.AndroidFileRole;
+import org.jetbrains.android.context.AndroidQueryException;
+import org.jetbrains.android.xml.AndroidXml;
 import java.util.LinkedHashMap;
 import java.util.Set;
 

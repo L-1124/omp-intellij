@@ -4,12 +4,15 @@ import com.intellij.lang.xml.XMLLanguage;
 import com.jetbrains.ls.api.features.LanguageServerExtension;
 import com.jetbrains.ls.api.features.language.LSConfigurationPiece;
 import com.jetbrains.ls.api.features.language.LSLanguage;
-
+import org.jetbrains.android.compose.ComposeSuppressor;
 import org.jetbrains.android.debug.AndroidDebugCommands;
+import org.jetbrains.android.navigation.AndroidDefinitionProvider;
+import org.jetbrains.android.navigation.AndroidReferencesProvider;
+import org.jetbrains.android.xml.AndroidDocumentSymbols;
 import java.util.List;
 
 public final class AndroidExtension implements LanguageServerExtension {
-    static final LSLanguage XML = new LSLanguage("xml", XMLLanguage.INSTANCE, List.of("xml"));
+    public static final LSLanguage XML = new LSLanguage("xml", XMLLanguage.INSTANCE, List.of("xml"));
 
     @Override
     public LSConfigurationPiece getConfiguration() {
@@ -18,7 +21,7 @@ public final class AndroidExtension implements LanguageServerExtension {
             // Disable batch evaluation so Android VM doesn't attempt to load BatchEvaluatorServer.class
             com.intellij.openapi.util.registry.Registry.get("debugger.batch.evaluation").setValue(false);
             com.intellij.openapi.util.registry.Registry.get("debugger.batch.evaluation.force").setValue(false);
-            
+
             // Disable ToStringRenderer so Android UI objects (like MainActivity this) don't hang JDWP
             com.intellij.debugger.settings.NodeRendererSettings rendererSettings =
                     com.intellij.debugger.settings.NodeRendererSettings.getInstance();

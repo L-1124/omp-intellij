@@ -12,8 +12,8 @@
     {
       "name": "intellij-android.jar",
       "path": "lib/intellij-android.jar",
-      "sha256": "58da5a12e726661bd1c15acc7f3b16789b5b377e3d5cedb187ad14a470dc9c08",
-      "size": 302805
+      "sha256": "5527dc10eb57735c72d4bf094cd583619ab8e40156bdce59ced83be5a4859c05",
+      "size": 306327
     },
     {
       "name": "adblib-9.4.1.jar",

@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.resource;
 
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
@@ -7,27 +7,21 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.util.PsiTreeUtil;
 import org.jetbrains.kotlin.psi.*;
-
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
-final class AndroidLayout {
+public final class AndroidLayout {
     private static final Set<String> SOURCE_OPERATIONS = Set.of("srcDir", "srcDirs", "setSrcDirs", "srcFile");
     private static final Set<String> LITERAL_COLLECTIONS = Set.of("listOf", "setOf", "arrayOf");
-    final boolean android;
-    final String namespace;
-    final Set<Path> resources;
-    final Set<Path> manifests;
+    public final boolean android;
+    public final String namespace;
+    public final Set<Path> resources;
+    public final Set<Path> manifests;
 
     private record SourceSet(Set<Path> resources, Set<Path> manifests) {
     }
 
-    AndroidLayout(Project project, VirtualFile root, String variant, Set<String> importedSourceSets) {
+    public AndroidLayout(Project project, VirtualFile root, String variant, Set<String> importedSourceSets) {
         PsiFile script = AndroidSources.kotlinScript(project, root);
         if (!(script instanceof KtFile kotlin)) {
             android = false;

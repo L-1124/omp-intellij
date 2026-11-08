@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.context;
 
 /**
  * Android XML and source file roles recognized by the language server extension.

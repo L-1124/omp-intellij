@@ -195,14 +195,14 @@ function verifyAssets(version = TARGET_VERSION) {
       `"META-INF/plugin.xml" does not contain expected plugin id "org.jetbrains.android"`,
     );
   }
-  if (!pluginXmlContent.includes('org.jetbrains.android.AndroidResourceNavigation')) {
+  if (!pluginXmlContent.includes('org.jetbrains.android.navigation.AndroidResourceNavigation')) {
     throw new Error(
-      `"META-INF/plugin.xml" does not declare entry point "org.jetbrains.android.AndroidResourceNavigation"`,
+      `"META-INF/plugin.xml" does not declare entry point "org.jetbrains.android.navigation.AndroidResourceNavigation"`,
     );
   }
-  if (!pluginXmlContent.includes('org.jetbrains.android.ComposeSuppressor')) {
+  if (!pluginXmlContent.includes('org.jetbrains.android.compose.ComposeSuppressor')) {
     throw new Error(
-      `"META-INF/plugin.xml" does not declare entry point "org.jetbrains.android.ComposeSuppressor"`,
+      `"META-INF/plugin.xml" does not declare entry point "org.jetbrains.android.compose.ComposeSuppressor"`,
     );
   }
   const spiEntry = entries.find(
@@ -226,8 +226,8 @@ function verifyAssets(version = TARGET_VERSION) {
 
   const requiredEntryClasses = [
     'org/jetbrains/android/AndroidExtension.class',
-    'org/jetbrains/android/AndroidResourceNavigation.class',
-    'org/jetbrains/android/ComposeSuppressor.class',
+    'org/jetbrains/android/navigation/AndroidResourceNavigation.class',
+    'org/jetbrains/android/compose/ComposeSuppressor.class',
   ];
   for (const entryClass of requiredEntryClasses) {
     if (!entries.some((e) => e.name === entryClass)) {

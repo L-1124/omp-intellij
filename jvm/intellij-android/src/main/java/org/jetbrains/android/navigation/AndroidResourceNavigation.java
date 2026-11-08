@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.navigation;
 
 import com.intellij.navigation.DirectNavigationProvider;
 import com.intellij.openapi.module.Module;
@@ -10,8 +10,13 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiField;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.impl.FakePsiElement;
-import com.intellij.psi.xml.XmlFile;
 import com.jetbrains.ls.api.core.util.PositionKt;
+import org.jetbrains.android.context.AndroidContext;
+import org.jetbrains.android.context.AndroidQueryException;
+import org.jetbrains.android.resource.AndroidSources;
+import org.jetbrains.android.resource.ResourceReference;
+import org.jetbrains.android.resource.AndroidLocations;
+import org.jetbrains.android.resource.ResourceResolver;
 
 import java.nio.file.Path;
 

@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.xml;
 
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.progress.ProgressManager;
@@ -16,7 +16,8 @@ import com.jetbrains.ls.api.features.language.LSLanguage;
 import com.jetbrains.lsp.protocol.Position;
 import com.jetbrains.lsp.protocol.Range;
 import com.jetbrains.lsp.protocol.SymbolKind;
-
+import org.jetbrains.android.context.AndroidContext;
+import org.jetbrains.android.context.AndroidRequests;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;

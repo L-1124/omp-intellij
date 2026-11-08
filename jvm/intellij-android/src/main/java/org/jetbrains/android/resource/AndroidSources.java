@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.resource;
 
 import com.intellij.ide.highlighter.XmlFileType;
 import com.intellij.openapi.progress.ProgressManager;
@@ -9,6 +9,7 @@ import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiManager;
 import com.intellij.psi.xml.XmlFile;
+import org.jetbrains.android.context.AndroidQueryException;
 import org.jetbrains.kotlin.psi.KtPsiFactory;
 
 import java.io.IOException;
@@ -19,7 +20,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
-final class AndroidSources {
+public final class AndroidSources {
     private static final ThreadLocal<Scope> CURRENT = new ThreadLocal<>();
     private static final java.lang.invoke.MethodHandle DOCUMENT_VERSION;
 
@@ -36,22 +37,22 @@ final class AndroidSources {
     private AndroidSources() {
     }
 
-    static final class Scope implements AutoCloseable {
+    public static final class Scope implements AutoCloseable {
         private final com.jetbrains.ls.api.core.LSServer server;
         private final Map<String, Integer> versions = new HashMap<>();
         private final Map<Path, Stamp> stamps = new HashMap<>();
         private final Map<Path, PsiFile> files = new HashMap<>();
         private final Map<Path, String> texts = new HashMap<>();
-        final Map<com.intellij.openapi.module.Module, AndroidLayout> layouts = new HashMap<>();
+        public final Map<com.intellij.openapi.module.Module, AndroidLayout> layouts = new HashMap<>();
 
-        Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file) {
+        public Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file) {
             if (CURRENT.get() != null) throw new IllegalStateException("Nested Android source scope");
             this.server = server;
             CURRENT.set(this);
             observe(file);
         }
 
-        void verify() {
+        public void verify() {
             ProgressManager.checkCanceled();
             for (var entry : versions.entrySet()) {
                 if (!Objects.equals(entry.getValue(), version(server, entry.getKey())))
@@ -69,7 +70,7 @@ final class AndroidSources {
         }
     }
 
-    static Scope scope() {
+    public static Scope scope() {
         Scope scope = CURRENT.get();
         if (scope == null) throw new IllegalStateException("Android model reads require a request scope");
         return scope;
@@ -131,7 +132,7 @@ final class AndroidSources {
         return file == null ? null : PsiManager.getInstance(project).findFile(file);
     }
 
-    static Scope open(VirtualFile file) {
+    public static Scope open(VirtualFile file) {
         return new Scope(null, file);
     }
 
@@ -186,7 +187,7 @@ final class AndroidSources {
         return file;
     }
 
-    static PsiFile navigationFile(Project project, Path path) {
+    public static PsiFile navigationFile(Project project, Path path) {
         if (path.toString().endsWith(".xml")) return xml(project, path);
         track(path);
         PsiFile current = current(project, path);

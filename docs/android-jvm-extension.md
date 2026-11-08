@@ -7,6 +7,22 @@
 3. **工程化与构建体系演进**：放弃早期的 Node.js 手工拼接编译脚本（`build.mjs`），迁移为标准 Gradle 9.8.0 Java 工程布局（`jvm/intellij-android/`）。编译工具链硬性绑定 ILS 自带的 JBR 25（Java 25 / classfile 69），通过 `gradle.lockfile` 锁定依赖版本，`verification-metadata.xml` 校验依赖 SHA-256。产物采用 `STORED`（零压缩）打包归档，配合 `.sha256` 旁挂校验文件与 `check-assets` 门禁，实现确定性构建与原子化发布。
 4. **源码审查优先于反编译推测**：本地实测横评 4 款现代反编译器（`jcdc`、`javajive`、`abyssflower`、`vinylite`）表明：`jcdc` 对 Java 21+ 语法（Sealed 类、Record、TWR、模式匹配）和内部类折叠还原度最高；`abyssflower` 凭借 `@Metadata` Protobuf 解析在 Kotlin 语法还原上断层领先；但任何反编译器在字节码脱糖、泛型擦除和架构设计意图上均存在不可逆失真。核心方案必须以官方开源仓库（`JetBrains/intellij-community`、`JetBrains/android` 提交 `544c9ef8`、AOSP `platform/tools/base`）作为第一权威依据，杜绝盲目依靠反编译黑盒猜解协议。
 
+### JVM 包结构
+
+`org.jetbrains.android` 根包仅保留 SPI 入口 `AndroidExtension`，其余实现按职责分包：
+
+| 子包 | 职责 |
+|---|---|
+| `context` | 模块环境、文件角色、请求上下文与查询异常 |
+| `xml` | XML 属性解析与文档大纲 |
+| `navigation` | 定义、引用、Manifest 目标与资源直达导航 |
+| `resource` | 资源解析、源集目录、布局与源码读取 |
+| `compose` | Compose 命名检查抑制 |
+| `debug` | JDWP 附加、调试命令、监听器与字段过滤 |
+
+跨包调用的类和成员显式公开；包内辅助方法保留包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 和 `check-assets.mjs` 使用迁移后的入口路径。
+
+
 ---
 
 ## 踩坑记录与根因分析
@@ -15,7 +31,7 @@
 
 - **问题现象**：在最初实现中，`ComposeSuppressor.registerOnce()` 在 `AndroidExtension.getConfiguration()` 中直接调用，运行时抛出 `NullPointerException` 或直接导致语言服务进程崩溃。
 - **根因排查**：`LanguageServerExtension.getConfiguration()` 在 ILS 启动阶段的 SPI 扫描期间执行，此时 IntelliJ 底层的核心组件容器和 `Application` 单例尚未初始化完成（`ApplicationManager.getApplication()` 返回 `null`）。而 `LanguageInspectionSuppressors.INSTANCE.addExplicitExtension` 强依赖 Application 级别的扩展点容器（`ExtensionPoint`）。
-- **解决方案**：将注册操作延迟到 Application 容器就绪阶段。在 `AndroidExtension` 中暴露实现了 `WorkspaceComponentEntry` 的 `ComposeSuppressor.Entry`，内部绑定 `WorkspaceComponent` 单例；在平台生命周期回调 `registerInApplicationContainer(builder, application, state, kind, continuation)` 被调用时（此时 Application 已完全就绪），再执行 `ComposeSuppressor.registerOnce()`，并在 `plugin.xml` 声明 `<lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.ComposeSuppressor"/>` 双重保底。
+- **解决方案**：将注册操作延迟到 Application 容器就绪阶段。在 `AndroidExtension` 中暴露实现了 `WorkspaceComponentEntry` 的 `ComposeSuppressor.Entry`，内部绑定 `WorkspaceComponent` 单例；在平台生命周期回调 `registerInApplicationContainer(builder, application, state, kind, continuation)` 被调用时（此时 Application 已完全就绪），再执行 `ComposeSuppressor.registerOnce()`，并在 `plugin.xml` 声明 `<lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.compose.ComposeSuppressor"/>` 双重保底。
 - **实测对比**：修复前服务启动直接报 NPE 无法提供任何 Android 功能；修复后扩展在 Application 阶段无感注入，0 报错正常启动。
 
 ### 2. K2 Analysis API 在 271 版本下的 API 废弃与编译器警告
@@ -140,8 +156,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
                 topic="com.intellij.xdebugger.XDebuggerManagerListener"/>
     </projectListeners>
     <extensions defaultExtensionNs="com.intellij">
-      <lang.directNavigationProvider implementation="org.jetbrains.android.AndroidResourceNavigation"/>
-      <lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.ComposeSuppressor"/>
+      <lang.directNavigationProvider implementation="org.jetbrains.android.navigation.AndroidResourceNavigation"/>
+      <lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.compose.ComposeSuppressor"/>
       <debugger.fieldVisibilityProvider implementation="org.jetbrains.android.debug.AndroidFieldVisibilityProvider"/>
     </extensions>
   </idea-plugin>

@@ -16,8 +16,8 @@
               topic="com.intellij.xdebugger.XDebuggerManagerListener"/>
   </projectListeners>
   <extensions defaultExtensionNs="com.intellij">
-    <lang.directNavigationProvider implementation="org.jetbrains.android.AndroidResourceNavigation"/>
-    <lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.ComposeSuppressor"/>
+    <lang.directNavigationProvider implementation="org.jetbrains.android.navigation.AndroidResourceNavigation"/>
+    <lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.compose.ComposeSuppressor"/>
     <debugger.fieldVisibilityProvider implementation="org.jetbrains.android.debug.AndroidFieldVisibilityProvider"/>
   </extensions>
 </idea-plugin>

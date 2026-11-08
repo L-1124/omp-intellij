@@ -1,8 +1,9 @@
-package org.jetbrains.android;
+package org.jetbrains.android.xml;
 
 import com.intellij.psi.xml.XmlAttribute;
+import org.jetbrains.android.context.AndroidContext;
 
-final class AndroidXml {
+public final class AndroidXml {
     private AndroidXml() {
     }
 
@@ -14,7 +15,7 @@ final class AndroidXml {
         return null;
     }
 
-    static String value(XmlAttribute attribute) {
+    public static String value(XmlAttribute attribute) {
         if (attribute == null || attribute.getValueElement() == null) return null;
         for (var child = attribute.getValueElement().getFirstChild(); child != null; child = child.getNextSibling()) {
             // General entities can resolve external DTDs; structural queries never resolve them.

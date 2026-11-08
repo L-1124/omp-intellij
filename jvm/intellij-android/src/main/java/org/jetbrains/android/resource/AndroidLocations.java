@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.resource;
 
 import com.jetbrains.lsp.protocol.Location;
 import com.jetbrains.lsp.protocol.Range;
@@ -8,7 +8,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.file.Path;
 
-final class AndroidLocations {
+public final class AndroidLocations {
     private static final MethodHandle CONSTRUCTOR;
     private static final MethodHandle URI;
 
@@ -37,7 +37,7 @@ final class AndroidLocations {
         }
     }
 
-    static Path path(Location location) {
+    public static Path path(Location location) {
         try {
             return Path.of(java.net.URI.create((String) URI.invokeExact(location)));
         } catch (RuntimeException | Error error) {

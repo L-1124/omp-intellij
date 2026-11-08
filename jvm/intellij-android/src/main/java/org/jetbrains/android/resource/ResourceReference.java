@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.resource;
 
 import com.jetbrains.lsp.protocol.Range;
 

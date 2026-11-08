@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.context;
 
 import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil;
 import com.intellij.openapi.module.Module;
@@ -14,7 +14,9 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.xml.XmlFile;
-
+import org.jetbrains.android.resource.AndroidFolders;
+import org.jetbrains.android.resource.AndroidLayout;
+import org.jetbrains.android.resource.AndroidSources;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;

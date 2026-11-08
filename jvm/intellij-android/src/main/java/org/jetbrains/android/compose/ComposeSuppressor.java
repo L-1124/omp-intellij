@@ -1,4 +1,4 @@
-package org.jetbrains.android;
+package org.jetbrains.android.compose;
 
 import com.intellij.codeInspection.InspectionSuppressor;
 import com.intellij.codeInspection.LanguageInspectionSuppressors;
