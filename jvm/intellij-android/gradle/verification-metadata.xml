@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<verification-metadata xmlns="https://schema.gradle.org/dependency-verification" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://schema.gradle.org/dependency-verification https://schema.gradle.org/dependency-verification/dependency-verification-9.8.0.xsd">
+   <configuration>
+      <verify-metadata>true</verify-metadata>
+      <verify-signatures>false</verify-signatures>
+   </configuration>
+   <components>
+      <component group="com.android.tools.adblib" name="adblib" version="9.4.1">
+         <artifact name="adblib-9.4.1.jar">
+            <sha256 value="ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="adblib-9.4.1.pom">
+            <sha256 value="1c5d4ed7506d37f59fe68148d82399a0adbe391d5fde252baea1a8ff7fc9343a" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="com.android.tools.adblib" name="adblib-tools" version="9.4.1">
+         <artifact name="adblib-tools-9.4.1.jar">
+            <sha256 value="2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="adblib-tools-9.4.1.pom">
+            <sha256 value="66a8f669bcef45c523b85d583d3390bba21849f2eb9120dee3c801ed285bd93e" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="junit" name="junit" version="4.13.2">
+         <artifact name="junit-4.13.2.jar">
+            <sha256 value="8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3" origin="Official Maven Central"/>
+         </artifact>
+         <artifact name="junit-4.13.2.pom">
+            <sha256 value="569b6977ee4603c965c1c46c3058fa6e969291b0160eb6964dd092cd89eadd94" origin="Official Maven Central"/>
+         </artifact>
+      </component>
+      <component group="org.hamcrest" name="hamcrest-core" version="1.3">
+         <artifact name="hamcrest-core-1.3.jar">
+            <sha256 value="66fdef91e9739348df7a096aa384a5685f4e875584cce89386a7a47251c4d8e9" origin="Official Maven Central"/>
+         </artifact>
+         <artifact name="hamcrest-core-1.3.pom">
+            <sha256 value="fde386a7905173a1b103de6ab820727584b50d0e32282e2797787c20a64ffa93" origin="Official Maven Central"/>
+         </artifact>
+      </component>
+      <component group="org.hamcrest" name="hamcrest-parent" version="1.3">
+         <artifact name="hamcrest-parent-1.3.pom">
+            <sha256 value="6d535f94efb663bdb682c9f27a50335394688009642ba7a9677504bc1be4129b" origin="Official Maven Central"/>
+         </artifact>
+      </component>
+   </components>
+</verification-metadata>

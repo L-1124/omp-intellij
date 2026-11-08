@@ -1,0 +1,48 @@
+package org.jetbrains.android;
+
+import com.intellij.lang.xml.XMLLanguage;
+import com.jetbrains.ls.api.features.LanguageServerExtension;
+import com.jetbrains.ls.api.features.language.LSConfigurationPiece;
+import com.jetbrains.ls.api.features.language.LSLanguage;
+
+import org.jetbrains.android.debug.AndroidDebugCommands;
+import java.util.List;
+
+public final class AndroidExtension implements LanguageServerExtension {
+    static final LSLanguage XML = new LSLanguage("xml", XMLLanguage.INSTANCE, List.of("xml"));
+
+    @Override
+    public LSConfigurationPiece getConfiguration() {
+        com.intellij.openapi.diagnostic.Logger.getInstance(AndroidExtension.class).info("OMP Android providers loaded for ILS 271.2085.0");
+        try {
+            // Disable batch evaluation so Android VM doesn't attempt to load BatchEvaluatorServer.class
+            com.intellij.openapi.util.registry.Registry.get("debugger.batch.evaluation").setValue(false);
+            com.intellij.openapi.util.registry.Registry.get("debugger.batch.evaluation.force").setValue(false);
+            
+            // Disable ToStringRenderer so Android UI objects (like MainActivity this) don't hang JDWP
+            com.intellij.debugger.settings.NodeRendererSettings rendererSettings =
+                    com.intellij.debugger.settings.NodeRendererSettings.getInstance();
+            if (rendererSettings != null && rendererSettings.getToStringRenderer() != null) {
+                rendererSettings.getToStringRenderer().setEnabled(false);
+                rendererSettings.fireRenderersChanged();
+            }
+
+            // Disable autoExpressions
+            com.intellij.xdebugger.settings.XDebuggerSettingsManager settingsManager =
+                    com.intellij.xdebugger.settings.XDebuggerSettingsManager.getInstance();
+            if (settingsManager != null && settingsManager.getDataViewSettings() != null) {
+                settingsManager.getDataViewSettings().setAutoExpressions(false);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        var plugin = ((com.intellij.ide.plugins.cl.PluginAwareClassLoader) AndroidExtension.class.getClassLoader()).getPluginDescriptor();
+        if (!(plugin instanceof com.intellij.ide.plugins.PluginMainDescriptor descriptor))
+            throw new IllegalStateException("Android extension plugin descriptor unavailable");
+        return new LSConfigurationPiece(
+                List.of(new AndroidDocumentSymbols(XML), new AndroidReferencesProvider(), new AndroidDefinitionProvider(), new ComposeSuppressor.Entry(), new AndroidDebugCommands()),
+                List.of(descriptor),
+                List.of()
+        );
+    }
+}

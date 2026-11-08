@@ -1,0 +1,23 @@
+<idea-plugin>
+  <id>org.jetbrains.android</id>
+  <name>Android</name>
+  <version>2026.1107.0</version>
+  <vendor>L-1124</vendor>
+  <idea-version since-build="271"/>
+  <depends>org.jetbrains.ls.core</depends>
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.java</depends>
+  <depends>org.jetbrains.ls.plugin.kotlin</depends>
+  <depends>org.jetbrains.ls.feature.xml</depends>
+  <projectListeners>
+    <listener class="org.jetbrains.android.debug.AndroidDebuggerListener"
+              topic="com.intellij.debugger.impl.DebuggerManagerListener"/>
+    <listener class="org.jetbrains.android.debug.AndroidDebuggerListener"
+              topic="com.intellij.xdebugger.XDebuggerManagerListener"/>
+  </projectListeners>
+  <extensions defaultExtensionNs="com.intellij">
+    <lang.directNavigationProvider implementation="org.jetbrains.android.AndroidResourceNavigation"/>
+    <lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.ComposeSuppressor"/>
+    <debugger.fieldVisibilityProvider implementation="org.jetbrains.android.debug.AndroidFieldVisibilityProvider"/>
+  </extensions>
+</idea-plugin>

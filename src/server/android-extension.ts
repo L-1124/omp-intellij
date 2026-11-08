@@ -1,9 +1,18 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const EXTENSION_SERVER_VERSION = '271.2085.0';
+const EXTENSION_ASSETS = [
+  'intellij-android.jar',
+  'adblib-9.4.1.jar',
+  'adblib-tools-9.4.1.jar',
+] as const;
+const UPSTREAM_SHA256: Readonly<Record<string, string>> = {
+  'adblib-9.4.1.jar': 'ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9',
+  'adblib-tools-9.4.1.jar': '2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c',
+};
 
 export interface AndroidExtensionResolution {
   pluginPath?: string;
@@ -49,9 +58,7 @@ export async function resolveAndroidExtension(
     };
   const directory = process.env.OMP_ANDROID_LS_EXTENSION_DIR
     ? resolve(process.env.OMP_ANDROID_LS_EXTENSION_DIR)
-    : fileURLToPath(
-        new URL(`../../resources/ils/${version}/android-ls-extension`, import.meta.url),
-      );
+    : fileURLToPath(new URL(`../../resources/ils/${version}/intellij-android`, import.meta.url));
   try {
     if (hasInvalidOptionChars(directory, false))
       return {
@@ -66,46 +73,50 @@ export async function resolveAndroidExtension(
       manifest.serverVersion !== version ||
       !('classFileVersion' in manifest) ||
       manifest.classFileVersion !== 69 ||
+      !('targetJavaVersion' in manifest) ||
+      manifest.targetJavaVersion !== 25 ||
       !('assets' in manifest) ||
       !Array.isArray(manifest.assets) ||
-      manifest.assets.length !== 1
+      manifest.assets.length !== EXTENSION_ASSETS.length
     )
       return { reason: 'Android extension manifest version or ABI mismatch' };
-    const asset = manifest.assets[0] as Record<string, unknown>;
-    if (
-      !asset ||
-      typeof asset !== 'object' ||
-      asset.name !== 'android-ls-extension.jar' ||
-      asset.path !== 'lib/android-ls-extension.jar' ||
-      typeof asset.sha256 !== 'string' ||
-      !/^[a-f0-9]{64}$/i.test(asset.sha256) ||
-      typeof asset.size !== 'number' ||
-      asset.size <= 0
-    )
-      return { reason: 'Invalid Android extension asset manifest' };
+    const remaining = new Set<string>(EXTENSION_ASSETS);
+    const files = await readdir(join(directory, 'lib'));
+    const expectedFiles = new Set(EXTENSION_ASSETS.flatMap((name) => [name, `${name}.sha256`]));
+    if (files.length !== expectedFiles.size || files.some((name) => !expectedFiles.has(name)))
+      return { reason: 'Android extension library files do not match the asset set' };
 
-    const resolvedJarPath = resolve(directory, String(asset.path));
-    const rel = relative(directory, resolvedJarPath);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
-      return { reason: 'Asset path escapes extension directory' };
-    }
+    for (const asset of manifest.assets) {
+      if (
+        !asset ||
+        typeof asset !== 'object' ||
+        typeof asset.name !== 'string' ||
+        !remaining.delete(asset.name) ||
+        asset.path !== `lib/${asset.name}` ||
+        typeof asset.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/i.test(asset.sha256) ||
+        !Number.isSafeInteger(asset.size) ||
+        asset.size <= 0
+      )
+        return { reason: 'Invalid Android extension asset manifest' };
 
-    const bytes = await readFile(resolvedJarPath);
-    const actualSha = createHash('sha256').update(bytes).digest('hex');
-    if (asset.size !== bytes.length || actualSha !== asset.sha256.toLowerCase())
-      return { reason: 'Android extension asset SHA-256 mismatch' };
+      const resolvedJarPath = resolve(directory, asset.path);
+      const rel = relative(directory, resolvedJarPath);
+      if (rel.startsWith('..') || isAbsolute(rel))
+        return { reason: 'Asset path escapes extension directory' };
 
-    const companionShaPath = join(directory, 'lib', 'android-ls-extension.jar.sha256');
-    try {
-      const shaFileContent = (await readFile(companionShaPath, 'utf8')).trim();
-      const match = /^([a-f0-9]{64})/i.exec(shaFileContent);
-      if (match && match[1].toLowerCase() !== actualSha) {
-        return { reason: 'Android extension asset companion SHA-256 mismatch' };
-      }
-    } catch (err: unknown) {
-      if (err && typeof err === 'object' && 'code' in err && err.code !== 'ENOENT') {
-        throw err;
-      }
+      const bytes = await readFile(resolvedJarPath);
+      const actualSha = createHash('sha256').update(bytes).digest('hex');
+      if (asset.size !== bytes.length || actualSha !== asset.sha256.toLowerCase())
+        return { reason: `Android extension asset SHA-256 mismatch: ${asset.name}` };
+      const upstreamSha = UPSTREAM_SHA256[asset.name];
+      if (upstreamSha && actualSha !== upstreamSha)
+        return { reason: `Android extension upstream SHA-256 mismatch: ${asset.name}` };
+
+      const content = (await readFile(`${resolvedJarPath}.sha256`, 'utf8')).trim();
+      const match = /^([a-f0-9]{64})(?:\s+\*?([^\s]+))?$/i.exec(content);
+      if (!match || match[1].toLowerCase() !== actualSha || (match[2] && match[2] !== asset.name))
+        return { reason: `Android extension asset companion SHA-256 mismatch: ${asset.name}` };
     }
 
     return { pluginPath: directory };

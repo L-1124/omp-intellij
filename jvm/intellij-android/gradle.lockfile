@@ -1,0 +1,9 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+# To regenerate this file, run: ./gradlew :dependencies --write-locks
+com.android.tools.adblib:adblib-tools:9.4.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.android.tools.adblib:adblib:9.4.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+junit:junit:4.13.2=testCompileClasspath,testRuntimeClasspath
+org.hamcrest:hamcrest-core:1.3=testCompileClasspath,testRuntimeClasspath
+empty=annotationProcessor,testAnnotationProcessor

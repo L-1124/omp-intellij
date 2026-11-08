@@ -289,9 +289,7 @@ test('Android XML symbols and manifest references integration', {
 }, async (t) => {
   const prereqs = await verifyPrerequisites();
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve(
-    'resources/ils/271.2085.0/android-ls-extension',
-  );
+  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/intellij-android');
   let projectDir = '';
   let driver: LspClientDriver | null = null;
   let flatDriver: LspClientDriver | null = null;

@@ -1,0 +1,31 @@
+{
+  "serverVersion": "271.2085.0",
+  "extensionId": "org.jetbrains.android",
+  "buildTimestamp": "2026-01-01T00:00:00Z",
+  "targetJavaVersion": 25,
+  "classFileVersion": 69,
+  "toolchain": {
+    "javacVersion": "javac 25",
+    "jarVersion": "Gradle 9.8.0"
+  },
+  "assets": [
+    {
+      "name": "intellij-android.jar",
+      "path": "lib/intellij-android.jar",
+      "sha256": "58da5a12e726661bd1c15acc7f3b16789b5b377e3d5cedb187ad14a470dc9c08",
+      "size": 302805
+    },
+    {
+      "name": "adblib-9.4.1.jar",
+      "path": "lib/adblib-9.4.1.jar",
+      "sha256": "ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9",
+      "size": 1802136
+    },
+    {
+      "name": "adblib-tools-9.4.1.jar",
+      "path": "lib/adblib-tools-9.4.1.jar",
+      "sha256": "2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c",
+      "size": 2009058
+    }
+  ]
+}
