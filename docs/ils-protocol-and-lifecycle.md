@@ -18,17 +18,16 @@
    - 插件版本号采用日期规范（CalVer，如 `YYYY.M.D` 或 `YYYY.MMDD.PATCH`），消除 SemVer 在语言服务封装层中 Major/Minor/Patch 边界模糊的问题，同时严格遵守 npm 禁止版本号数字段包含前导零的规则。
    - 通过 `--sync-marketplace` 工具自动化提取上游 VSIX 中的 `activationEvents`（生成 `rootMarkers`）与配置默认项，同步维护 `.omp-plugin/marketplace.json`。
 
-5. **`intellijExtensions` 开启与 ModCommand QuickFix 完整性**：
-   - JetBrains 服务端在将 `ModCommand`（模型驱动指令）转换为 LSP `CodeAction` 时，如果客户端在 `initialize` 的 `initializationOptions` 中缺少 `intellijExtensions: true` 与 `lazyIntentions: true`，服务端会将交互型指令（如 `RenameFix`、代码重构、剪贴板操作）置为 `null`，导致关键修复在前端彻底丢失。开启该扩展后，服务端正常下发 `intellij/runEditorCommand {"command": "editor.action.rename"}`。
+5. **Agent 优先的 QuickFix 边界**：
+   - 标准重命名、文件重命名和 CodeAction 应用复用 OMP 原生 `lsp`。Bridge 仅保留工程身份、状态与索引屏障、Android 协议适配；私有交互交给宿主，不增加第二套编辑引擎、补全弹窗或系统剪贴板操作。动作列表和 RPC 成功均不能证明交互式重构全部完成。
 
 6. **MCP 工具动态发现机制替代客户端硬编码**：
    - 服务端通过 `executeCommandProvider.commands` 暴露 `list-mcp-tools` 与 `run-mcp-tool`。通过发送 `{"command":"list-mcp-tools","arguments":[]}` 可动态拉取当前项目可用的 22 项 MCP 工具定义及其完整的 `inputSchema`。
    - 工具调用必须封装为 `{"command":"run-mcp-tool","arguments":[{"tool":"<tool_name>","arguments":{...}}]}`，严禁传错参数结构（缺少外层包装对象会触发服务端 `-32602` 参数校验异常）。能力广告不等于可用性证明，未构建或缺少模块元数据时部分工具（如 `list_directory_tree`）会返回执行错误。
 
-7. **同进程内嵌官方 Android Lint 架构**：
-   - 彻底摒弃外部每次调用 `cmdline-tools/bin/lint` 的冷启动方案（外部独立 JVM 启动耗时 5–15 秒，在保存/输入时无法交互）。
-   - 将官方 Lint 核心精简为 6 个核心依赖 JAR（共 11.36 MB，较初始 43.94 MB 缩减 74.1%），直接挂载在 ILS 的 `LSDiagnosticProvider` 扩展点上，复用内存中的未保存 PSI 与 K2 FIR UAST，单次诊断耗时收敛至 6 ms – 39 ms。
-   - 明确规则分离：系统内置规则（如 `NewApi`）由 `tools.lint-checks.jar` 提供，现代 Jetpack Compose 规则由 AAR Transform 目录下的 `lint.jar` 提供，二者通过 `CompositeIssueRegistry` 合并加载。
+7. **同进程 Android Lint 研究边界**：
+   - 历史探针研究了 6 个核心依赖 JAR 与 `LSDiagnosticProvider` 集成，并记录 MyHook 增量诊断耗时；该研究不等于当前 271 生产资产已集成 Lint。
+   - 当前发布清单为 Android 扩展及两个 adblib JAR。下方 Lint 依赖和时延保留为历史研究证据，生产集成仍按 `plan.md` 阶段 H 单独验收，不属于本次工程治理 TODO 的交付范围。
 
 ---
 
@@ -37,6 +36,7 @@
 ### 1. `server.port` 三行格式解析异常导致虚假启动超时
 
 #### 问题现象
+
 在将默认服务升级至 `271.2085.0` 后，运行集成测试或通过命令行启动服务时，服务端日志明确显示已在 1.2 秒内就绪并写入端口：
 ```text
 2026-11-04 22:55:26,885 [ 5] INFO - #c.i.l.s.PortFile - Published server port 59375 to C:\Users\...\AppData\Local\Temp\omp-server\server.port
@@ -48,16 +48,20 @@ Error: Timed out waiting for server to start at endpoint 127.0.0.1:NaN
 ```
 
 #### 根因排查
+
 - 检查 `server.port` 文件内容：
   - 历史版本 `263.7084.0` 内容为：`59375\n`
   - 新版本 `271.2085.0` 内容变更为三行：
+
     ```text
     59375
     18420
     ILS-271.2085.0
     ```
+
     第 1 行为 TCP 监听端口，第 2 行为服务端进程 PID，第 3 行为 ILS 内部构建号。
 - 旧版代码读取逻辑：
+
   ```ts
   const text = (await readFile(portFile, 'utf8')).trim();
   const port = Number(text); // 当 text 为 "59375\n18420\nILS-271.2085.0" 时，Number() 结果为 NaN
@@ -65,6 +69,7 @@ Error: Timed out waiting for server to start at endpoint 127.0.0.1:NaN
 - 由于 `Number("59375\n18420\nILS-271.2085.0") === NaN`，导致 `isPortListening` 和 `endpoint` 校验全部失败，客户端在端口轮询死循环中直到超时退出。
 
 #### 解决方案与实测对比
+
 在 `src/server/service.ts` 引入专用解析函数 `parsePortFile`，仅提取首行并严格做整数范围校验：
 ```ts
 export function parsePortFile(text: string): number | null {
@@ -85,6 +90,7 @@ export function parsePortFile(text: string): number | null {
 ### 2. Open VSX 归档缓冲区截断与动态版本探测脆弱性
 
 #### 问题现象
+
 在旧逻辑中调用 `latestServerVersion()` 时，经常随机抛出流异常：
 ```text
 Error: Response exceeds maximum allowed size of 4194304 bytes
@@ -93,12 +99,15 @@ Error: Response exceeds maximum allowed size of 4194304 bytes
 或者因网络环境受限抛出 `AbortError: The operation was aborted due to timeout (10000ms)`，导致版本探测静默回退到过期的 GitHub Lua 脚本，拉取到旧版本构建。
 
 #### 根因排查
+
 1. **体积超限**：Open VSX 上分发的 `JetBrains.intellij-server-*.vsix` 实际是一个包含了完整内嵌运行时的 ZIP 归档，解包前的 VSIX 压缩包体积已达约 13.5 MB。旧逻辑设置的 `4 * 1024 * 1024`（4 MB）硬上限必然发生流截断。
 2. **下载耗时**：跨地域下载 13.5 MB 文件在弱网环境下通常需要 15–30 秒，默认的 10 秒超时必然被触发。
 3. **架构隐患**：在用户运行时执行远程动态解析存在致命脆弱性：如果国内网络无法访问 GitHub Raw，或者系统缺失 `unzip`/`tar` 命令，就会导致安装失败；同时自动拉取未经本地适配验证的最新构建，极易因上游协议变更破坏现有稳定性。
 
 #### 解决方案与实测对比
+
 1. **扩大缓冲区与超时配置**：
+
    ```ts
    const VSX_ARTIFACT_MAX_BYTES = 32 * 1024 * 1024; // 32 MB
    const VSX_ARTIFACT_TIMEOUT_MS = 120_000;         // 120 秒
@@ -110,6 +119,7 @@ Error: Response exceeds maximum allowed size of 4194304 bytes
 ### 3. 资产分发文本通道损坏二进制 JAR 文件
 
 #### 问题现象
+
 当引入自研的 `intellij-android.jar` 以及 6 个官方 Lint 依赖库（合计约 11.36 MB）到插件资产目录后，客户端解包启动服务时报 Java 类加载错误：
 ```text
 java.util.zip.ZipException: zip END header not found
@@ -119,7 +129,9 @@ java.util.zip.ZipException: zip END header not found
 或者在校验 SHA-256 时发现文件哈希与官方源文件完全不符。
 
 #### 根因排查
+
 - 排查 `src/plugin.ts` 的资产同步逻辑：
+
   ```ts
   // 错误的历史逻辑：所有资产均当做文本读写
   const content = await readFile(srcPath, 'utf8');
@@ -129,6 +141,7 @@ java.util.zip.ZipException: zip END header not found
 - Node.js 在以 `'utf8'` 读取二进制文件（JAR/ZIP）时，会将所有不符合 UTF-8 规范的字节序列替换为 Unicode 替换字符 `U+FFFD`（三字节 `EF BF BD`），彻底破坏了 ZIP 文件的魔数、中央目录（Central Directory）及压缩数据体。
 
 #### 解决方案与实测对比
+
 在 `src/plugin.ts` 中实现资产读写与校验的双通道：
 ```ts
 // 区分文本资产与二进制资产
@@ -157,35 +170,25 @@ if (isBinaryAsset) {
 ### 4. 缺少 `intellijExtensions` 导致 ModCommand QuickFix 丢失
 
 #### 问题现象
+
 在针对 Java / Kotlin 代码的语法错误或代码异味请求 `textDocument/codeAction` 时，客户端能拿到编译器警告，但原本应该出现的交互式修复（例如类名重命名 `RenameFix`、构造函数生成、导入调整）完全不出现，`codeActions` 列表为空或仅包含无操作意图项。
 
 #### 根因排查
+
 - 查看服务端日志和反编译类：`com.jetbrains.ls.api.features.impl.common.extract.LSExtractModCommandProviderBase`。
 - JetBrains 自定义了一套基于 `ModCommand` 的动作执行流。当服务端将 `ModCommand` 转换为 LSP 标准 CodeAction 时，会检查初始化选项：
   - 若客户端未显式声明 `intellijExtensions: true` 与 `lazyIntentions: true`，服务端判定客户端“不具备处理 JetBrains 私有交互动作的能力”，因此在转换时将交互型操作直接赋值为 `null` 并从最终结果集中静默剔除。
 
-#### 解决方案与实测对比
-在 `src/bridge.ts` 与 `.omp-plugin/marketplace.json` 的 `initOptions` 中明确开启协议扩展支持：
-```json
-"initOptions": {
-  "intellijExtensions": true,
-  "lazyIntentions": true,
-  "runMainCodeLens": true
-}
-```
-开启后，服务端下发的 CodeAction 携带自定义执行指令：
-```json
-{
-  "title": "Rename file to MainActivity.kt",
-  "kind": "quickfix",
-  "command": {
-    "title": "applyModCommand",
-    "command": "applyModCommand",
-    "arguments": [...]
-  }
-}
-```
-当客户端触发该 action 时，服务端会通过 `intellij/runEditorCommand` 协议下发具体编辑器指令（如 `{"command": "editor.action.rename"}`），Bridge 层无需针对特定类名设置黑名单过滤。
+#### 当前实现与验收要求
+
+标准 `workspace/applyEdit` 经 Bridge 原样交给 OMP 宿主；文件编辑、版本核验、资源操作和原生重构由宿主负责。插件不再提供独立 `actions/apply`、事务文件写入器或 Snippet 解析器。
+
+- `snippetEditSupport` 等能力只保留宿主真实声明，Bridge 不强制补齐；只读 runner 不广告编辑能力，收到编辑请求明确拒绝。
+- `showConflicts`、`chooseAction`、`runEditorCommand`、`copyToClipboard` 与普通 LSP 消息一样透明转发，不在 Bridge 内建立第二套命令分派、交互策略或 UI。
+- 私有交互能否执行由 OMP 宿主决定；宿主未实现的请求按 JSON-RPC 返回不支持，通知不保证存在消费者。插件不会代填名称、选择方案、继续冲突或写入剪贴板。
+- 只读 runner 仅处理查询所需的配置、进度等反向请求，其他请求明确返回 `MethodNotFound`；它不用于应用代码动作。
+
+用户确认采用 Agent 优先、默认透明转发的边界；完整编辑器交互不属于插件验收范围。需要交互的动作应通过原生工具显式决策，不能仅凭动作列表或命令 RPC 成功宣称重构完成。
 
 ---
 
@@ -195,14 +198,14 @@ if (isBinaryAsset) {
 
 ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂校验，所有平台包元数据锁定在 `src/server/bundle-metadata.ts` 中：
 
-| 操作系统 | 架构 | 归档格式 | 字节大小 (Bytes) | SHA-256 校验和 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Darwin (macOS)** | arm64 | `.sit` | 385,899,733 | `0b8022627f20cdbe52508afbd5dcb3a6e18afc170fb84d8f70d92ad87b815a78` |
-| **Darwin (macOS)** | x64 | `.sit` | 387,873,566 | `860e9ab04b99640790112a96de7f7df024b28bf3d6b573e5102a1a627b8e4a8e` |
-| **Linux** | arm64 | `.tar.gz` | 394,206,359 | `ba6d0831043c197edede20518e3137974bc53838ef6601e71c23ff785070fc34` |
-| **Linux** | x64 | `.tar.gz` | 395,255,755 | `fb4fbac78a5043ce568e8b93ec57a1c40c4ba8136db68139d8813d7de3a4f7e4` |
-| **Windows** | arm64 | `.win.zip` | 368,571,128 | `b8cab4d3e30849440fe4d318c352981012ffb9b3895b2ceda1f73e430407274f` |
-| **Windows** | x64 | `.win.zip` | 389,022,064 | `9ab4ecd982a8abdfaa1fff1bcdd4246db2d071653168c78555a5869271ee3f9f` |
+| 操作系统           | 架构  | 归档格式   | 字节大小 (Bytes) | SHA-256 校验和                                                     |
+| :----------------- | :---- | :--------- | :--------------- | :----------------------------------------------------------------- |
+| **Darwin (macOS)** | arm64 | `.sit`     | 385,899,733      | `0b8022627f20cdbe52508afbd5dcb3a6e18afc170fb84d8f70d92ad87b815a78` |
+| **Darwin (macOS)** | x64   | `.sit`     | 387,873,566      | `860e9ab04b99640790112a96de7f7df024b28bf3d6b573e5102a1a627b8e4a8e` |
+| **Linux**          | arm64 | `.tar.gz`  | 394,206,359      | `ba6d0831043c197edede20518e3137974bc53838ef6601e71c23ff785070fc34` |
+| **Linux**          | x64   | `.tar.gz`  | 395,255,755      | `fb4fbac78a5043ce568e8b93ec57a1c40c4ba8136db68139d8813d7de3a4f7e4` |
+| **Windows**        | arm64 | `.win.zip` | 368,571,128      | `b8cab4d3e30849440fe4d318c352981012ffb9b3895b2ceda1f73e430407274f` |
+| **Windows**        | x64   | `.win.zip` | 389,022,064      | `9ab4ecd982a8abdfaa1fff1bcdd4246db2d071653168c78555a5869271ee3f9f` |
 
 - **下载基准 URL**：`https://download.jetbrains.com/language-server/intellij-server/271.2085.0/intellij-server-271.2085.0[suffix].[ext]`
 - **校验流程**：下载前检查本地缓存文件的字节数与 SHA-256；下载后使用流式 `crypto.createHash('sha256')` 计算哈希，不匹配立即删除临时文件并报错，严禁解压损坏文件。
@@ -214,6 +217,7 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 服务端通过 `ServerCapabilities.executeCommandProvider.commands` 暴露 MCP（Model Context Protocol）能力：
 
 #### ① 协议发现与指令注册
+
 在握手阶段，服务端声明具备以下命令：
 ```json
 "executeCommandProvider": {
@@ -228,8 +232,10 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 ```
 
 #### ② 工具清单发现 (`list-mcp-tools`)
+
 客户端通过发送原生 LSP 请求获取完整工具集：
 - **请求格式**：
+
   ```json
   {
     "method": "workspace/executeCommand",
@@ -248,8 +254,10 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
   - `rename_refactoring`：代码符号重命名重构。
 
 #### ③ 工具调用规范与参数格式 (`run-mcp-tool`)
+
 调用具体 MCP 工具时必须遵循严格的外层包装结构：
 - **正确调用参数**：
+
   ```json
   {
     "method": "workspace/executeCommand",
@@ -277,21 +285,23 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 
 ### 3. 内嵌官方 Android Lint 依赖与规则架构
 
-为了消除外部命令行进程的冷启动开销，将官方 Android Lint 作为库内嵌至 ILS 运行时进程中。
+以下为历史内嵌 Lint 探针的依赖和设计记录；当前生产发布是否包含该能力，以阶段 H 实现和对应版本验收为准。
 
 #### ① 6 个核心依赖 JAR 清单（总计 11.36 MB / 11,362,788 字节）
+
 从 Android SDK `cmdline-tools;23.0`（或 Google Maven）提取并锁定：
 
-| 序号 | JAR 名称 | SDK 相对路径 | 字节大小 | SHA-256 摘要 | 运行时职责 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | `tools.lint-checks.jar` | `lib/lint/tools.lint-checks.jar` | 7,256,470 | `61e6b0a90d6fe8a5ac5d4d8519fb1134fd064fbba12525dcfc08ce4b43ffd0ae` | 官方内置检查器集合与 `BuiltinIssueRegistry`（包含 `ApiDetector` 等） |
-| 2 | `tools.sdklib.jar` | `lib/sdklib/tools.sdklib.jar` | 1,909,475 | `d0bbe0e03155a7bdd9bac03567b6b26797f81a778f55d5eadc3e71e7a0a27434` | Android SDK 平台定义、API 级别推断 (`SdkVersionInfo`, `AndroidVersion`) |
-| 3 | `tools.lint-api.jar` | `lib/lint/tools.lint-api.jar` | 1,417,813 | `e6a6e0244b5a9a325580c0a8901b94e1a8b37e0cca7030f5fcb06186f7f46b61` | Lint 核心调度器 `LintDriver`、客户端基类 `LintClient`、`DefaultUastParser` |
-| 4 | `tools.common.jar` | `lib/common/tools.common.jar` | 570,290 | `ed2fea24fd74c82cac6ca964b8a3f5b33f7aa8f675bd6fb51ee78772f49995f2` | 基础工具类、安全 XML 解析器 `PositionXmlParser`、资源路径类型 |
-| 5 | `kxml2-2.3.0.jar` | `lib/external/.../kxml2-2.3.0.jar` | 43,858 | `f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2` | `ApiLookup` 解析 `platforms/android-xx/data/api-versions.xml` 必需的 XML 解析器 |
-| 6 | `tools.lint-model.jar` | `lib/lint/tools.lint-model.jar` | 164,882 | `81ac1f03f390f0aa8308d389a8bbe4238f9bd843ff705556f68564f6ee257cf1` | 构建变体依赖模型，支撑 `DefaultJavaEvaluator.getDependencies()` 与库版本检测 |
+| 序号 | JAR 名称                | SDK 相对路径                       | 字节大小  | SHA-256 摘要                                                       | 运行时职责                                                                      |
+| :--- | :---------------------- | :--------------------------------- | :-------- | :----------------------------------------------------------------- | :------------------------------------------------------------------------------ |
+| 1    | `tools.lint-checks.jar` | `lib/lint/tools.lint-checks.jar`   | 7,256,470 | `61e6b0a90d6fe8a5ac5d4d8519fb1134fd064fbba12525dcfc08ce4b43ffd0ae` | 官方内置检查器集合与 `BuiltinIssueRegistry`（包含 `ApiDetector` 等）            |
+| 2    | `tools.sdklib.jar`      | `lib/sdklib/tools.sdklib.jar`      | 1,909,475 | `d0bbe0e03155a7bdd9bac03567b6b26797f81a778f55d5eadc3e71e7a0a27434` | Android SDK 平台定义、API 级别推断 (`SdkVersionInfo`, `AndroidVersion`)         |
+| 3    | `tools.lint-api.jar`    | `lib/lint/tools.lint-api.jar`      | 1,417,813 | `e6a6e0244b5a9a325580c0a8901b94e1a8b37e0cca7030f5fcb06186f7f46b61` | Lint 核心调度器 `LintDriver`、客户端基类 `LintClient`、`DefaultUastParser`      |
+| 4    | `tools.common.jar`      | `lib/common/tools.common.jar`      | 570,290   | `ed2fea24fd74c82cac6ca964b8a3f5b33f7aa8f675bd6fb51ee78772f49995f2` | 基础工具类、安全 XML 解析器 `PositionXmlParser`、资源路径类型                   |
+| 5    | `kxml2-2.3.0.jar`       | `lib/external/.../kxml2-2.3.0.jar` | 43,858    | `f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2` | `ApiLookup` 解析 `platforms/android-xx/data/api-versions.xml` 必需的 XML 解析器 |
+| 6    | `tools.lint-model.jar`  | `lib/lint/tools.lint-model.jar`    | 164,882   | `81ac1f03f390f0aa8308d389a8bbe4238f9bd843ff705556f68564f6ee257cf1` | 构建变体依赖模型，支撑 `DefaultJavaEvaluator.getDependencies()` 与库版本检测    |
 
 #### ② 架构拓扑与规则聚合
+
 ```text
                              LSP textDocument/diagnostic
                                          │
@@ -332,35 +342,40 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 
 ### 1. 服务端元数据离线维护与同步
 
-当需要跟踪 JetBrains 上游发布的新版 `intellij-server` 或同步 VS Code 扩展配置时，使用维护脚本统一执行：
+维护工具复用 `src/server/bundle-metadata.ts` 中的服务端版本、VSIX 版本和平台哈希。VSIX `1.0.86` 对应 ILS `271.2085.0`；两个版本体系分别校验，配置同步不请求 Open VSX 的 `latest`。
 
 ```bash
-# 1. 检查远端是否有新版本（仅比对元数据，不修改本地文件）
-npm run update-bundle -- --version latest --check
+# 检查当前锁定版本、配置与 JVM 资产，不修改文件
+npm run update-bundle -- --sync-marketplace --check
 
-# 2. 升级并固化目标版本（拉取 6 个平台的归档摘要并回写 src/server/bundle-metadata.ts）
-npm run update-bundle -- --version 271.2085.0
-
-# 3. 同步 upstream VSIX 的激活文件类型与 marker 配置到 .omp-plugin/marketplace.json
-npm run update-bundle -- --sync-marketplace
+# 显式指定升级组合；以下为当前已验证组合
+npm run update-bundle -- --version 271.2085.0 --vsix-version 1.0.86 --sync-marketplace
+npm run build:jvm
+npm run update-bundle -- --sync-marketplace --check
 ```
+
+未知服务端版本需要明确指定对应 VSIX；工具校验 VSIX 内 `server-bundle.json` 的服务端版本与平台哈希，验证成功后才写元数据。`--check` 同时验证已发布 JVM 扩展的 manifest、ABI、资产清单与摘要；更新命令不代替 JVM 构建。
 
 ### 2. 启动与端口解析的健康排查
 
 若遇到客户端连接超时，可按以下步骤排查系统状态：
 
 1. **检查临时目录下的 `server.port` 内容**：
+
    ```bash
    cat "$TEMP/omp-server/server.port"
    ```
+
    确认第一行是否为 `1–65535` 之间的合法数字，且第二行 PID 进程当前仍在运行。
 2. **验证 TCP 端口可达性**：
+
    ```bash
    # 查看指定端口是否处于 LISTENING 状态
    netstat -ano | findstr 59375
    ```
 3. **验证命令行参数转义**：
    Windows 环境下若在 `IJ_JAVA_OPTIONS` 注入 JVM 插件路径，路径中的反斜杠必须全部归一化为正斜杠：
+
    ```bash
    # 正确格式
    -Dplugin.path=F:/source/omp-intellij/resources/ils/271.2085.0/intellij-android
@@ -368,13 +383,16 @@ npm run update-bundle -- --sync-marketplace
 
 ### 3. LSP 客户端初始化参数配置推荐
 
-为了确保 LSP 3.17 规范及私有协议功能全部正常生效，连接时的 `initialize` 参数建议如下配置：
+能力声明必须与实际宿主处理器配套。Bridge 保留宿主的编辑与模板能力，仅为本项目确实处理的进度和状态补充声明；以下示例省略宿主负责的编辑能力：
 
 ```json
 {
   "processId": 1234,
   "rootUri": "file:///F:/source/MyAndroidApp",
   "capabilities": {
+    "window": {
+      "workDoneProgress": true
+    },
     "textDocument": {
       "diagnostic": {
         "dynamicRegistration": true
@@ -401,9 +419,55 @@ npm run update-bundle -- --sync-marketplace
 在打包发布前，必须执行以下测试与 dry-run 命令，确认无死重文件且二进制资产完好：
 
 ```bash
-# 1. 运行核心生命周期测试（验证 3 行格式 server.port 解析与健康检测）
-npm test -- test/lifecycle.test.ts
+# 编译并运行自动化回归
+npm test
 
-# 2. 检查 npm 打包文件列表（确认 dist/ 已被排除，resources/ 完整包含）
+# 检查发布文件清单与二进制资产
 npm pack --dry-run --json
 ```
+
+### 5. 虚拟源码与当前服务端能力
+
+虚拟源码直接使用原生 `lsp request`，无需新增工具入口或 URI 转换层：
+
+```json
+{
+  "action": "request",
+  "file": "工程中的源文件.kt",
+  "query": "workspace/executeCommand",
+  "payload": "{\"command\":\"decompile\",\"arguments\":[\"定义返回的原始 jar: 或 jrt: URI\"]}"
+}
+```
+
+MyHook 实测：`MainActivity.kt` 的 `ComponentActivity` 定义指向 Gradle 缓存中的 `classes.jar!/androidx/activity/ComponentActivity.class`，原生 `decompile` 返回 269 行 Kotlin 声明源码。内容明确标记为 stub 时，不能推断方法实现可见。读取后的分页或筛选由调用方处理，不维护插件侧跨会话缓存。
+
+读取后继续执行 `workspace/symbol("ComponentActivity")` 返回 7 个真实符号，包含相应依赖 URI；直接在该 class URI 上的 documentSymbol、hover、references 本次返回空结果。虚拟源码读取不承诺所有文件级 LSP 方法均支持反编译文档，继续追踪可使用工作区符号及原业务调用位置的语义查询。
+
+ILS `271.2085.0` 的本次实例未广告 `intellij.java.resolveLaunch` 和 `intellij.java.resolveBuildCommand`。模型检查按能力选择 `exportWorkspace`，返回实际模块、源集和 SDK；缺少运行构建接口时明确报告不支持，不伪造 classpath 或运行命令。MyHook 实测模块为 `MyHook.app.debug`，聚合根仍为工程根。
+
+### 6. 构建配置刷新
+
+Agent 修改 POM、Gradle 或 JPS 构建配置后，显式调用现有 `intellij reload`，等待模型和索引就绪后继续查询。同一批修改完成后重载一次，避免每次保存都触发昂贵导入。
+
+不增加文件扫描、配置哈希基线或语义查询前的隐式重导入。查询、构建与重载的副作用边界保持可见；失败和取消复用现有状态与索引屏障。
+
+### 7. Worktree 索引分叉实测与默认策略
+
+原生 `initializationOptions.fromWorkspace` 决定索引来源。仅当当前目录属于 linked worktree，且主工作区已有就绪账本和路径归属匹配的初始化记录时，`applyWorkspaceOptions` 自动填写记录中的原始 `rootUri`；来源不确定则冷启动。显式 `fromWorkspace`（含 `null` 禁用）优先，插件不改写 URI、不复制内部 RocksDB 文件。
+
+在隔离 JPS Git 工程上，主工作区、冷 worktree、新热 worktree 和已有热 worktree 均完成真实符号查询；分支新增方法可见，导航位置指向对应 worktree。透传原始源 URI 后，日志出现 `Forking the workspace database from ...`；再次连接已有目标索引没有再次分叉。
+
+Windows 源 URI 必须与源工作区初始化使用的 URI 一致。最初重建 URI 使用了不同盘符大小写，服务端算出了不同缓存路径并记录 `Not forking ... holds no database`；透传源会话原始 URI 后成功分叉。小型工程单次耗时受缓存和启动顺序影响，本次结果不构成普遍性能提升证明。
+
+### 8. 开发安装与运行时清理的安全边界
+
+对当前 Windows ILS 官方归档的中央目录进行只读 Range 检查：共 1235 个条目，根目录直接包含 `build.txt` 与 `bin/intellij-server.exe`。当前开发下载脚本按直铺格式验证该发行包成立；这份证据不外推为所有未来归档布局。
+
+`clean-runtime.mjs` 仍按 OMP、Node、Bun、Java 等进程名保守阻断实际删除，可能要求先关闭无关运行时。此策略保留，以避免无法证明未占用时删除运行资产；`--dry-run` 可在消费者活跃时查看候选，`.lsp.json` 和 `.dap.json` 引用的哈希目录始终受保护。
+
+### 9. 本轮验收与保留边界
+
+- `npm test`：501 项通过，无失败、取消或跳过。独立启动 Bridge 验证了握手、请求取消、继续透传与 EOF 退出。
+- 真实 MyHook 模型返回 `MyHook.app.debug` 及对应源码根；当前服务端未提供运行构建接口，Java 执行路径明确返回不支持，不从工作区 SDK 猜测。
+- 隔离连接目录与真实已退出子进程验证：活跃连接优先、过期死亡连接回收、损坏 JSON 隔离并输出诊断。WSL Ubuntu 的实际大小写敏感目录验证了身份隔离与旧配置归属迁移。
+- 受维护源码、脚本及本轮文档的 Biome 检查通过。根目录 README 按用户要求保持原样，其原有格式差异仍会使全仓 `npm run check` 报错；不通过排除文件掩盖该结果。

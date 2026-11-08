@@ -4,24 +4,23 @@
 
 1. **ILS 原生 Android 语义空白与扩展架构**：IntelliJ Managed Server（ILS 271.2085.0）发行包未包含 Android 核心插件（0 个 Android / ADB 相关类）。本项目通过 `LanguageServerExtension` SPI 与声明式 `plugin.xml` 构建独立 JVM 插件 `intellij-android.jar`，补齐 Android XML `DocumentSymbol`、Manifest 类属性到 Kotlin/Java 代码的 `references`、`R.*` 资源的 `DirectNavigationProvider` 源码跳转，以及基于 K2 Analysis API 的 `@Composable` 命名检查抑制（`ComposeSuppressor`）。
 2. **插件 ID 对齐与互斥原则**：插件 ID 严格对齐官方 `org.jetbrains.android`。IntelliJ 平台 PluginManager 对同 ID 插件实行单例互斥加载，确保当前轻量级服务端按官方模块语义运行；未来若宿主动态注入官方完整插件，将自动触发单例互斥，杜绝类加载与扩展点双重注册冲突。
-3. **工程化与构建体系演进**：放弃早期的 Node.js 手工拼接编译脚本（`build.mjs`），迁移为标准 Gradle 9.8.0 Java 工程布局（`jvm/intellij-android/`）。编译工具链硬性绑定 ILS 自带的 JBR 25（Java 25 / classfile 69），通过 `gradle.lockfile` 锁定依赖版本，`verification-metadata.xml` 校验依赖 SHA-256。产物采用 `STORED`（零压缩）打包归档，配合 `.sha256` 旁挂校验文件与 `check-assets` 门禁，实现确定性构建与原子化发布。
+3. **工程化与构建体系**：使用 `jvm/intellij-android/` 标准 Gradle 9.8.0 Java 工程。目标 ILS 版本从 `src/server/bundle-metadata.ts` 读取，编译工具链使用该 ILS 的 JBR 25（classfile 69）；`gradle.lockfile` 和 `verification-metadata.xml` 锁定依赖及摘要。`stageExtension` 生成 manifest 与 `.sha256`，运行时复用 `verifyExtensionDirectory` 验证清单、ABI、字节大小和哈希，不再依赖独立 `check-assets` 脚本。
 4. **源码审查优先于反编译推测**：本地实测横评 4 款现代反编译器（`jcdc`、`javajive`、`abyssflower`、`vinylite`）表明：`jcdc` 对 Java 21+ 语法（Sealed 类、Record、TWR、模式匹配）和内部类折叠还原度最高；`abyssflower` 凭借 `@Metadata` Protobuf 解析在 Kotlin 语法还原上断层领先；但任何反编译器在字节码脱糖、泛型擦除和架构设计意图上均存在不可逆失真。核心方案必须以官方开源仓库（`JetBrains/intellij-community`、`JetBrains/android` 提交 `544c9ef8`、AOSP `platform/tools/base`）作为第一权威依据，杜绝盲目依靠反编译黑盒猜解协议。
 
 ### JVM 包结构
 
 `org.jetbrains.android` 根包仅保留 SPI 入口 `AndroidExtension`，其余实现按职责分包：
 
-| 子包 | 职责 |
-|---|---|
-| `context` | 模块环境、文件角色、请求上下文与查询异常 |
-| `xml` | XML 属性解析与文档大纲 |
-| `navigation` | 定义、引用、Manifest 目标与资源直达导航 |
-| `resource` | 资源解析、源集目录、布局与源码读取 |
-| `compose` | Compose 命名检查抑制 |
-| `debug` | JDWP 附加、调试命令、监听器与字段过滤 |
+| 子包         | 职责                                     |
+| ------------ | ---------------------------------------- |
+| `context`    | 模块环境、文件角色、请求上下文与查询异常 |
+| `xml`        | XML 属性解析与文档大纲                   |
+| `navigation` | 定义、引用、Manifest 目标与资源直达导航  |
+| `resource`   | 资源解析、源集目录、布局与源码读取       |
+| `compose`    | Compose 命名检查抑制                     |
+| `debug`      | JDWP 附加、调试命令、监听器与字段过滤    |
 
 跨包调用的类和成员显式公开；包内辅助方法保留包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 使用迁移后的入口路径。
-
 
 ---
 
@@ -37,6 +36,7 @@
 ### 2. K2 Analysis API 在 271 版本下的 API 废弃与编译器警告
 
 - **问题现象**：在将扩展编译目标切至 ILS 271.2085.0 时，`javac -Xlint:deprecation` 抛出过时 API 警告：
+
   ```text
   warning: [deprecation] analyze(KtElement,Function1) in AnalyzeKt has been deprecated
   warning: [deprecation] getPartiallyAppliedSymbol() in KaFunctionCall has been deprecated
@@ -56,6 +56,7 @@
 - **解决方案**：
   1. 在 `FindUsagesOptions` 中显式设置 `options.isSearchForTextOccurrences = false`。
   2. 在 `handler.processElementUsages` 回调中，拦截并过滤所有来自 `XmlFile` 的引用：
+
      ```java
      if (reference != null && !(reference.getContainingFile() instanceof XmlFile)) {
          Location location = PositionKt.getLspLocationForDefinition(reference);
@@ -70,6 +71,7 @@
 - **问题现象**：在未声明 `package` 属性但通过 Gradle 配置了 `namespace` 的新版工程中，或者类名未写 `.` 前缀但属于当前模块包名的场景（如 `<activity android:name="MainActivity">`），引用反查抛出 `-32803 target_unresolved` 错误。
 - **根因排查**：最初简单的实现仅通过 `raw.indexOf('.') < 0` 判断是否拼接包名，未严格遵循 Android 官方的类名解析候选顺序。
 - **解决方案**：对照官方 `JetBrains/android` 中 `PackageClassConverter.java` 的实现，重构 `ManifestTarget.classNames(String raw, String base)`：
+
   ```java
   private static List<String> classNames(String raw, String base) {
       String name = raw.replace('$', '.');
@@ -100,10 +102,12 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 - **SPI 服务声明**：
   在扩展 JAR 的 `META-INF/services/com.jetbrains.ls.api.features.LanguageServerExtension` 文件中声明实现类全限定名：
+
   ```text
   org.jetbrains.android.AndroidExtension
   ```
 - **接口定义与返回值**：
+
   ```java
   public final class AndroidExtension implements LanguageServerExtension {
       static final LSLanguage XML = new LSLanguage("xml", XMLLanguage.INSTANCE, List.of("xml"));
@@ -137,6 +141,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 ### 2. 插件元数据与互斥原则（`plugin.xml`）
 
 - **元数据定义（`src/main/resources/META-INF/plugin.xml`）**：
+
   ```xml
   <idea-plugin>
     <id>org.jetbrains.android</id>
@@ -169,22 +174,22 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 实现 `LSDocumentSymbolProviderPsiBase`，通过 `LSDocumentSymbolCustomizer<PsiElement>` 遍历 XML PSI 树生成符号：
 
-| 语义节点 | XML 标签条件 | LSP `SymbolKind` | 名称提取来源 | 说明 |
-|---|---|---|---|---|
-| Manifest 根 | `<manifest>` | `Namespace` (3) | `package` 属性值 | 大纲顶层根节点 |
-| 应用程序 | `<application>` | `Module` (2) | `android:name` 或标签名 | 顶级容器 |
-| Android 四大组件 | `<activity>`, `<service>`, `<provider>`, `<receiver>`, `<instrumentation>` | `Class` (5) | `android:name` 属性值 | 组件定义 |
-| 别名组件 | `<activity-alias>` | `Interface` (11) | `android:name` 属性值 | 目标指向 `targetActivity` |
-| 字符串资源 | `<string>` | `String` (15) | `name` 属性值 | Values 资源 |
-| 颜色 / 尺寸资源 | `<color>`, `<dimen>` | `Constant` (14) | `name` 属性值 | Values 资源 |
-| 布尔资源 | `<bool>` | `Boolean` (17) | `name` 属性值 | Values 资源 |
-| 整数资源 | `<integer>` | `Number` (16) | `name` 属性值 | Values 资源 |
-| 数组资源 | `<array>`, `<string-array>`, `<integer-array>`, `<plurals>` | `Array` (18) | `name` 属性值 | Values 资源 |
-| 样式定义 | `<style>` | `Class` (5) | `name` 属性值 | 容器节点 |
-| 样式属性项 | `<style>` 下的 `<item>` | `Property` (7) | `name` 属性值 | Detail 取 `type` 或标签名 |
-| 自定义属性集 | `<declare-styleable>` | `Interface` (11) | `name` 属性值 | 容器节点 |
-| 属性定义 | `<attr>` | `Property` (7) | `name` 属性值 | 独立或嵌套属性 |
-| ID 资源 | `<item type="id">` 或 `<id>` | `Variable` (13) | `name` 属性值 | Values 资源 |
+| 语义节点         | XML 标签条件                                                               | LSP `SymbolKind` | 名称提取来源            | 说明                      |
+| ---------------- | -------------------------------------------------------------------------- | ---------------- | ----------------------- | ------------------------- |
+| Manifest 根      | `<manifest>`                                                               | `Namespace` (3)  | `package` 属性值        | 大纲顶层根节点            |
+| 应用程序         | `<application>`                                                            | `Module` (2)     | `android:name` 或标签名 | 顶级容器                  |
+| Android 四大组件 | `<activity>`, `<service>`, `<provider>`, `<receiver>`, `<instrumentation>` | `Class` (5)      | `android:name` 属性值   | 组件定义                  |
+| 别名组件         | `<activity-alias>`                                                         | `Interface` (11) | `android:name` 属性值   | 目标指向 `targetActivity` |
+| 字符串资源       | `<string>`                                                                 | `String` (15)    | `name` 属性值           | Values 资源               |
+| 颜色 / 尺寸资源  | `<color>`, `<dimen>`                                                       | `Constant` (14)  | `name` 属性值           | Values 资源               |
+| 布尔资源         | `<bool>`                                                                   | `Boolean` (17)   | `name` 属性值           | Values 资源               |
+| 整数资源         | `<integer>`                                                                | `Number` (16)    | `name` 属性值           | Values 资源               |
+| 数组资源         | `<array>`, `<string-array>`, `<integer-array>`, `<plurals>`                | `Array` (18)     | `name` 属性值           | Values 资源               |
+| 样式定义         | `<style>`                                                                  | `Class` (5)      | `name` 属性值           | 容器节点                  |
+| 样式属性项       | `<style>` 下的 `<item>`                                                    | `Property` (7)   | `name` 属性值           | Detail 取 `type` 或标签名 |
+| 自定义属性集     | `<declare-styleable>`                                                      | `Interface` (11) | `name` 属性值           | 容器节点                  |
+| 属性定义         | `<attr>`                                                                   | `Property` (7)   | `name` 属性值           | 独立或嵌套属性            |
+| ID 资源          | `<item type="id">` 或 `<id>`                                               | `Variable` (13)  | `name` 属性值           | Values 资源               |
 
 - **选区范围规范（`selectionRange`）**：必须精确指向 `attribute.getValueElement().getValueTextRange()`（剥离单双引号），若无属性值则回退为标签名称的 TextRange，严禁把包含引号或整个 XML 标签范围作为选区。
 - **降级兼容**：ILS 服务端仅输出层级 `DocumentSymbol[]`。当客户端在初始化能力中显式声明 `hierarchicalDocumentSymbolSupport: false` 时，TypeScript 桥接层自动调用 `flattenDocumentSymbols` 将树形结构 DFS 展平为平铺的 `SymbolInformation[]`，并注入 `containerName`。
@@ -204,6 +209,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 - **抑制目标**：Kotlin 检查项 `FunctionName` 与 `TestFunctionName`。
 - **判断契约**：
+
   ```java
   public boolean isSuppressedFor(PsiElement element, String toolId) {
       if (!"FunctionName".equals(toolId) && !"TestFunctionName".equals(toolId)) return false;
@@ -212,7 +218,6 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
       if (!(parent instanceof KtNamedFunction function)) return false;
       if (function.getNameIdentifier() != element) return false;
       if (function.getAnnotationEntries().isEmpty()) return false;
-      
       ProgressManager.checkCanceled();
       Boolean isComposable = AnalyzeKt.analyze(function, session -> {
           for (KtAnnotationEntry entry : function.getAnnotationEntries()) {
@@ -244,6 +249,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 ### 6. 构建资产清单与安全替换契约
 
 - **目录结构与命名**：发布目录为 `resources/ils/271.2085.0/intellij-android/`：
+
   ```text
   resources/ils/271.2085.0/intellij-android/
   ├── manifest.json
@@ -256,6 +262,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
       └── adblib-tools-9.4.1.jar.sha256
   ```
 - **`manifest.json` 规范**：
+
   ```json
   {
     "serverVersion": "271.2085.0",
@@ -290,6 +297,10 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
   }
   ```
 - **原子替换与回滚契约**：Gradle `stageExtension` 任务先将产物写入随机隔离目录 `.staging-<uuid>/`，备份老资产到 `.rollback-<uuid>/`，再执行原子移动。若中间任何文件校验失败，利用 rollback 目录完全回滚现有资产，最后原子替换 `manifest.json`。
+
+服务端版本升级后，先更新精确绑定的 ILS/VSIX 元数据，再执行 `npm run build:jvm`，最后运行 `npm run update-bundle -- --sync-marketplace --check`。检查失败即保留错误，不能只更新目录名或 manifest 来绕过 ABI 和第三方资产摘要。
+
+当前 Windows ILS `271.2085.0` 官方归档直接在根目录包含 `build.txt` 和 `bin/intellij-server.exe`，开发安装脚本的直铺验证与本次发行包一致。未来归档改变布局时，应重新验证开发脚本与正常安装器的归档规范化契约。
 
 ---
 
@@ -326,6 +337,7 @@ cd jvm/intellij-android
 在前期调研与逆向探索中，我们针对 4 款低 Star / 现代反编译 CLI 工具（3 款 Rust、1 款 Go）在同一基准测试集上进行了全面实测：
 
 #### 参与实测工具列表
+
 - **`jcdc`** (`ejfkdev/jcdc` 0.1.1, Rust)：纯 Rust 自研引擎，多线程并行，追求完整语义重编译验证（Recompilable）。
 - **`javajive`** (`yaklang/javajive` 0.7.0, Go)：纯 Go 零外部依赖单二进制，兼顾 DEX/APK 与序列化数据解析。
 - **`abyssflower`** (`K0itoyuu/abyssflower` 0.3.1, Rust)：纯 Rust 引擎，主打 Kotlin 元数据 Protobuf 恢复与 AI MCP 支持。
@@ -333,17 +345,18 @@ cd jvm/intellij-android
 
 #### 基准测试横评矩阵
 
-| 特性 / 维度 | 测试场景 | `jcdc` (Rust) | `javajive` (Go) | `abyssflower` (Rust) | `vinylite` (Rust) |
-|---|---|---|---|---|---|
-| **Java 17+ Sealed 层次** | `sealed interface ... permits A, B` | **唯一完整恢复 permits** | 丢失 permits 声明 | 丢失 permits 声明 | 语法解析失败 |
-| **Java 16+ Record** | `record Person(String name, int age)` | **紧凑头部完美恢复** | 紧凑头部恢复正常 | 展开为 `extends Record`，暴露 invokedynamic | 展开为普通 Class |
-| **Java 21 Switch 模式匹配** | `switch (shape) { case Circle c -> ... }` | **语法结构完全准确** | 降级转译为三元运算符 | 暴露底层 `/*invokedynamic*/ typeSwitch` | 分支逻辑降级失真 |
-| **Try-with-resources** | `try (BufferedReader r = ...) { ... }` | **干净折叠，无脱糖噪音** | 带有大量防御性冗余括号 | 未折叠，展开为显式 finally | 展开为嵌套 try |
-| **生产级内部类合并** | `core-common` 6 个内部类合并 | **唯一合并回单一源文件**（9 类压为 3 文件） | 每个内部类独立为文件 | 每个内部类独立为文件 | 每个内部类独立为文件 |
-| **吞吐效率** | JDK 8 `rt.jar`（12,609 类） | **18 核 2.3 秒** | 毫秒级单包解析 | 约 4.8 秒 | 约 3.5 秒 |
-| **Kotlin 语法还原** | `ClientTransportState.class` | 仅转为 Java 字节码胶水代码 | 仅转为 Java 字节码胶水代码 | **断层领先：直接还原原生 Kotlin 语法**（利用 `@Metadata` Protobuf） | 仅转为 Java 字节码胶水代码 |
+| 特性 / 维度                 | 测试场景                                  | `jcdc` (Rust)                               | `javajive` (Go)            | `abyssflower` (Rust)                                                | `vinylite` (Rust)          |
+| --------------------------- | ----------------------------------------- | ------------------------------------------- | -------------------------- | ------------------------------------------------------------------- | -------------------------- |
+| **Java 17+ Sealed 层次**    | `sealed interface ... permits A, B`       | **唯一完整恢复 permits**                    | 丢失 permits 声明          | 丢失 permits 声明                                                   | 语法解析失败               |
+| **Java 16+ Record**         | `record Person(String name, int age)`     | **紧凑头部完美恢复**                        | 紧凑头部恢复正常           | 展开为 `extends Record`，暴露 invokedynamic                         | 展开为普通 Class           |
+| **Java 21 Switch 模式匹配** | `switch (shape) { case Circle c -> ... }` | **语法结构完全准确**                        | 降级转译为三元运算符       | 暴露底层 `/*invokedynamic*/ typeSwitch`                             | 分支逻辑降级失真           |
+| **Try-with-resources**      | `try (BufferedReader r = ...) { ... }`    | **干净折叠，无脱糖噪音**                    | 带有大量防御性冗余括号     | 未折叠，展开为显式 finally                                          | 展开为嵌套 try             |
+| **生产级内部类合并**        | `core-common` 6 个内部类合并              | **唯一合并回单一源文件**（9 类压为 3 文件） | 每个内部类独立为文件       | 每个内部类独立为文件                                                | 每个内部类独立为文件       |
+| **吞吐效率**                | JDK 8 `rt.jar`（12,609 类）               | **18 核 2.3 秒**                            | 毫秒级单包解析             | 约 4.8 秒                                                           | 约 3.5 秒                  |
+| **Kotlin 语法还原**         | `ClientTransportState.class`              | 仅转为 Java 字节码胶水代码                  | 仅转为 Java 字节码胶水代码 | **断层领先：直接还原原生 Kotlin 语法**（利用 `@Metadata` Protobuf） | 仅转为 Java 字节码胶水代码 |
 
 #### 选型推荐
+
 1. **现代 Java（Java 17/21+）复杂语法与生产 JAR 反编译**：首选 **`jcdc`**。它是目前对新版字节码控制流与内部类合并处理最优秀的轻量级引擎。
 2. **纯 Go / 安全分析 / 零依赖单文件**：首选 **`javajive`**，兼顾 DEX 转换且无运行时依赖。
 3. **Kotlin 产物分析与 AI 自动化**：首选 **`abyssflower`**（需加 `--kotlin` 参数），唯一能够直接看懂 Kotlin 高级语法的工具。

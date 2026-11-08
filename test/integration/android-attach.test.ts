@@ -18,8 +18,8 @@ import {
   createIntegrationSandbox,
   createLspClientDriver,
   type IntegrationSandbox,
-  type LspClientDriver,
   killProcessSafely,
+  type LspClientDriver,
   verifyPrerequisites,
 } from './fixture.js';
 
