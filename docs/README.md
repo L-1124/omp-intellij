@@ -1,0 +1,24 @@
+# omp-intellij 技术经验与运行时规范文档
+
+本目录汇总了 `omp-intellij` 项目在开发、调试、协议集成与工程化过程中的全部实测经验、踩坑记录与运行时契约。
+
+文档内容全部基于实际会话记录、源码事实与真实设备/项目测试数据，遵循客观、直接、平实的技术记录规范，不包含无事实依据的修饰。
+
+---
+
+## 专题文档索引
+
+| 文档名称 | 核心主题 | 覆盖会话 |
+| :--- | :--- | :--- |
+| [**1. Android JDWP 调试与运行时排障**](android-jdwp-debugging.md) | Android ART 运行时 JDWP 调试、adblib proxy 编排、`variables` 10.3s presentation 超时定位与解决、会话级 MuteRenderer、深层对象展开基准、detach 与 PID 存活 | `01a1b94e`, `01a196d5` |
+| [**2. Android JVM 扩展与工程化体系**](android-jvm-extension.md) | ILS JVM 插件 SPI 与 `plugin.xml` 声明、Android XML DocumentSymbols、Manifest 类属性反查引用、K2 Analysis API Compose 命名豁免、Gradle 9.8.0 规范化与资产完整性门禁、反编译器横评 | `01a1b64f`, `01a1b9a9` |
+| [**3. ILS 私有协议与生命周期治理**](ils-protocol-and-lifecycle.md) | ILS 263 至 271.2085.0 (JBR 25) 升级、`server.port` 三行格式解析、32MB 归档分发与双通道校验、CalVer 与 marketplace 自动同步、`intellijExtensions` 与 ModCommand QuickFix 支持、内嵌 Android Lint 架构 | `01a1a6dd`, `01a1b50a`, `01a1a71c` |
+| [**4. DAP 代理、工作区隔离与测试体系**](dap-proxy-and-workspace.md) | OMP Bridge stdio 协议、多工作区 systemPath 隔离、DAP Proxy 握手状态机与断点/步进映射、MCP tools 动态发现、自动化单元与真实 AVD/MyHook 验收准则 | `01a19d14`, `01a19c16`, `01a19bdc`, `01a19bf2` |
+
+---
+
+## 文档撰写与维护规范
+
+1. **真实事实优先**：所有结论必须附带可复现的命令、测试输出、响应耗时或源码类名与行号支持。
+2. **术语与版本精确**：明确记录运行环境与依赖版本（如 `ILS 271.2085.0`、`JBR 25`、`Gradle 9.8.0`、`adblib 9.4.1` 等），不使用含糊指代。
+3. **去包装化**：严格遵循说人话规范，不使用 AI 营销词与无信息量的套话，突出“问题现象 → 根因排查 → 解决方案 → 对比数据”。

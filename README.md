@@ -1,126 +1,111 @@
 # omp-intellij
 
-将 JetBrains IntelliJ Language Server 接入 OMP，为 Java、Kotlin 工程提供代码分析、构建、运行与调试。
+将 JetBrains IntelliJ Language Server (ILS) 接入 OMP，为 Java 与 Kotlin 工程提供代码分析、依赖导航、运行与调试支持。
 
-- 通过 OMP 原生 `lsp` 工具使用定义、引用、诊断、重命名与代码操作等服务端能力。
-- 多工程共享后台服务，等待工程导入与索引就绪后处理请求。
-- 安装、查询、切换服务端版本；远程版本信息同时查询 JetBrains manifest 与 Open VSX。
-- 按工程配置 JDK 与导入环境，支持工作区重载。
-- 通过原生 `debug` 工具运行应用、执行测试、设置断点或附加到 JDWP 进程。
+- **语言服务 (LSP)**：通过 OMP 原生 `lsp` 工具提供跳转定义、查找引用、实时诊断、重构重命名与快速修复（ModCommand QuickFix）。
+- **Android 语义增强**：支持 Manifest 与 values XML 大纲（DocumentSymbol）、Manifest 类属性代码反查、`R.*` 资源定位及 Composable 函数大写命名豁免。
+- **运行与调试 (DAP)**：通过 OMP 原生 `debug` 工具启动主类、运行测试、打断点、单步执行，以及针对 Android 应用的 JDWP 附加调试（JDWP attach）。
+- **生命周期治理**：多工程共享后台服务进程，支持多版本安装切换、JDK 与环境变量按工程独立绑定，以及基于哈希的工作区隔离。
+
+---
 
 ## 环境要求
 
-- OMP，支持插件扩展、LSP 与 DAP。
-- Node.js 22 或更新版本，用于启动 LSP 桥接与 DAP 代理。
-- 目标工程所需的 JDK 与构建工具；服务端使用安装包自带的 JBR。
-- 使用服务端所需的 JetBrains 授权。
+- **OMP**：支持插件扩展、LSP 与 DAP 接口。
+- **Node.js**：`>= 22`，用于驱动 LSP 桥接进程与 DAP 调试代理。
+- **JDK 与构建工具**：目标工程所需的 JDK（如 JDK 17、JDK 21）与构建工具（Gradle / Maven）；Language Server 自身运行在自带的 JBR 运行时中。
+- **授权**：使用服务端所需的 JetBrains 账号授权与 EULA 许可。
 
-## 安装插件
+---
 
-从 GitHub 注册 marketplace 并安装：
+## 安装
+
+### 从市场安装
+
+在 OMP 中注册市场并安装插件：
 
 ```sh
 omp plugin marketplace add L-1124/omp-intellij
 omp plugin install omp-intellij@omp-intellij
 ```
 
-安装后重新启动 OMP 会话。
-
-已安装的用户可刷新市场并重新安装最新源码：
+安装完成后重新启动 OMP。已安装用户更新至最新源码版本：
 
 ```sh
 omp plugin marketplace update omp-intellij
 omp plugin install --force omp-intellij@omp-intellij
 ```
 
-插件首次加载时由 OMP 内置 Bun 自动转译桥接源码，产物缓存在安装目录的 `.runtime/` 中。安装目录需要可写；Node.js 用于运行 LSP 桥接和 DAP 代理。
+> [!NOTE]
+> 插件首次加载时由 OMP 内置运行时自动转译桥接代码，产物缓存在插件目录的 `.runtime/` 中。
 
-## 首次使用
+---
 
-在目标工程目录启动 OMP，执行：
+## 快速上手
 
-```text
-/intellij install
-/intellij eula status
-/intellij eula view
-```
+在目标工程根目录下启动 OMP，按以下步骤初始化服务端：
 
-阅读协议后，用 `status` 显示的当前哈希确认接受，再检查环境：
+1. **安装服务端与查看协议**：
+   ```text
+   /intellij install
+   /intellij eula status
+   /intellij eula view
+   ```
 
-```text
-/intellij eula accept <hash>
-/intellij doctor
-```
+2. **接受许可协议并校验运行环境**：
+   ```text
+   /intellij eula accept <status 显示的哈希>
+   /intellij doctor
+   ```
 
-> [!IMPORTANT]
-> EULA 按安装包中的协议内容确认。插件不会自动接受协议；请使用当前安装包显示的哈希。
+   > [!IMPORTANT]
+   > 许可协议（EULA）按安装包内置文本核对，插件不会代为自动接受。必须传入 `status` 查看到的实际哈希值。
 
-需要指定工程 JDK 时，执行 `/intellij workspace jdks` 查看候选项，再执行 `/intellij workspace jdk <JDK路径>`。
+3. **配置工程 JDK（可选）**：
+   ```text
+   /intellij workspace jdks
+   /intellij workspace jdk <目标 JDK 路径>
+   ```
+
+---
 
 ## 日常使用
 
-代码导航、诊断与重构由 OMP 原生 `lsp` 工具提供，具体操作范围取决于服务端能力。插件额外提供 `intellij` 工具，调用前可读取 `xd://intellij` 查看完整参数。
+### 1. 代码智能与导航 (LSP)
 
-写入 `xd://intellij` 的常用请求：
+日常代码分析与重构直接使用 OMP 的原生 `lsp` 工具。扩展自动补齐以下 Android 语义特性：
 
-```json
-{ "action": "doctor" }
-```
+- **XML 大纲 (DocumentSymbol)**：支持 `AndroidManifest.xml` 与 values 资源文件的层级结构化符号树。
+- **引用反查 (References)**：从 `AndroidManifest.xml` 中的 Activity、Service、Provider 类属性，反向检索 Java 与 Kotlin 源码中的语义引用及 KDoc 链接。
+- **资源跳转 (Definition)**：支持 `R.*` 及 XML 资源属性向源码声明跳转；同一资源的多限定符（多语言/多分辨率）支持返回多个目标。
+- **Compose 规范抑制**：基于 K2 Analysis API，对标注 `@Composable` 的大写函数名称自动豁免常规函数命名规范检查（`FunctionName` / `TestFunctionName`）。
+
+除了直接使用 `lsp` 工具外，插件还提供专有的 `intellij` 工具接口：
 
 ```json
 { "action": "wait", "project": ".", "timeout": 120 }
 ```
-
-```json
-{ "action": "reload", "project": ".", "timeout": 120 }
-```
-
 ```json
 { "action": "model", "file": "src/main/java/com/example/App.java" }
 ```
 
-`doctor` 检查配置与运行条件；`wait` 等待索引就绪；`reload` 重新导入工程；`model` 查询源文件所属模块、SDK、Classpath 与构建命令。`status`、`wait` 和 `doctor` 不会启动服务端。
+- `wait`：阻塞等待后台服务端索引完成。
+- `model`：查询源文件所属模块、SDK、Classpath 与构建链路。
+- `reload`：重新导入并同步当前工程配置。
 
-### Android XML 与源码导航
+---
 
-- Manifest、values XML 的文档符号，包含资源类型、层级与原始名称选择范围；
+### 2. 运行与调试 (DAP)
 
-- 从 Manifest 类属性查询 Java/Kotlin 语义引用，保留原生代码/KDoc 范围及 `includeDeclaration`，追加一次当前属性；alias 使用 `targetActivity`。
+通过 OMP 原生 `debug` 工具启动调试会话，支持以下适配器：
 
-- Manifest 类 definition，以及 `R.*` / XML 资源引用到源码声明的 definition。同一资源的不同限定符可返回多个声明；
+| 适配器 | 说明 |
+| :--- | :--- |
+| `intellij` | 构建并启动主类，或附加到外部调试进程 |
+| `intellij-test` | 运行测试；可通过 `args` 指定测试类或 `ClassName#methodName` |
+| `intellij-gradle` | 走服务端的 Gradle 任务链路启动调试 |
 
-- Composable 函数命名检查豁免：
-
-资源 definition 使用对应模块、变体的真实 AGP merger/blame，已在 AGP `9.4.1` 验证。先通过工程的 Gradle 任务生成产物；查询不会自动构建。来源缺失、声明删除/改名、新增覆盖或元数据失效时保留原生目标。未保存文档参与名称与位置校验。
-
-Android 身份来自已导入模块。导入器缺失的 namespace、资源根和 Manifest 位置由当前 `build.gradle.kts` 的确定字面量补充；支持已确认源集的自定义目录与 Manifest 文件名，动态 DSL、外部脚本及无法确认的变体保持未知。已识别的 Manifest 类无法解析时返回具体 `-32803` 错误；取消保留 `-32800`。
-
-构建与发布：
-
-```sh
-npm run build:jvm -- --ils-home "<已安装的 ILS 271.2085.0 目录>"
-npm run check:assets
-npm run build
-npm pack --dry-run --json --ignore-scripts
-```
-
-JVM 模块采用标准 Gradle Java 布局与固定 Wrapper 9.8.0。入口使用目标发行包 JBR 25，要求 `build.txt` 精确为 `ILS-271.2085.0`；无需外部 `jar` 工具或全局 Gradle。发布包包含自有 JAR、官方原始 `adblib` / `adblib-tools` 9.4.1、ABI/SHA-256 清单与旁挂校验文件；依赖锁和校验元数据随源码分发，构建缓存排除在 npm 包外。三个二进制原样进入 `.runtime/<hash>`。
-
-启动层校验精确版本与资产摘要，并合并已有 `IJ_JAVA_OPTIONS` / `plugin.path`。不可用原因写入 `<systemPath>/launcher.log`；原生 LSP/DAP 保留。已有共享服务不热加载新 JAR，启用更新须先关闭消费者，再安全重启。
-
-`npm run clean:runtime` 仅预览历史 runtime 清理；实际清理在关闭 OMP、Bridge、DAP 和 ILS 后执行 `node scripts/clean-runtime.mjs --apply`。当前声明引用的 hash 保留，启动时不自动回收历史或临时目录。
-
-### 运行与调试
-
-通过 OMP 原生 `debug` 工具使用以下适配器：
-
-| 适配器            | 用途                                                        |
-| ----------------- | ----------------------------------------------------------- |
-| `intellij`        | 构建并启动应用，或附加到外部 JDWP 进程                      |
-| `intellij-test`   | 启动测试；可通过 `args` 指定测试类或 `ClassName#methodName` |
-| `intellij-gradle` | 使用服务端的 Gradle 启动链路                                |
-
-例如，写入 `xd://debug`：
+启动配置示例（写入 `xd://debug`）：
 
 ```json
 {
@@ -131,58 +116,94 @@ JVM 模块采用标准 Gradle Java 布局与固定 Wrapper 9.8.0。入口使用�
 }
 ```
 
-后续断点、继续执行、栈帧、变量和输出查询均使用同一原生工具。完整参数以 `xd://debug` 文档为准。
+启动后，断点命中、单步步进、变量检查与表达式求值均使用原生 `debug` 工具。
 
-### Android JDWP attach
+---
 
-在工程目录执行，CLI 与 DAP 使用相同配置和 `systemPath`：
+### 3. Android JDWP Attach 附加调试
 
-```sh
-node dist/android/debug-attach-cli.js prepare --package com.example.app --device emulator-5554
-```
+针对运行在 Android 模拟器或真实设备上的应用，插件提供进程发现、端口代理与 JDWP Attach 编排：
 
-也可用 `--pid` 精确选择进程；可选 `--adb`，以及互斥的 `--timeout-ms` / `--timeout`（秒）。成功输出一行 JSON，其中 `debug` 可直接传给原生 `debug` 工具。目标应用由调用者预先启动并启用调试；产品路径只附加，不安装、启动或停止应用。
+1. **准备附加并建立本地回环代理**：
+   ```sh
+   node dist/android/debug-attach-cli.js prepare --package com.example.app --device emulator-5554
+   ```
+   *也支持 `--pid <PID>` 精确指定进程。成功时输出包含目标 `host`、`port` 与 `cleanupKey` 的 JSON。*
 
-官方 adblib 在 ILS 内管理设备、进程及 JDWP proxy。prepare handle 保留5分钟；DAP 认领后绑定该 LSP 连接，detach 先释放 native debugger，再释放 proxy 并关闭 LSP。尚未 attach 时可显式清理：
+2. **附加调试器**：
+   将返回的连接参数传入原生 `debug` 工具：
+   ```json
+   {
+     "action": "attach",
+     "adapter": "intellij",
+     "host": "127.0.0.1",
+     "port": 58637,
+     "timeout": 180
+   }
+   ```
 
-```sh
-node dist/android/debug-attach-cli.js cleanup --key <cleanupKey>
-```
+3. **结束调试并清理资源**：
+   调试器分离时默认保持 `terminateDebuggee: false`，避免终止目标应用进程。如需提前手动释放代理端口：
+   ```sh
+   node dist/android/debug-attach-cli.js cleanup --key <cleanupKey>
+   ```
 
-重复清理返回 `cleaned:false,reason:"already_cleaned"`；服务不可用或关闭失败明确报错。CLI stdout 仅 JSON，日志到 stderr；成功0、运行错误1、参数错误2。ILS 重启后需要重新 prepare。阶段完成状态与实际验收记录见 `plan.md` §9.4。
+> [!NOTE]
+> 在 Android 附加调试期间，系统会自动启用同步 JDI 并在会话级静默富渲染器（MuteRenderer），避免 ART 运行时在复合对象展示时超时，同时完整保留字段反射展开与显式求值。
 
-ILS 271 的 Android 对象变量检查使用同步 JDI 与会话级静默渲染（MuteRenderer）；最后一个 Android 调试会话结束后恢复原 JDI 设置。该配置避免了 ART 运行时复杂对象在 presentation 通知链处超时，同时保留了 JDI 字段反射与显式求值。
-
-MyHook 真实工程与 fixture 已验证原生 attach、断点、调用栈、表达式求值、单步执行、对象字段逐级展开及 continue 恢复，详见 `plan.md` §9.4 与 §9.7。
+---
 
 ## 管理命令
 
-| 命令                                            | 用途                                |
-| ----------------------------------------------- | ----------------------------------- |
-| `/intellij status`                              | 查看服务端与工程状态                |
-| `/intellij doctor`                              | 检查安装、协议、JDK、授权与日志位置 |
-| `/intellij install [--version <build\|latest>]` | 安装固定、指定或最新服务端版本      |
-| `/intellij versions [--remote]`                 | 查看本地版本，或查询远程版本        |
-| `/intellij use <build>`                         | 切换到已安装版本，也可用于回滚      |
-| `/intellij start`、`stop`、`restart`            | 管理共享服务端                      |
-| `/intellij workspace status`、`list`            | 查看当前工程或已保存的工程配置      |
-| `/intellij workspace jdk <path>`                | 设置当前工程 JDK                    |
-| `/intellij workspace env`                       | 查看导入环境变量配置                |
-| `/intellij workspace reload`                    | 修改构建配置后重新导入工程          |
-| `/intellij debug status`、`recover [id]`        | 查看或回收调试代理会话              |
-| `/intellij cache`、`prune [--apply]`            | 查看缓存，预览或执行过期缓存清理    |
+在 OMP 对话中可通过斜杠命令管理服务端状态：
 
-切换版本、停止或重启服务端会检查活动连接，避免中断其他工程。
+| 命令 | 用途 |
+| :--- | :--- |
+| `/intellij status` | 查看当前服务端运行状态与活动工程 |
+| `/intellij doctor` | 检查安装完整性、网络、协议、JDK 与日志路径 |
+| `/intellij install [--version <build\|latest>]` | 安装指定或最新服务端版本 |
+| `/intellij versions [--remote]` | 查看本地已安装版本或查询远程可用版本 |
+| `/intellij use <build>` | 切换或回滚服务端版本 |
+| `/intellij start`、`stop`、`restart` | 控制共享服务端进程的启停 |
+| `/intellij workspace status`、`list` | 查看当前工作区状态或已注册工程列表 |
+| `/intellij workspace jdk <path>` | 设置当前工程专用 JDK |
+| `/intellij workspace reload` | 重新导入工程构建模型 |
+| `/intellij cache`、`prune [--apply]` | 查看或清理过期缓存目录 |
 
-## 配置
+---
 
-安装与工程配置默认保存在 `~/.omp/agent/intellij.json`，可通过 `OMP_INTELLIJ_CONFIG` 指向其他文件。超时与缓存策略默认读取包内 `settings.json`，可通过 `OMP_INTELLIJ_SETTINGS` 指定替代配置。
+## 开发者构建
 
-优先使用 `/intellij` 命令管理安装、版本、JDK 和工程环境配置。
+如需修改扩展或本地从源码构建打包：
+
+```sh
+# 1. 编译 JVM 扩展并生成 STORED 校验资产
+npm run build:jvm -- --ils-home "<ILS 安装目录>"
+npm run check:assets
+
+# 2. 编译 TypeScript 桥接层并执行测试
+npm run build
+npm test
+
+# 3. 验证 npm 包分发清单
+npm pack --dry-run --json --ignore-scripts
+```
+
+---
+
+## 技术经验与规范文档
+
+开发、调试、协议接入与工程化排障的完整实测经验记录在 `docs/` 目录中：
+
+- [**Android JDWP 调试与运行时排障**](docs/android-jdwp-debugging.md)：ART 运行时特性、adblib proxy 编排、`variables` 10.3s 超时根因与会话级静默渲染解决方案。
+- [**Android JVM 扩展与工程化体系**](docs/android-jvm-extension.md)：ILS 插件 SPI、`plugin.xml` 声明、K2 Compose 命名豁免、Gradle 9.8.0 规范化与反编译器实测横评。
+- [**ILS 私有协议与生命周期治理**](docs/ils-protocol-and-lifecycle.md)：ILS 271 (JBR 25) 升级适配、`server.port` 三行格式解析、CalVer 策略与 ModCommand QuickFix 完整性。
+- [**DAP 代理、工作区隔离与测试体系**](docs/dap-proxy-and-workspace.md)：stdio 分帧粘包处理、多工作区 systemPath 隔离、DAP 状态机与测试夹具设计。
+
+---
 
 ## 使用边界
 
-- 测试适配器的直接 JVM 启动路径与 Maven Surefire、Gradle `test` 的执行环境有差异。依赖构建工具测试配置时，通过原构建工具启动目标 JVM，再使用 JDWP attach 调试。
-- 部分 Kotlin 测试文件的服务端自动发现可能返回空结果；显式测试 ID 仍受服务端运行能力约束。
-- Android 工程的构建与测试优先使用实际 Gradle 任务，调试通过 JDWP attach 接入。
-- 调用层次查询受上游生产代码范围限制；分析测试代码引用时使用 `references`。
+- **测试执行环境**：调试适配器的直接 JVM 启动方式与 Maven Surefire 或 Gradle `test` 运行环境有差异。如需完全对齐构建工具环境，建议通过构建工具启动目标 JVM 并以 JDWP attach 方式接入。
+- **构建优先原则**：Android 工程的编译、资源打包与自动化测试优先使用工程原生的 Gradle 任务执行，调试通过 JDWP attach 接入。
+- **代码调用层次**：调用层次（Call Hierarchy）查询受上游代码索引范围限制；测试用例中的调用分析建议使用 `references`。
