@@ -1163,7 +1163,6 @@ export async function discoverJdks(
         : [
             { root: join(homedir(), '.jdks'), source: 'system' },
             { root: join(homedir(), '.sdkman', 'candidates', 'java'), source: 'system' },
-            { root: 'F:/toolchains/jvms/store', source: 'store' },
           ];
 
   if (

@@ -25,6 +25,7 @@ test('parseJdkPath handles unquoted and quoted paths with spaces', () => {
 
 test('/intellij workspace (default) and status report project JDK and applied state', async () => {
   const pi = createMockPi();
+  const mockJdk21 = join(tmpdir(), 'mock-jdks', '21.0.4');
   const mockApi = {
     async getWorkspaceInfo(root: string) {
       return {
@@ -36,9 +37,9 @@ test('/intellij workspace (default) and status report project JDK and applied st
         lastConnected: null,
         hasLspRecorded: false,
         projectType: 'maven',
-        savedJdk: 'F:/toolchains/jvms/store/21.0.4',
+        savedJdk: mockJdk21,
         savedVersion: '21.0.4',
-        appliedJdk: 'F:/toolchains/jvms/store/21.0.4',
+        appliedJdk: mockJdk21,
         isApplied: true,
       };
     },
@@ -62,6 +63,8 @@ test('/intellij workspace (default) and status report project JDK and applied st
 
 test('/intellij workspace status clearly reports saved but not yet applied JDK', async () => {
   const pi = createMockPi();
+  const mockJdk21 = join(tmpdir(), 'mock-jdks', '21.0.4');
+  const mockJdk17 = join(tmpdir(), 'mock-jdks', '17.0.2');
   const mockApi = {
     async getWorkspaceInfo(root: string) {
       return {
@@ -73,9 +76,9 @@ test('/intellij workspace status clearly reports saved but not yet applied JDK',
         lastConnected: null,
         hasLspRecorded: false,
         projectType: 'gradle',
-        savedJdk: 'F:/toolchains/jvms/store/21.0.4',
+        savedJdk: mockJdk21,
         savedVersion: '21.0.4',
-        appliedJdk: 'F:/toolchains/jvms/store/17.0.2',
+        appliedJdk: mockJdk17,
         isApplied: false,
       };
     },
@@ -108,7 +111,12 @@ test('/intellij workspace list formats configured workspaces and handles empty s
   assert.match(ctxEmpty.notifications[0].msg, /No configured IntelliJ workspaces found/);
 
   listReturn = [
-    { canonicalPath: 'f:/app-a', projectType: 'maven', savedJdk: 'F:/jdk-21', isApplied: true },
+    {
+      canonicalPath: 'f:/app-a',
+      projectType: 'maven',
+      savedJdk: join(tmpdir(), 'mock-jdks', '21.0.4'),
+      isApplied: true,
+    },
     {
       canonicalPath: 'f:/app-b',
       projectType: 'gradle',
@@ -130,27 +138,29 @@ test('/intellij workspace list formats configured workspaces and handles empty s
   await cmd.handler('workspace list', ctxPopulated);
   assert.equal(ctxPopulated.notifications.length, 1);
   assert.match(ctxPopulated.notifications[0].msg, /IntelliJ workspaces \(2\):/);
-  assert.match(
-    ctxPopulated.notifications[0].msg,
-    /f:\/app-a \(maven, JDK: F:\/jdk-21 \[applied\]\)/,
+  const expectedJdk = join(tmpdir(), 'mock-jdks', '21.0.4');
+  assert.ok(
+    ctxPopulated.notifications[0].msg.includes(`f:/app-a (maven, JDK: ${expectedJdk} [applied])`),
   );
   assert.match(ctxPopulated.notifications[0].msg, /f:\/app-b \(gradle, JDK: default\)/);
 });
 
 test('/intellij workspace jdks discovers candidates and formats vendor/version', async () => {
   const pi = createMockPi();
+  const mockJdk21 = join(tmpdir(), 'mock-jdks', '21.0.4');
+  const mockJdk17 = join(tmpdir(), 'mock-jdks', '17.0.10');
   const mockApi = {
     async discoverJdks(): Promise<DiscoveredJdkItem[]> {
       return [
         {
-          javaHome: 'F:/toolchains/jvms/store/21.0.4',
+          javaHome: mockJdk21,
           version: '21.0.4',
           vendor: 'Eclipse Adoptium',
           majorVersion: 21,
           source: 'test',
         },
         {
-          javaHome: 'C:/Program Files/Java/jdk-17',
+          javaHome: mockJdk17,
           version: '17.0.10',
           vendor: 'Oracle Corporation',
           majorVersion: 17,
@@ -167,14 +177,8 @@ test('/intellij workspace jdks discovers candidates and formats vendor/version',
   await cmd.handler('workspace jdks', ctx);
   assert.equal(ctx.notifications.length, 1);
   assert.match(ctx.notifications[0].msg, /Discovered JDKs \(2\):/);
-  assert.match(
-    ctx.notifications[0].msg,
-    /v21\.0\.4 \(Eclipse Adoptium\): F:\/toolchains\/jvms\/store\/21\.0\.4/,
-  );
-  assert.match(
-    ctx.notifications[0].msg,
-    /v17\.0\.10 \(Oracle Corporation\): C:\/Program Files\/Java\/jdk-17/,
-  );
+  assert.ok(ctx.notifications[0].msg.includes(`v21.0.4 (Eclipse Adoptium): ${mockJdk21}`));
+  assert.ok(ctx.notifications[0].msg.includes(`v17.0.10 (Oracle Corporation): ${mockJdk17}`));
 });
 
 test('/intellij workspace jdk <path> with spaces saves and reimports successfully', async () => {
@@ -320,6 +324,8 @@ test('/intellij workspace jdk reports error and does not reimport on invalid JDK
 
 test('/intellij workspace jdk without path uses ctx.ui.select when available', async () => {
   const pi = createMockPi();
+  const mockJdk21 = join(tmpdir(), 'mock-jdks', '21.0.4');
+  const mockJdk17 = join(tmpdir(), 'mock-jdks', '17.0.2');
   let selectTitle = '';
   let selectItems: SelectItem[] = [];
   let savedPath: string | null = null;
@@ -328,14 +334,14 @@ test('/intellij workspace jdk without path uses ctx.ui.select when available', a
     async discoverJdks(): Promise<DiscoveredJdkItem[]> {
       return [
         {
-          javaHome: 'F:/toolchains/jvms/store/21.0.4',
+          javaHome: mockJdk21,
           version: '21.0.4',
           vendor: 'Adoptium',
           majorVersion: 21,
           source: 'test',
         },
         {
-          javaHome: 'C:/Program Files/Java/jdk-17',
+          javaHome: mockJdk17,
           version: '17.0.2',
           vendor: 'Oracle',
           majorVersion: 17,
@@ -379,21 +385,17 @@ test('/intellij workspace jdk without path uses ctx.ui.select when available', a
   await cmd.handler('workspace jdk', ctx);
   assert.equal(selectTitle, 'Select JDK for workspace:');
   assert.equal(selectItems.length, 2);
-  assert.equal(savedPath, 'F:/toolchains/jvms/store/21.0.4');
-  assert.match(
-    ctx.notifications[0].msg,
-    /Workspace JDK saved and applied: F:\/toolchains\/jvms\/store\/21\.0\.4/,
-  );
+  assert.equal(savedPath, mockJdk21);
+  assert.ok(ctx.notifications[0].msg.includes(`Workspace JDK saved and applied: ${mockJdk21}`));
 });
 
 test('/intellij workspace jdk without path handles user cancellation in ctx.ui.select', async () => {
   const pi = createMockPi();
+  const mockJdk21 = join(tmpdir(), 'mock-jdks', '21.0.4');
   let setCalled = false;
   const mockApi = {
     async discoverJdks(): Promise<DiscoveredJdkItem[]> {
-      return [
-        { javaHome: 'F:/jdk-21', version: '21', vendor: '', majorVersion: 21, source: 'test' },
-      ];
+      return [{ javaHome: mockJdk21, version: '21', vendor: '', majorVersion: 21, source: 'test' }];
     },
     async setWorkspaceJdk() {
       setCalled = true;
@@ -519,6 +521,7 @@ test('/intellij workspace status surfaces sanitized failure and license state al
 
   try {
     const pi = createMockPi();
+    const mockJdk21 = join(tmpdir(), 'mock-jdks', '21.0.4');
     const mockApi = {
       async getWorkspaceInfo(root: string) {
         return {
@@ -530,9 +533,9 @@ test('/intellij workspace status surfaces sanitized failure and license state al
           lastConnected: null,
           hasLspRecorded: false,
           projectType: 'gradle',
-          savedJdk: 'F:/toolchains/jvms/store/21.0.4',
+          savedJdk: mockJdk21,
           savedVersion: '21.0.4',
-          appliedJdk: 'F:/toolchains/jvms/store/21.0.4',
+          appliedJdk: mockJdk21,
           isApplied: true,
         };
       },
@@ -554,10 +557,7 @@ test('/intellij workspace status surfaces sanitized failure and license state al
     assert.equal(ctx.notifications.length, 1);
     const msg = ctx.notifications[0].msg;
 
-    assert.match(
-      msg,
-      /IntelliJ workspace: f:\/projects\/app \(gradle\); JDK: F:\/toolchains\/jvms\/store\/21\.0\.4/,
-    );
+    assert.ok(msg.includes(`IntelliJ workspace: f:/projects/app (gradle); JDK: ${mockJdk21}`));
     assert.match(msg, /index: indexing \(Syncing Gradle model\)/);
     assert.match(msg, /license: needs-activation; features declined/);
     assert.match(msg, /failure: import \(import\) - Failed to fetch/);

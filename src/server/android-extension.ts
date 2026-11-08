@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_SERVER_VERSION } from './bundle-metadata.js';
 
-const EXTENSION_SERVER_VERSION = '271.2085.0';
 const EXTENSION_ASSETS = [
   'intellij-android.jar',
   'adblib-9.4.1.jar',
@@ -52,9 +52,9 @@ export async function resolveAndroidExtension(
   executable: string,
 ): Promise<AndroidExtensionResolution> {
   const version = await detectServerVersion(executable);
-  if (version !== EXTENSION_SERVER_VERSION)
+  if (version !== DEFAULT_SERVER_VERSION)
     return {
-      reason: `Android extension requires ILS ${EXTENSION_SERVER_VERSION}; detected ${version ?? 'unknown'}`,
+      reason: `Android extension requires ILS ${DEFAULT_SERVER_VERSION}; detected ${version ?? 'unknown'}`,
     };
   const directory = process.env.OMP_ANDROID_LS_EXTENSION_DIR
     ? resolve(process.env.OMP_ANDROID_LS_EXTENSION_DIR)

@@ -180,6 +180,51 @@ test('isPathInside and findProjectIdForScope: segment boundary and file scopes',
   );
 });
 
+test('nested configuration scopes select the deepest project independently of the default', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-intellij-nested-scope-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const systemPath = join(root, 'system');
+  const paths = [join(root, 'repo'), join(root, 'repo', 'sub'), join(root, 'repo', 'sub', 'deep')];
+  const names = ['repo', 'sub', 'deep'];
+  const ids = paths.map((path) => canonicalizeProject(path).id);
+  for (let i = paths.length - 1; i >= 0; i--) {
+    await updateProjectSettings(systemPath, ids[i], { name: names[i] }, { projectPath: paths[i] });
+  }
+  const queries = paths.map((path) => ({
+    scopeUri: pathToFileURL(join(path, 'Main.java')).href,
+    section: 'name',
+  }));
+  for (const defaultId of [...ids, 'external-default']) {
+    assert.deepEqual(await resolveConfigurationItems(systemPath, defaultId, queries), names);
+  }
+  assert.equal(await findProjectIdForScope(systemPath, ids[0]), ids[0]);
+  assert.equal(
+    await findProjectIdForScope(systemPath, ids[0], pathToFileURL(join(root, 'repo-sibling')).href),
+    null,
+  );
+});
+
+test('identical configuration roots prefer the default project then a stable project ID', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-intellij-scope-tie-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, 'project');
+  const ids = ['beta', 'alpha'];
+  for (const id of ids) {
+    await saveProjectConfiguration(root, {
+      id,
+      projectPath,
+      rootUri: pathToFileURL(projectPath).href,
+      updatedAt: Date.now(),
+      settings: { owner: id },
+    });
+  }
+  const items = [
+    { scopeUri: pathToFileURL(join(projectPath, 'Main.java')).href, section: 'owner' },
+  ];
+  assert.deepEqual(await resolveConfigurationItems(root, 'beta', items), ['beta']);
+  assert.deepEqual(await resolveConfigurationItems(root, 'external-default', items), ['alpha']);
+});
+
 test('didChangeConfiguration replaces snapshot and invalidates cached section responses', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'omp-intellij-replace-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -10,7 +10,18 @@ plugins {
     java
 }
 
-val targetVersion = "271.2085.0"
+val metadataFile = layout.projectDirectory.file("../../src/server/bundle-metadata.ts")
+val metadataText = providers.fileContents(metadataFile).asText.orNull
+    ?: throw GradleException("Bundle metadata not found at: ${metadataFile.asFile.absolutePath}")
+
+val versionMatch = Regex("""export\s+const\s+DEFAULT_SERVER_VERSION\s*=\s*['"]([^'"]+)['"]\s*;""")
+    .find(metadataText)
+    ?: throw GradleException("Unable to extract DEFAULT_SERVER_VERSION from ${metadataFile.asFile.absolutePath}")
+
+val targetVersion = versionMatch.groupValues[1].trim()
+if (!Regex("""^\d+(?:\.\d+){2,3}$""").matches(targetVersion)) {
+    throw GradleException("Extracted DEFAULT_SERVER_VERSION '$targetVersion' is not a valid server version")
+}
 
 fun resolveIlsHomeDir(): File? {
     val prop = providers.gradleProperty("ilsHome").orNull

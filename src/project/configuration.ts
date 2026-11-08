@@ -191,32 +191,40 @@ export async function findProjectIdForScope(
     return null;
   }
 
-  // Test default project first
   const defaultSnap = await loadProjectConfiguration(systemPath, defaultProjectId);
-  if (defaultSnap?.projectPath && isPathInside(targetPath, defaultSnap.projectPath)) {
-    return defaultProjectId;
-  }
+  let bestId =
+    defaultSnap?.projectPath && isPathInside(targetPath, defaultSnap.projectPath)
+      ? defaultProjectId
+      : null;
+  let bestLength = bestId && defaultSnap ? resolve(defaultSnap.projectPath).length : -1;
 
-  // Check other known project snapshots in raw-config dir
   const configDir = getRawConfigDir(systemPath);
   let entries: string[];
   try {
     entries = await readdir(configDir);
   } catch {
-    return null;
+    return bestId;
   }
 
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue;
-    const projId = entry.slice(0, -5);
-    if (projId === defaultProjectId) continue;
-    const snap = await loadProjectConfiguration(systemPath, projId).catch(() => null);
-    if (snap?.projectPath && isPathInside(targetPath, snap.projectPath)) {
-      return projId;
+    const projectId = entry.slice(0, -5);
+    if (projectId === defaultProjectId) continue;
+    const snapshot = await loadProjectConfiguration(systemPath, projectId).catch(() => null);
+    if (!snapshot?.projectPath || !isPathInside(targetPath, snapshot.projectPath)) continue;
+    const length = resolve(snapshot.projectPath).length;
+    if (
+      length > bestLength ||
+      (length === bestLength &&
+        bestId !== defaultProjectId &&
+        (bestId === null || projectId < bestId))
+    ) {
+      bestId = projectId;
+      bestLength = length;
     }
   }
 
-  return null;
+  return bestId;
 }
 
 export async function recordConfigurationItems(

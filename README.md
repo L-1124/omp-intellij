@@ -67,6 +67,8 @@ omp plugin install --force omp-intellij@omp-intellij
    /intellij workspace jdk <目标 JDK 路径>
    ```
 
+   JDK 自动发现复用已保存的工程配置、`JAVA_HOME`、`JDK_HOME`、`PATH` 和系统标准安装位置。
+
 ---
 
 ## 日常使用
@@ -92,6 +94,8 @@ omp plugin install --force omp-intellij@omp-intellij
 - `wait`：阻塞等待后台服务端索引完成。
 - `model`：查询源文件所属模块、SDK、Classpath 与构建链路。
 - `reload`：重新导入并同步当前工程配置。
+
+嵌套工程的配置查询按文件 scope 选择最具体的已注册工程根；默认工程不会覆盖子工程配置。
 
 ---
 
@@ -176,14 +180,17 @@ omp plugin install --force omp-intellij@omp-intellij
 
 如需修改扩展或本地从源码构建打包：
 
+服务端目标版本统一维护在 `src/server/bundle-metadata.ts`，运行时加载器与 Gradle 构建共同消费。开发环境配置脚本读取编译后的元数据，因此首次构建先编译 TypeScript。
+
 ```sh
-# 1. 一键配置本地环境并编译 JVM 扩展资产
-npm run build:jvm
-# 2. 编译 TypeScript 桥接层并执行测试
+# 1. 编译 TypeScript 桥接层与 bundle 元数据
 npm run build
+# 2. 配置本地环境并编译 JVM 扩展资产
+npm run build:jvm
+# 3. 执行测试
 npm test
 
-# 3. 验证 npm 包分发清单
+# 4. 验证 npm 包分发清单
 npm pack --dry-run --json --ignore-scripts
 ```
 

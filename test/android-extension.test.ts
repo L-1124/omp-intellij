@@ -10,6 +10,7 @@ import {
   mergeIjJavaOptions,
   resolveAndroidExtension,
 } from '../src/server/android-extension.js';
+import { DEFAULT_SERVER_VERSION } from '../src/server/bundle-metadata.js';
 
 test('detectServerVersion extracts exact version from build.txt', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-detect-'));
@@ -64,7 +65,9 @@ test('resolveAndroidExtension rejects wrong ILS version', async () => {
     assert.equal(res.pluginPath, undefined);
     assert.match(
       res.reason ?? '',
-      /Android extension requires ILS 271\.2085\.0; detected 263\.7084\.0/,
+      new RegExp(
+        `Android extension requires ILS ${DEFAULT_SERVER_VERSION.replace(/\./g, '\\.')}; detected 263\\.7084\\.0`,
+      ),
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -87,7 +90,7 @@ test('resolveAndroidExtension rejects invalid characters in extension directory'
   const dir = await mkdtemp(join(tmpdir(), 'omp-res-'));
   const originalEnv = process.env.OMP_ANDROID_LS_EXTENSION_DIR;
   try {
-    await writeFile(join(dir, 'build.txt'), 'ILS-271.2085.0\n', 'utf8');
+    await writeFile(join(dir, 'build.txt'), `ILS-${DEFAULT_SERVER_VERSION}\n`, 'utf8');
     const executable = join(dir, 'bin', 'intellij-server');
 
     process.env.OMP_ANDROID_LS_EXTENSION_DIR = 'C:/path,with,comma';
@@ -125,8 +128,10 @@ async function extensionFixture(t: TestContext) {
     else process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
     await rm(directory, { recursive: true, force: true });
   });
-  await cp('resources/ils/271.2085.0/intellij-android', extension, { recursive: true });
-  await writeFile(join(directory, 'build.txt'), 'ILS-271.2085.0\n');
+  await cp(`resources/ils/${DEFAULT_SERVER_VERSION}/intellij-android`, extension, {
+    recursive: true,
+  });
+  await writeFile(join(directory, 'build.txt'), `ILS-${DEFAULT_SERVER_VERSION}\n`);
   process.env.OMP_ANDROID_LS_EXTENSION_DIR = extension;
   const executable = join(directory, 'bin', 'intellij-server');
   const manifestPath = join(extension, 'manifest.json');

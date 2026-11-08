@@ -358,6 +358,43 @@ test('discoverJdks finds bounded candidate JDKs and deduplicates', async () => {
   }
 });
 
+test('discoverJdks combines injected and configured JDKs', async () => {
+  const tempDir = join(tmpdir(), `omp-test-jdk-disc-${Math.random().toString(36).slice(2)}`);
+  const configDir = join(tempDir, 'config');
+  const candidateDir = join(tempDir, 'candidate');
+  const injectedJdk = join(candidateDir, 'jdk-21');
+  const configJdk = join(tempDir, 'config-jdk-17');
+
+  try {
+    await createMockJdk(injectedJdk, { version: '21.0.4', implementor: 'Eclipse Adoptium' });
+    await createMockJdk(configJdk, { version: '17.0.9', implementor: 'Oracle Corporation' });
+    await mkdir(configDir, { recursive: true });
+
+    const configPath = join(configDir, 'test-proj.json');
+    await writeFile(configPath, JSON.stringify({ javaHome: configJdk }), 'utf8');
+
+    const jdks = await discoverJdks(tempDir, {
+      configDir,
+      candidateRoots: [candidateDir],
+      includeDefaultRoots: false,
+      env: {},
+    });
+
+    const foundInjected = jdks.find(
+      (j) => resolve(j.javaHome).toLowerCase() === resolve(injectedJdk).toLowerCase(),
+    );
+    const foundConfig = jdks.find(
+      (j) => resolve(j.javaHome).toLowerCase() === resolve(configJdk).toLowerCase(),
+    );
+    assert.ok(foundInjected, 'injected candidateRoot JDK should be found');
+    assert.equal(foundInjected.source, 'injected');
+    assert.ok(foundConfig, 'configDir JDK should be found');
+    assert.equal(foundConfig.source, 'config');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('executeBuild integrates managed JDK and prepends effective JAVA_HOME to PATH', async () => {
   const configDir = join(tmpdir(), `omp-test-cfg-eb-${Math.random().toString(36).slice(2)}`);
   const projDir = join(tmpdir(), `omp-test-proj-eb-${Math.random().toString(36).slice(2)}`);

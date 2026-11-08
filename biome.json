@@ -7,8 +7,14 @@
       "!!**/node_modules",
       "!!**/dist",
       "!!**/dist-test",
+      "!!**/.runtime",
+      "!!resources",
+      "!!**/build",
+      "!!**/.gradle",
       "!!test-fixtures",
-      "!package-lock.json"
+      "!package-lock.json",
+      "!.dap.json",
+      "!.lsp.json"
     ]
   },
   "formatter": {

@@ -1,7 +1,7 @@
 {
   "name": "omp-intellij",
   "version": "2026.1107.0",
-  "description": "IntelliJ language intelligence, JVM execution and debugging for OMP",
+  "description": "IntelliJ language intelligence, JVM execution and debugging, with Android JDWP attach for OMP",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -35,7 +35,7 @@
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
     "prepack": "npm run build",
-    "build:jvm": "node scripts/setup-dev-env.mjs && node -e \"const { spawnSync } = require('node:child_process'); const isWin = process.platform === 'win32'; const cmd = isWin ? 'gradlew.bat' : './gradlew'; const res = spawnSync(cmd, ['stageExtension', '--no-daemon'], { cwd: 'jvm/intellij-android', stdio: 'inherit', shell: isWin }); process.exit(res.status ?? 0);\"",
+    "build:jvm": "node scripts/setup-dev-env.mjs && node -e \"const { spawnSync } = require('node:child_process'); const isWin = process.platform === 'win32'; const cmd = isWin ? 'gradlew.bat' : './gradlew'; const res = spawnSync(cmd, ['stageExtension', '--no-daemon'], { cwd: 'jvm/intellij-android', stdio: 'inherit', shell: isWin }); if (res.error) { console.error(res.error); process.exit(1); } if (res.status === null) { console.error('Build process failed without exit code' + (res.signal ? ': signal ' + res.signal : '')); process.exit(1); } process.exit(res.status);\"",
     "clean:runtime": "node scripts/clean-runtime.mjs",
     "watch": "tsc -w",
     "pretest": "node -e \"require('node:fs').rmSync('dist-test', { recursive: true, force: true })\" && npm run build && tsc -p tsconfig.test.json",
