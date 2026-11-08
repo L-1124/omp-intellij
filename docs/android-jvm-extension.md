@@ -72,7 +72,7 @@
 - **问题现象**：早期使用 `build.mjs` 配合本地 Node.js 脚本直接查找 JAR、调用系统 `javac` 打包。当需要引入 `adblib:9.4.1` 和 `adblib-tools:9.4.1` 时，面临无依赖传递解析、无依赖版本锁定、无法运行 JUnit 单元测试、无法在 IDE 中正常获得符号索引的问题。
 - **根因排查**：手写构建脚本违背了标准 JVM 工程规范，在面对多依赖、安全签名验证和多环境分发时不可维护。
 - **解决方案**：重构成标准 Gradle 9.8.0 Java 工程（`jvm/intellij-android/`），引入 `gradle.lockfile` 严格锁定所有配置的直接依赖与传递依赖；引入 `gradle/verification-metadata.xml` 校验依赖的 SHA-256；编写定制任务 `stageExtension` 完成构建归档与资产原子替换。
-- **实测对比**：CI/本地构建完全可复现，且通过 `scripts/build-jvm.mjs` 自动调度 JBR 25 执行，摆脱了宿主环境配置差异。
+- **实测对比**：CI/本地构建完全可复现，且通过 `node scripts/setup-dev-env.mjs` 准备 `local.properties` 后直接调用标准 Gradle Wrapper 执行，摆脱了宿主环境配置差异与命令行外部包装。
 
 ---
 
@@ -281,18 +281,21 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 1. 编译构建与资产打桩
 
-由于扩展强依赖精确的 ILS JBR 25 运行时，严禁使用本地任意全局 JDK 编译。统一使用 `scripts/build-jvm.mjs`：
+通过 `scripts/setup-dev-env.mjs` 自动检测已安装的 ILS 并生成 `local.properties`（未安装时自动从官方 CDN 下载保底）；随后直接运行 Gradle Wrapper：
 
 ```bash
-# 执行完整 Gradle stageExtension，自动提取 ILS JBR 25
-node scripts/build-jvm.mjs --ils-home "F:/toolchains/IntelliJ Managed Server/versions/271.2085.0"
+# 1. 一键准备本地开发环境并写入 jvm/intellij-android/local.properties
+node scripts/setup-dev-env.mjs
+
+# 2. 直接在子项目运行标准 Gradle 构建（或运行 npm run build:jvm）
+cd jvm/intellij-android
+./gradlew stageExtension --no-daemon
 ```
 
-该脚本将自动执行以下操作：
-1. 校验 `build.txt` 必须包含 `ILS-271.2085.0`；
-2. 提取 `jbr/bin/java` 并设置 `JAVA_HOME` 与 `-Dorg.gradle.java.installations.paths`；
-3. 执行 `GradleWrapperMain stageExtension --no-daemon -PilsHome=...`；
-4. 生成 STORED（零压缩）的 `intellij-android.jar` 及伴随的 `.sha256` 旁挂文件。
+构建流程自动完成：
+1. `build.gradle.kts` 从 `local.properties` 读取 `ils.home`，并在配置阶段容错；
+2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
+3. 生成 STORED（零压缩）的 `intellij-android.jar` 及伴随的 `.sha256` 旁挂文件。
 
 ### 2. 资产门禁核验（`check:assets`）
 

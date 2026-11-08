@@ -159,7 +159,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
    - Windows 下 `IJ_JAVA_OPTIONS` 中的路径若含反斜杠 `\` 会被参数解析器吞掉转义字符，必须统一转为 `/` 并支持合并已有逗号/分号分隔的 `-Dplugin.path`。
 9. **ILS 271 自带 JBR25 工具链缺失 `jar` / `jdk.jartool`**：
    - 实测 ILS `271.2085.0` 自带的 `jbr/bin` 包含 `javac.exe`（`25.0.4.1`），但**未包含 `jar.exe` / `javap.exe`，且裁剪了 `jdk.jartool` 模块**。
-   - 构建现由 Gradle 9.8.0 Java 插件完成，使用发行包 JBR 25 的 toolchain/release=25，Gradle 自行创建 STORED、固定顺序与时间戳的归档。`scripts/build-jvm.mjs` 仅选择 SDK/JBR 并调用 Wrapper；资产检查器继续独立检查自有 classfile major69、SPI 与插件描述符。
+   - 构建由标准 Gradle 9.8.0 Java 插件完成，通过 `local.properties`（由 `node scripts/setup-dev-env.mjs` 生成或本地配置）绑定 ILS SDK，使用 JBR 25 的 toolchain/release=25，Gradle 自行创建 STORED、固定顺序与时间戳的归档；资产检查器继续独立检查自有 classfile major69、SPI 与插件描述符。
 
 
 ## 3. 官方实现参照与采用范围
@@ -548,9 +548,9 @@ RenameFix 曾出现的丢失现象已查明根因并解决：服务端在转换�
 - 自有 JAR（`intellij-android.jar`）只含自有类、`META-INF/plugin.xml`、SPI services（`META-INF/services/com.jetbrains.ls.api.features.LanguageServerExtension`）和版本元数据；不 shade ILS、Kotlin、协程或 Android Studio 的二进制。
 - `plugin.xml` 声明 `org.jetbrains.ls.core`、`com.intellij.modules.platform`、`com.intellij.modules.java`、`org.jetbrains.ls.plugin.kotlin`、`org.jetbrains.ls.feature.xml`，以及 `org.jetbrains.android` 命名空间下的导航 Provider、调试会话监听器与字段可见性 Provider；`<idea-version since-build="271"/>` 不设 `until-build`（因 ILS 运行时 `idea.plugins.compatible.build=999.SNAPSHOT`），由启动层锁定 `271.2085.0`。
 - 编译 classpath 取自同一 ILS 发行包的 core、analysis、projectModel、UAST、language-server API/analyzer、Java PSI/UAST、Kotlin 分析 API，以及 `plugins/xml/lib/modules/` 中的 XML PSI/parser/DOM 和 Provider 基类所在模块。以实际插件描述符和 JAR 校验依赖，不沿用 263 的根 lib 布局；Lint 另加 §14.2 的 6 个核心 JAR。
-- `scripts/build-jvm.mjs` 使用该精确发行包的 JBR 启动本工程 Wrapper，传入显式 toolchain 路径并调用 `stageExtension --no-daemon`。Gradle 创建自有 STORED 归档，官方依赖保持原始字节；同文件系统 staging 与 rollback 保护现有资产，manifest 最后原子替换。
+- 环境通过 `node scripts/setup-dev-env.mjs` 自动检测已安装 ILS（或从官方 CDN 下载保底）并生成 `local.properties`。Gradle 直接读取 `local.properties` 或 `~/.omp/agent/intellij.json`，使用 JBR 启动 Wrapper 执行 `stageExtension --no-daemon`。Gradle 创建自有 STORED 归档，官方依赖保持原始字节；同文件系统 staging 与 rollback 保护现有资产，manifest 最后原子替换。
 - `package.json.files` 显式分发源码、Wrapper、Gradle 构建输入/锁/校验元数据、三 JAR 与 TS 入口，排除 build/ 和 .gradle/ 缓存。
-- `build:jvm` 指向 `scripts/build-jvm.mjs`；`check:assets` 指向现有资产检查器。
+- `build:jvm` 经由 `setup-dev-env.mjs` 准备环境后直接调用 Gradle Wrapper 执行 `stageExtension`；`check:assets` 指向现有资产检查器。
   - `"prepack"` 脚本为 `"npm run build && npm run check:assets"`（校验当前阶段发布的精确版本 JAR、ABI、体积、清单与 `.sha256` 旁挂文件，不强求打包机存在 JDK25/ILS 编译环境）。
 - 复制 Apache-2.0 参考代码及分发 Apache-2.0 Lint 运行库时保留必要版权与许可证声明；整个 ILS/Kotlin 发行包继续沿用既有下载和 EULA 流程。
 

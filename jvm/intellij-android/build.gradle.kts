@@ -1,6 +1,9 @@
+import groovy.json.JsonSlurper
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.Properties
 import java.util.UUID
 
 plugins {
@@ -9,33 +12,70 @@ plugins {
 
 val targetVersion = "271.2085.0"
 
-val ilsHomeProp = project.findProperty("ilsHome") as String?
-val ilsHomeEnv = System.getenv("OMP_ILS_HOME")
-val ilsHomeStr = if (!ilsHomeProp.isNullOrBlank()) ilsHomeProp else (ilsHomeEnv ?: "")
+fun resolveIlsHomeDir(): File? {
+    val prop = providers.gradleProperty("ilsHome").orNull
+    if (!prop.isNullOrBlank()) {
+        val f = file(prop)
+        if (f.isDirectory) return f
+    }
 
-if (ilsHomeStr.isBlank()) {
-    throw GradleException(
-        "ILS home directory must be provided via -PilsHome=<path> or OMP_ILS_HOME environment variable."
+    val localPropsFile = layout.projectDirectory.file("local.properties").asFile
+    if (localPropsFile.isFile) {
+        val props = Properties().apply {
+            localPropsFile.inputStream().use { load(it) }
+        }
+        val p = props.getProperty("ils.home")
+        if (!p.isNullOrBlank()) {
+            val f = file(p)
+            if (f.isDirectory) return f
+        }
+    }
+
+    val userHome = System.getProperty("user.home")
+    val cfgFile = file("$userHome/.omp/agent/intellij.json")
+    if (cfgFile.isFile) {
+        runCatching {
+            val json = JsonSlurper().parse(cfgFile) as? Map<*, *>
+            val serverMap = json?.get("server") as? Map<*, *>
+            val installDir = (serverMap?.get("installDir") ?: json?.get("installDir")) as? String
+            if (!installDir.isNullOrBlank()) {
+                val candidate = file("$installDir/versions/$targetVersion")
+                if (candidate.isDirectory) return candidate
+            }
+        }
+    }
+
+    val defaultCandidate = file("$userHome/.omp/servers/intellij/versions/$targetVersion")
+    return defaultCandidate.takeIf { it.isDirectory }
+}
+
+val resolvedHome = resolveIlsHomeDir()
+val ilsHomeDir: File = resolvedHome ?: layout.buildDirectory.dir("missing-ils-sdk").get().asFile
+
+val buildTxt = ilsHomeDir.resolve("build.txt")
+val isValidIls = resolvedHome != null && buildTxt.isFile && buildTxt.readText().trim() == "ILS-$targetVersion"
+
+if (!isValidIls) {
+    logger.warn(
+        "[WARN] ILS $targetVersion SDK not resolved at ${ilsHomeDir.absolutePath}.\n" +
+        "Run `node ../../scripts/setup-dev-env.mjs` to auto-configure development environment,\n" +
+        "or specify `ils.home=<path>` in jvm/intellij-android/local.properties."
     )
 }
 
-val ilsHomeDir = file(ilsHomeStr)
-if (!ilsHomeDir.exists() || !ilsHomeDir.isDirectory) {
-    throw GradleException("ILS home directory does not exist or is not a directory: ${ilsHomeDir.absolutePath}")
-}
-
-val buildTxt = ilsHomeDir.resolve("build.txt")
-if (!buildTxt.exists()) {
-    throw GradleException("ILS installation build.txt missing at: ${buildTxt.absolutePath}")
-}
-
-val buildVersion = buildTxt.readText().trim()
-if (buildVersion != "ILS-$targetVersion") {
-    throw GradleException("ILS build.txt mismatch: expected 'ILS-$targetVersion', got '$buildVersion'")
+val jbrDir = ilsHomeDir.resolve("jbr")
+if (jbrDir.isDirectory) {
+    val existingInstallations = System.getProperty("org.gradle.java.installations.paths")
+    val jbrPath = jbrDir.absolutePath
+    if (existingInstallations.isNullOrBlank()) {
+        System.setProperty("org.gradle.java.installations.paths", jbrPath)
+    } else if (!existingInstallations.contains(jbrPath)) {
+        System.setProperty("org.gradle.java.installations.paths", "$existingInstallations,$jbrPath")
+    }
 }
 
 val ilsLibJars = fileTree(ilsHomeDir.resolve("lib")) {
-    include("**/*.jar")
+    include("*.jar")
 }
 val ilsPluginJars = fileTree(ilsHomeDir.resolve("plugins")) {
     include("**/*.jar")
@@ -62,15 +102,17 @@ dependencyLocking {
     lockAllConfigurations()
 }
 
+val adblibVersion = "9.4.1"
+
 dependencies {
     compileOnly(sdkJars)
     testCompileOnly(sdkJars)
     testRuntimeOnly(sdkJars)
 
-    implementation("com.android.tools.adblib:adblib:9.4.1") {
+    implementation("com.android.tools.adblib:adblib:$adblibVersion") {
         isTransitive = false
     }
-    implementation("com.android.tools.adblib:adblib-tools:9.4.1") {
+    implementation("com.android.tools.adblib:adblib-tools:$adblibVersion") {
         isTransitive = false
     }
 
@@ -86,65 +128,69 @@ tasks.named<Jar>("jar") {
     isReproducibleFileOrder = true
 }
 
-tasks.register("stageExtension") {
-    dependsOn(tasks.named("jar"))
-    group = "build"
-    description = "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/271.2085.0/intellij-android/"
+abstract class StageExtensionTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NAME_ONLY)
+    abstract val builtJar: RegularFileProperty
 
-    val jarTask = tasks.named<Jar>("jar")
-    val runtimeClasspath = configurations.named("runtimeClasspath")
-    inputs.file(jarTask.flatMap { it.archiveFile })
-    inputs.files(runtimeClasspath)
+    @get:InputFiles
+    @get:Classpath
+    abstract val runtimeClasspath: ConfigurableFileCollection
 
-    val extensionDir = file("${project.rootDir}/../../resources/ils/$targetVersion/intellij-android")
-    outputs.dir(extensionDir)
+    @get:Input
+    abstract val expectedUpstreamNames: SetProperty<String>
 
-    doLast {
-        val builtJarFile = jarTask.get().archiveFile.get().asFile
-        if (!builtJarFile.exists()) {
-            throw GradleException("Built JAR does not exist at: ${builtJarFile.absolutePath}")
+    @get:Input
+    abstract val serverVersion: Property<String>
+
+    @get:Input
+    abstract val gradleVersion: Property<String>
+
+    @get:OutputDirectory
+    abstract val extensionDir: DirectoryProperty
+
+    @TaskAction
+    fun stage() {
+        val jarFile = builtJar.get().asFile
+        if (!jarFile.exists()) {
+            throw GradleException("Built JAR does not exist at: ${jarFile.absolutePath}")
         }
 
-        val upstreamJars = runtimeClasspath.get().files.filter { it.extension == "jar" && it != builtJarFile }
-        val expectedUpstreamNames = setOf("adblib-9.4.1.jar", "adblib-tools-9.4.1.jar")
-        val actualUpstreamNames = upstreamJars.map { it.name }.toSet()
-        if (actualUpstreamNames != expectedUpstreamNames) {
-            throw GradleException("Unexpected upstream runtime JARs: expected $expectedUpstreamNames, got $actualUpstreamNames")
+        val upstreamJars = runtimeClasspath.files.filter { it.extension == "jar" && it != jarFile }
+        val expectedNames = expectedUpstreamNames.get()
+        val actualNames = upstreamJars.map { it.name }.toSet()
+        if (actualNames != expectedNames) {
+            throw GradleException("Unexpected upstream runtime JARs: expected $expectedNames, got $actualNames")
         }
 
-        val allJars = listOf(builtJarFile) + upstreamJars.sortedBy { it.name }
+        val allJars = listOf(jarFile) + upstreamJars.sortedBy { it.name }
+        val outDir = extensionDir.get().asFile
+        val targetLibDir = outDir.resolve("lib")
+        val targetManifest = outDir.resolve("manifest.json")
 
-        extensionDir.mkdirs()
-        val targetLibDir = extensionDir.resolve("lib")
-        targetLibDir.mkdirs()
-        val targetManifest = extensionDir.resolve("manifest.json")
-
-        val stagingDir = extensionDir.resolve(".staging-${UUID.randomUUID()}")
-        stagingDir.mkdirs()
-        val stagingLibDir = stagingDir.resolve("lib")
-        stagingLibDir.mkdirs()
+        val workDir = temporaryDir.resolve("work-${UUID.randomUUID()}")
+        val stagingLibDir = workDir.resolve("staging/lib").apply { mkdirs() }
+        val stagedManifest = workDir.resolve("staging/manifest.json")
+        val rollbackLibDir = workDir.resolve("rollback/lib").apply { mkdirs() }
 
         try {
-            val assetRecords = mutableListOf<Map<String, Any>>()
-
-            for (jar in allJars) {
+            val assetRecords = allJars.map { jar ->
                 val stagedJar = stagingLibDir.resolve(jar.name)
                 jar.copyTo(stagedJar, overwrite = true)
 
                 val bytes = stagedJar.readBytes()
-                val md = MessageDigest.getInstance("SHA-256")
-                val shaHex = md.digest(bytes).joinToString("") { "%02x".format(it) }
+                val shaHex = MessageDigest.getInstance("SHA-256")
+                    .digest(bytes)
+                    .joinToString("") { "%02x".format(it) }
 
-                val stagedShaFile = stagingLibDir.resolve("${jar.name}.sha256")
-                stagedShaFile.writeText("$shaHex *${jar.name}\n", Charsets.UTF_8)
+                stagingLibDir.resolve("${jar.name}.sha256")
+                    .writeText("$shaHex *${jar.name}\n", Charsets.UTF_8)
 
-                assetRecords.add(
-                    mapOf(
-                        "name" to jar.name,
-                        "path" to "lib/${jar.name}",
-                        "sha256" to shaHex,
-                        "size" to bytes.size
-                    )
+                mapOf(
+                    "name" to jar.name,
+                    "path" to "lib/${jar.name}",
+                    "sha256" to shaHex,
+                    "size" to bytes.size
                 )
             }
 
@@ -158,70 +204,101 @@ tasks.register("stageExtension") {
             }
 
             val manifestContent = """{
-  "serverVersion": "$targetVersion",
+  "serverVersion": "${serverVersion.get()}",
   "extensionId": "org.jetbrains.android",
   "buildTimestamp": "2026-01-01T00:00:00Z",
   "targetJavaVersion": 25,
   "classFileVersion": 69,
   "toolchain": {
     "javacVersion": "javac 25",
-    "jarVersion": "Gradle 9.8.0"
+    "jarVersion": "Gradle ${gradleVersion.get()}"
   },
   "assets": [
 $assetsJson
   ]
 }
 """
-            val stagedManifest = stagingDir.resolve("manifest.json")
             stagedManifest.writeText(manifestContent, Charsets.UTF_8)
 
-            val rollbackDir = extensionDir.resolve(".rollback-${UUID.randomUUID()}")
-            rollbackDir.mkdirs()
-            val backups = mutableMapOf<File, File>()
-            val replaced = mutableListOf<File>()
+            outDir.mkdirs()
+            targetLibDir.mkdirs()
+
+            val existingFiles = targetLibDir.listFiles()?.filter { it.isFile } ?: emptyList()
+            for (existing in existingFiles) {
+                Files.copy(
+                    existing.toPath(),
+                    rollbackLibDir.resolve(existing.name).toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }
+
             var retainRollback = false
             try {
-                val stagedFiles = stagingLibDir.listFiles()?.sortedBy { it.name }
-                    ?: throw GradleException("Staging library directory is unreadable")
-                for (stagedFile in stagedFiles) {
-                    val target = targetLibDir.resolve(stagedFile.name)
-                    if (target.exists()) {
-                        val backup = rollbackDir.resolve(stagedFile.name)
-                        Files.copy(target.toPath(), backup.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                        backups[target] = backup
-                    }
-                }
+                val stagedFiles = stagingLibDir.listFiles()?.sortedBy { it.name } ?: emptyList()
+                val stagedNames = stagedFiles.map { it.name }.toSet()
+
                 for (stagedFile in stagedFiles) {
                     val target = targetLibDir.resolve(stagedFile.name)
                     Files.move(stagedFile.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    replaced.add(target)
                 }
-                Files.move(
-                    stagedManifest.toPath(),
-                    targetManifest.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (failure: Throwable) {
-                for (target in replaced.asReversed()) {
-                    try {
-                        val backup = backups[target]
-                        if (backup == null) Files.deleteIfExists(target.toPath())
-                        else Files.move(backup.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    } catch (rollbackFailure: Exception) {
-                        retainRollback = true
-                        failure.addSuppressed(rollbackFailure)
+
+                for (existing in existingFiles) {
+                    if (existing.name !in stagedNames) {
+                        Files.deleteIfExists(existing.toPath())
                     }
                 }
-                if (retainRollback) logger.error("Asset rollback requires recovery from $rollbackDir")
-                throw failure
-            } finally {
-                if (!retainRollback) rollbackDir.deleteRecursively()
-            }
 
-            logger.lifecycle("[stageExtension] Staged ${allJars.size} extension assets successfully to: $extensionDir")
+                try {
+                    Files.move(
+                        stagedManifest.toPath(),
+                        targetManifest.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                } catch (_: AtomicMoveNotSupportedException) {
+                    Files.move(
+                        stagedManifest.toPath(),
+                        targetManifest.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                }
+            } catch (failure: Throwable) {
+                try {
+                    targetLibDir.listFiles()?.forEach { it.delete() }
+                    rollbackLibDir.listFiles()?.forEach { backup ->
+                        Files.move(
+                            backup.toPath(),
+                            targetLibDir.resolve(backup.name).toPath(),
+                            StandardCopyOption.REPLACE_EXISTING
+                        )
+                    }
+                } catch (rollbackFailure: Exception) {
+                    retainRollback = true
+                    failure.addSuppressed(rollbackFailure)
+                }
+                if (retainRollback) {
+                    logger.error("Asset rollback failed! Manual recovery available at: $rollbackLibDir")
+                }
+                throw failure
+            }
         } finally {
-            stagingDir.deleteRecursively()
+            if (!workDir.resolve("rollback/lib").exists() || workDir.listFiles()?.isEmpty() == true) {
+                workDir.deleteRecursively()
+            }
         }
+
+        logger.lifecycle("[stageExtension] Staged ${allJars.size} extension assets successfully to: $outDir")
     }
+}
+
+tasks.register<StageExtensionTask>("stageExtension") {
+    group = "build"
+    description = "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/$targetVersion/intellij-android/"
+
+    builtJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
+    runtimeClasspath.from(configurations.named("runtimeClasspath"))
+    expectedUpstreamNames.set(setOf("adblib-$adblibVersion.jar", "adblib-tools-$adblibVersion.jar"))
+    serverVersion.set(targetVersion)
+    gradleVersion.set(gradle.gradleVersion)
+    extensionDir.set(layout.projectDirectory.dir("../../resources/ils/$targetVersion/intellij-android"))
 }
