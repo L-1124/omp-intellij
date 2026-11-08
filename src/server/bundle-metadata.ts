@@ -1,4 +1,5 @@
 export const DEFAULT_SERVER_VERSION = '271.2085.0';
+export const DEFAULT_VSIX_VERSION = '1.0.86';
 
 export const SERVER_BUNDLE_PLATFORMS: Record<
   string,

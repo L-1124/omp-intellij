@@ -1,17 +1,26 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { crc32 } from 'node:zlib';
 import {
   extractVsixConfig,
+  fetchVsixBundle,
+  fetchVsxBundle,
+  fetchVsxPackageJson,
   LATEST_VERSION_URL,
   latestServerVersion,
   mergeMarketplaceConfig,
+  parseBundleMetadataFile,
   parseLatestVersionFromLua,
   parseSha256Sidecar,
+  renderBundleMetadata,
   updateServerBundle,
   validateServerVersion,
+  validateVsixVersion,
+  verifyJvmAssets,
 } from '../scripts/update-server-bundle.mjs';
 
 const oversizedEntry =
@@ -419,4 +428,396 @@ test('mergeMarketplaceConfig merges LSP and DAP configurations correctly', () =>
     'pom.xml',
     'BUILD.bazel',
   ]);
+});
+
+function createTestZip(files) {
+  const localHeaders = [];
+  const centralHeaders = [];
+  let offset = 0;
+
+  for (const [filename, content] of Object.entries(files)) {
+    const data = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+    const nameBuf = Buffer.from(filename, 'utf8');
+    const crc = crc32(data);
+    const size = data.length;
+
+    const local = Buffer.alloc(30 + nameBuf.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(size, 18);
+    local.writeUInt32LE(size, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    nameBuf.copy(local, 30);
+
+    const central = Buffer.alloc(46 + nameBuf.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(0, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(size, 20);
+    central.writeUInt32LE(size, 24);
+    central.writeUInt16LE(nameBuf.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    nameBuf.copy(central, 46);
+
+    localHeaders.push(local, data);
+    centralHeaders.push(central);
+    offset += local.length + data.length;
+  }
+
+  const centralStart = offset;
+  const centralTotalSize = centralHeaders.reduce((acc, b) => acc + b.length, 0);
+
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(Object.keys(files).length, 8);
+  eocd.writeUInt16LE(Object.keys(files).length, 10);
+  eocd.writeUInt32LE(centralTotalSize, 12);
+  eocd.writeUInt32LE(centralStart, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localHeaders, ...centralHeaders, eocd]);
+}
+
+test('parseBundleMetadataFile extracts server and vsix versions from content', () => {
+  const content = `
+export const DEFAULT_SERVER_VERSION = '271.2085.0';
+export const DEFAULT_VSIX_VERSION = '1.0.86';
+`;
+  const parsed = parseBundleMetadataFile(content);
+  assert.equal(parsed.serverVersion, '271.2085.0');
+  assert.equal(parsed.vsixVersion, '1.0.86');
+});
+
+test('renderBundleMetadata rejects missing vsixVersion without defaulting', () => {
+  assert.throws(
+    () => renderBundleMetadata({ version: '271.2085.0', platforms: {} }),
+    /Both version and vsixVersion are required/,
+  );
+});
+
+test('validateVsixVersion accepts valid versions and rejects invalid versions', () => {
+  assert.equal(validateVsixVersion('1.0.86'), '1.0.86');
+  assert.equal(validateVsixVersion('1.0.27'), '1.0.27');
+  assert.equal(fetchVsixBundle, fetchVsxBundle);
+  assert.throws(() => validateVsixVersion('latest'), /Invalid VSIX version "latest"/);
+  assert.throws(() => validateVsixVersion(''), /Invalid VSIX version/);
+});
+
+test('fetchVsxBundle requests exact version endpoint and never /latest', async () => {
+  const requestedUrls = [];
+  const vsixZip = createTestZip({
+    'extension/server-bundle.json': JSON.stringify({
+      version: '271.2085.0',
+      url: 'https://download.jetbrains.com/language-server/intellij-server/271.2085.0/intellij-server-271.2085.0.win.zip',
+      archiveName: 'intellij-server-271.2085.0.win.zip',
+      sha256: '9ab4ecd982a8abdfaa1fff1bcdd4246db2d071653168c78555a5869271ee3f9f',
+    }),
+    'extension/package.json': JSON.stringify({
+      name: 'intellij-server',
+      version: '1.0.86',
+      activationEvents: ['onLanguage:java'],
+      contributes: { configuration: [] },
+    }),
+  });
+
+  const exactMetaUrl = 'https://open-vsx.org/api/JetBrains/intellij-server/win32-x64/1.0.86';
+  const exactDownloadUrl = `${exactMetaUrl}/file/JetBrains.intellij-server-1.0.86@win32-x64.vsix`;
+
+  const fetchFn = async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url === exactMetaUrl) {
+      return Response.json({
+        namespace: 'JetBrains',
+        name: 'intellij-server',
+        version: '1.0.86',
+        targetPlatform: 'win32-x64',
+        files: { download: exactDownloadUrl },
+      });
+    }
+    if (url === exactDownloadUrl) {
+      return new Response(vsixZip);
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  const result = await fetchVsxBundle({
+    vsixVersion: '1.0.86',
+    expectedServerVersion: '271.2085.0',
+    fetch: fetchFn,
+    platform: 'win32',
+    arch: 'x64',
+  });
+
+  assert.equal(result.vsixVersion, '1.0.86');
+  assert.equal(result.serverVersion, '271.2085.0');
+  assert.equal(result.serverBundle.version, '271.2085.0');
+  assert.equal(result.packageJson.name, 'intellij-server');
+
+  // Verify that only the exact version URLs were requested, never /latest
+  assert.ok(requestedUrls.includes(exactMetaUrl));
+  assert.ok(requestedUrls.includes(exactDownloadUrl));
+  assert.ok(!requestedUrls.some((u) => u.includes('/latest')));
+
+  // Verify fetchVsxPackageJson convenience wrapper returns packageJson
+  const pkg = await fetchVsxPackageJson({
+    vsixVersion: '1.0.86',
+    fetch: fetchFn,
+    platform: 'win32',
+    arch: 'x64',
+  });
+  assert.equal(pkg.name, 'intellij-server');
+});
+
+test('fetchVsxBundle rejects when VSIX version is missing without calling latest', async () => {
+  const requestedUrls = [];
+  const fetchFn = async (input) => {
+    requestedUrls.push(String(input));
+    return new Response('Not found', { status: 404 });
+  };
+
+  await assert.rejects(
+    fetchVsxBundle({ fetch: fetchFn }),
+    /VSIX version is required to fetch Open VSX bundle \(silent latest is prohibited\)/,
+  );
+  assert.equal(requestedUrls.length, 0);
+});
+
+test('fetchVsxBundle rejects server-bundle version mismatch', async () => {
+  const vsixZip = createTestZip({
+    'extension/server-bundle.json': JSON.stringify({
+      version: '263.9000.0',
+      url: 'https://download.jetbrains.com/language-server/intellij-server/263.9000.0/intellij-server-263.9000.0.win.zip',
+      archiveName: 'intellij-server-263.9000.0.win.zip',
+      sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    }),
+    'extension/package.json': JSON.stringify({
+      name: 'intellij-server',
+      version: '1.0.27',
+      activationEvents: [],
+      contributes: { configuration: [] },
+    }),
+  });
+
+  const metaUrl = 'https://open-vsx.org/api/JetBrains/intellij-server/win32-x64/1.0.27';
+  const downloadUrl = `${metaUrl}/file/JetBrains.intellij-server-1.0.27@win32-x64.vsix`;
+
+  const fetchFn = async (input) => {
+    const url = String(input);
+    if (url === metaUrl) {
+      return Response.json({
+        namespace: 'JetBrains',
+        name: 'intellij-server',
+        version: '1.0.27',
+        targetPlatform: 'win32-x64',
+        files: { download: downloadUrl },
+      });
+    }
+    if (url === downloadUrl) {
+      return new Response(vsixZip);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  await assert.rejects(
+    fetchVsxBundle({
+      vsixVersion: '1.0.27',
+      expectedServerVersion: '271.2085.0',
+      fetch: fetchFn,
+      platform: 'win32',
+      arch: 'x64',
+    }),
+    /Open VSX server-bundle version mismatch: VSIX 1\.0\.27 binds to ILS 263\.9000\.0, expected 271\.2085\.0/,
+  );
+});
+
+test('updateServerBundle safely fails for unknown server version without vsixVersion and makes no request to latest', async () => {
+  const requestedUrls = [];
+  const fetchFn = async (input) => {
+    requestedUrls.push(String(input));
+    return new Response('Not found', { status: 404 });
+  };
+
+  await assert.rejects(
+    updateServerBundle({
+      version: '263.7084.0',
+      syncMarketplace: true,
+      fetch: fetchFn,
+    }),
+    /Cannot determine VSIX version for ILS version "263\.7084\.0"\. Specify --vsix-version explicitly\./,
+  );
+  assert.equal(requestedUrls.length, 0);
+});
+
+test('updateServerBundle syncMarketplace with exact VSIX version and check mode', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-sync-test-'));
+  const targetMetaFile = join(dir, 'bundle-metadata.ts');
+  const targetMarketplaceFile = join(dir, 'marketplace.json');
+
+  const baseMarketplace = {
+    name: 'omp-intellij',
+    plugins: [
+      {
+        name: 'omp-intellij',
+        lspServers: {
+          'intellij-server': {
+            fileTypes: ['.java'],
+            rootMarkers: ['pom.xml'],
+            settings: {},
+          },
+        },
+        dapAdapters: {
+          intellij: { rootMarkers: ['pom.xml'] },
+          'intellij-test': { rootMarkers: ['pom.xml'] },
+        },
+      },
+    ],
+  };
+
+  await writeFile(targetMarketplaceFile, JSON.stringify(baseMarketplace, null, 2), 'utf8');
+
+  const vsixZip = createTestZip({
+    'extension/server-bundle.json': JSON.stringify({
+      version: '271.2085.0',
+      url: 'https://download.jetbrains.com/language-server/intellij-server/271.2085.0/intellij-server-271.2085.0.win.zip',
+      archiveName: 'intellij-server-271.2085.0.win.zip',
+      sha256: '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+    }),
+    'extension/package.json': JSON.stringify({
+      name: 'intellij-server',
+      version: '1.0.86',
+      activationEvents: [
+        'onLanguage:java',
+        'workspaceContains:pom.xml',
+        'workspaceContains:build.gradle',
+      ],
+      contributes: {
+        configuration: [
+          {
+            properties: {
+              'jetbrains.java.hints.types.local variable': {
+                default: true,
+                type: 'boolean',
+              },
+            },
+          },
+        ],
+      },
+    }),
+  });
+
+  const exactMetaUrl = 'https://open-vsx.org/api/JetBrains/intellij-server/win32-x64/1.0.86';
+  const exactDownloadUrl = `${exactMetaUrl}/file/JetBrains.intellij-server-1.0.86@win32-x64.vsix`;
+
+  const cdnFetch = createMockCdnFetch();
+  const requestedUrls = [];
+
+  const combinedFetch = async (input, init) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url === exactMetaUrl) {
+      return Response.json({
+        namespace: 'JetBrains',
+        name: 'intellij-server',
+        version: '1.0.86',
+        targetPlatform: 'win32-x64',
+        files: { download: exactDownloadUrl },
+      });
+    }
+    if (url === exactDownloadUrl) {
+      return new Response(vsixZip);
+    }
+    return cdnFetch(input, init);
+  };
+
+  try {
+    // 1. Update mode
+    const updateCode = await updateServerBundle({
+      version: '271.2085.0',
+      syncMarketplace: true,
+      fetch: combinedFetch,
+      outputPath: targetMetaFile,
+      marketplacePath: targetMarketplaceFile,
+    });
+    assert.equal(updateCode, 0);
+
+    // Verify marketplace was updated with extracted markers
+    const updatedMarketplace = JSON.parse(await readFile(targetMarketplaceFile, 'utf8'));
+    const lspMarkers = updatedMarketplace.plugins[0].lspServers['intellij-server'].rootMarkers;
+    assert.ok(lspMarkers.includes('pom.xml'));
+    assert.ok(lspMarkers.includes('build.gradle'));
+
+    const dapMarkers = updatedMarketplace.plugins[0].dapAdapters.intellij.rootMarkers;
+    assert.ok(dapMarkers.includes('pom.xml'));
+    assert.ok(dapMarkers.includes('build.gradle'));
+    assert.ok(!dapMarkers.includes('*.iml'));
+
+    // Verify exact URL requested, no /latest
+    assert.ok(requestedUrls.includes(exactMetaUrl));
+    assert.ok(!requestedUrls.some((u) => u.includes('/latest')));
+
+    // 2. Check mode against now-matching files
+    const checkCode = await updateServerBundle({
+      version: '271.2085.0',
+      check: true,
+      syncMarketplace: true,
+      fetch: combinedFetch,
+      outputPath: targetMetaFile,
+      marketplacePath: targetMarketplaceFile,
+    });
+    assert.equal(checkCode, 0);
+
+    // 3. Check mode detects marketplace diff if file reverted
+    await writeFile(targetMarketplaceFile, JSON.stringify(baseMarketplace, null, 2), 'utf8');
+    const diffCode = await updateServerBundle({
+      version: '271.2085.0',
+      check: true,
+      syncMarketplace: true,
+      fetch: combinedFetch,
+      outputPath: targetMetaFile,
+      marketplacePath: targetMarketplaceFile,
+    });
+    assert.equal(diffCode, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('verifyJvmAssets delegates to verifyExtensionDirectory and validates staged assets', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-jvm-test-'));
+  try {
+    // Missing extension directory / manifest
+    const missing = await verifyJvmAssets({ targetVersion: '271.2085.0', resourcesDir: dir });
+    assert.equal(missing.ok, false);
+    assert.ok(missing.reason);
+
+    // Valid staged assets in repository
+    const repoResourcesDir = resolve(fileURLToPath(new URL('../resources/ils', import.meta.url)));
+    const valid = await verifyJvmAssets({
+      targetVersion: '271.2085.0',
+      resourcesDir: repoResourcesDir,
+    });
+    assert.equal(valid.ok, true);
+    assert.ok(valid.pluginPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

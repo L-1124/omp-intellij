@@ -11,8 +11,8 @@ const execFileAsync = promisify(execFile);
 
 export const LATEST_VERSION_URL =
   'https://raw.githubusercontent.com/JetBrains/intellij-lsp.nvim/HEAD/lua/intellij-lsp/server_bundles.lua';
-
 const VERSION_REGEX = /^\d+(?:\.\d+){2,3}$/;
+const VSIX_VERSION_REGEX = /^\d+(?:\.\d+){1,3}$/;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const VSX_ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
@@ -40,6 +40,46 @@ export function validateServerVersion(version) {
     );
   }
   return version;
+}
+
+export function validateVsixVersion(version) {
+  if (typeof version !== 'string' || !VSIX_VERSION_REGEX.test(version)) {
+    throw new Error(
+      `Invalid VSIX version "${version}": expected 2 to 4 dot-separated numeric segments (e.g. 1.0.86)`,
+    );
+  }
+  return version;
+}
+
+export function parseBundleMetadataFile(content) {
+  const serverVersionMatch = content.match(
+    /export\s+const\s+DEFAULT_SERVER_VERSION\s*=\s*['"]([^'"]+)['"]\s*;/,
+  );
+  const vsixVersionMatch = content.match(
+    /export\s+const\s+DEFAULT_VSIX_VERSION\s*=\s*['"]([^'"]+)['"]\s*;/,
+  );
+  return {
+    serverVersion: serverVersionMatch ? validateServerVersion(serverVersionMatch[1].trim()) : null,
+    vsixVersion: vsixVersionMatch ? validateVsixVersion(vsixVersionMatch[1].trim()) : null,
+  };
+}
+
+export async function verifyJvmAssets({ targetVersion, resourcesDir }) {
+  const targetDir = join(resourcesDir, targetVersion, 'intellij-android');
+  let verifyExtensionDirectory;
+  try {
+    const mod = await import('../dist/server/android-extension.js');
+    verifyExtensionDirectory = mod.verifyExtensionDirectory;
+  } catch (err) {
+    throw new Error(
+      `Cannot load verifyExtensionDirectory from ../dist/server/android-extension.js. Run 'npm run build' first (${err.message})`,
+    );
+  }
+  const res = await verifyExtensionDirectory(targetDir, targetVersion);
+  if (res.pluginPath) {
+    return { ok: true, pluginPath: res.pluginPath };
+  }
+  return { ok: false, reason: res.reason ?? 'Extension verification failed' };
 }
 
 export function parseLatestVersionFromLua(text) {
@@ -246,9 +286,16 @@ export async function latestServerVersion(options = {}) {
   return versions[0];
 }
 
-export function renderBundleMetadata({ version, platforms }) {
+export function renderBundleMetadata({ version, vsixVersion, platforms }) {
+  if (!version || !vsixVersion) {
+    throw new Error('Both version and vsixVersion are required to render bundle metadata');
+  }
+  validateServerVersion(version);
+  validateVsixVersion(vsixVersion);
+
   const lines = [
     `export const DEFAULT_SERVER_VERSION = '${version}';`,
+    `export const DEFAULT_VSIX_VERSION = '${vsixVersion}';`,
     '',
     'export const SERVER_BUNDLE_PLATFORMS: Record<',
     '  string,',
@@ -258,6 +305,7 @@ export function renderBundleMetadata({ version, platforms }) {
 
   for (const platformName of ['darwin', 'linux', 'win32']) {
     const p = platforms[platformName];
+    if (!p) throw new Error(`Missing platform metadata for ${platformName}`);
     lines.push(`  ${platformName}: {`);
     lines.push(`    extension: '${p.extension}',`);
     lines.push('    hashes: {');
@@ -340,30 +388,50 @@ export async function collectPlatformMetadata(version, fetchFn = globalThis.fetc
   return platforms;
 }
 
-export async function fetchVsxPackageJson(options = {}) {
+export async function fetchVsixBundle(options = {}) {
   const fetchFn = options.fetch ?? fetch;
   const platform = options.platform ?? 'win32';
   const arch = options.arch ?? 'x64';
   const signal = options.signal;
+  const vsixVersion = options.vsixVersion ?? options.version;
+  const expectedServerVersion = options.expectedServerVersion;
+
+  if (!vsixVersion) {
+    throw new Error(
+      'VSIX version is required to fetch Open VSX bundle (silent latest is prohibited)',
+    );
+  }
+  validateVsixVersion(vsixVersion);
 
   const base = 'https://open-vsx.org/api/JetBrains/intellij-server';
   const target = `${platform}-${arch}`;
 
   const metaSignal = timeoutSignal(DEFAULT_TIMEOUT_MS, signal);
-  const response = await fetchFn(`${base}/${target}/latest`, {
+  const response = await fetchFn(`${base}/${target}/${vsixVersion}`, {
     signal: metaSignal,
     redirect: 'error',
   });
   if (!response.ok) {
     await response.body?.cancel();
-    throw new Error(`Open VSX metadata: HTTP ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Open VSX metadata (${vsixVersion}): HTTP ${response.status} ${response.statusText}`,
+    );
   }
   const metadata = JSON.parse(await readBoundedText(response));
-  if (typeof metadata?.version !== 'string' || !/^\d+(?:\.\d+){1,3}$/.test(metadata.version)) {
-    throw new Error('Invalid Open VSX extension metadata');
+  if (
+    metadata?.namespace !== 'JetBrains' ||
+    metadata?.name !== 'intellij-server' ||
+    metadata?.targetPlatform !== target ||
+    metadata?.version !== vsixVersion
+  ) {
+    throw new Error(`Invalid Open VSX extension metadata for ${target} ${vsixVersion}`);
   }
 
   const expectedUrl = `${base}/${target}/${metadata.version}/file/JetBrains.intellij-server-${metadata.version}@${target}.vsix`;
+  if (metadata.files?.download !== expectedUrl) {
+    throw new Error('Unexpected Open VSX download URL');
+  }
+
   const artifactSignal = timeoutSignal(VSX_ARTIFACT_TIMEOUT_MS, signal);
   let archive = await fetchFn(expectedUrl, { signal: artifactSignal, redirect: 'manual' });
   if ([301, 302, 303, 307, 308].includes(archive.status)) {
@@ -375,7 +443,9 @@ export async function fetchVsxPackageJson(options = {}) {
   }
   if (!archive.ok) {
     await archive.body?.cancel();
-    throw new Error(`Open VSX archive: HTTP ${archive.status} ${archive.statusText}`);
+    throw new Error(
+      `Open VSX archive (${vsixVersion}): HTTP ${archive.status} ${archive.statusText}`,
+    );
   }
   const bytes = await readBoundedBytes(archive, VSX_ARTIFACT_MAX_BYTES);
   artifactSignal.throwIfAborted();
@@ -383,10 +453,46 @@ export async function fetchVsxPackageJson(options = {}) {
   try {
     const file = join(directory, 'extension.vsix');
     await writeFile(file, bytes);
-    const entry = 'extension/package.json';
-    const { stdout } = await execFileAsync(
+
+    const serverBundleEntry = 'extension/server-bundle.json';
+    const { stdout: bundleStdout } = await execFileAsync(
       process.platform === 'linux' ? 'unzip' : 'tar',
-      process.platform === 'linux' ? ['-p', file, entry] : ['-xf', file, '-O', entry],
+      process.platform === 'linux'
+        ? ['-p', file, serverBundleEntry]
+        : ['-xf', file, '-O', serverBundleEntry],
+      {
+        signal: artifactSignal,
+        maxBuffer: MAX_RESPONSE_BYTES,
+        encoding: 'utf8',
+        windowsHide: true,
+      },
+    );
+    const serverBundle = JSON.parse(bundleStdout);
+    const serverVersion = validateServerVersion(serverBundle?.version);
+
+    if (expectedServerVersion && serverVersion !== expectedServerVersion) {
+      throw new Error(
+        `Open VSX server-bundle version mismatch: VSIX ${vsixVersion} binds to ILS ${serverVersion}, expected ${expectedServerVersion}`,
+      );
+    }
+
+    const suffix = arch === 'arm64' ? '-aarch64' : '';
+    const ext = PLATFORM_CONFIG[platform]?.extension ?? 'tar.gz';
+    const name = `intellij-server-${serverVersion}${suffix}.${ext}`;
+    if (
+      serverBundle?.archiveName !== name ||
+      serverBundle?.url !==
+        `https://download.jetbrains.com/language-server/intellij-server/${serverVersion}/${name}` ||
+      typeof serverBundle?.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/i.test(serverBundle.sha256)
+    ) {
+      throw new Error('Invalid Open VSX server bundle');
+    }
+
+    const packageEntry = 'extension/package.json';
+    const { stdout: pkgStdout } = await execFileAsync(
+      process.platform === 'linux' ? 'unzip' : 'tar',
+      process.platform === 'linux' ? ['-p', file, packageEntry] : ['-xf', file, '-O', packageEntry],
       {
         signal: artifactSignal,
         maxBuffer: 2 * 1024 * 1024,
@@ -394,10 +500,24 @@ export async function fetchVsxPackageJson(options = {}) {
         windowsHide: true,
       },
     );
-    return JSON.parse(stdout);
+    const packageJson = JSON.parse(pkgStdout);
+
+    return {
+      packageJson,
+      serverBundle,
+      vsixVersion,
+      serverVersion,
+    };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+export const fetchVsxBundle = fetchVsixBundle;
+
+export async function fetchVsxPackageJson(options = {}) {
+  const bundle = await fetchVsixBundle(options);
+  return bundle.packageJson;
 }
 
 export function extractVsixConfig(vsixPackageJson) {
@@ -503,6 +623,7 @@ export function mergeMarketplaceConfig(currentMarketplace, extracted) {
 export async function updateServerBundle(options) {
   const {
     version: requestedVersion,
+    vsixVersion: requestedVsixVersion,
     check = false,
     syncMarketplace = false,
     fetch: fetchFn = globalThis.fetch,
@@ -512,77 +633,115 @@ export async function updateServerBundle(options) {
     marketplacePath = resolve(
       fileURLToPath(new URL('../.omp-plugin/marketplace.json', import.meta.url)),
     ),
+    resourcesDir = resolve(fileURLToPath(new URL('../resources/ils', import.meta.url))),
   } = options ?? {};
 
-  if (!requestedVersion && !syncMarketplace) {
-    throw new Error('Version argument or --sync-marketplace is required');
+  if (!requestedVersion && !syncMarketplace && !check) {
+    throw new Error(
+      'Usage: npm run update-bundle -- [--version <build|latest>] [--vsix-version <version>] [--check] [--sync-marketplace]',
+    );
   }
 
-  const effectiveVersion = requestedVersion || 'latest';
-  const targetVersion =
-    effectiveVersion === 'latest'
-      ? await latestServerVersion({ fetch: fetchFn })
-      : validateServerVersion(effectiveVersion);
+  const sourceMetadataPath = resolve(
+    fileURLToPath(new URL('../src/server/bundle-metadata.ts', import.meta.url)),
+  );
 
-  let hasDiff = false;
+  let existingText = null;
+  let fileExists = false;
+  let targetMeta = null;
 
+  try {
+    const s = await stat(outputPath);
+    if (!s.isFile()) {
+      throw new Error(`Target path is not a regular file: ${outputPath}`);
+    }
+    existingText = await readFile(outputPath, 'utf8');
+    fileExists = true;
+    targetMeta = parseBundleMetadataFile(existingText);
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+      fileExists = false;
+    } else {
+      throw err;
+    }
+  }
+
+  let canonicalMeta = null;
+  try {
+    const sourceText = await readFile(sourceMetadataPath, 'utf8');
+    canonicalMeta = parseBundleMetadataFile(sourceText);
+  } catch {
+    // Ignored
+  }
+
+  let targetVersion;
   if (requestedVersion) {
-    const collectedPlatforms = await collectPlatformMetadata(targetVersion, fetchFn);
-    const renderedText = renderBundleMetadata({
+    targetVersion =
+      requestedVersion === 'latest'
+        ? await latestServerVersion({ fetch: fetchFn })
+        : validateServerVersion(requestedVersion);
+  } else if (targetMeta?.serverVersion) {
+    targetVersion = targetMeta.serverVersion;
+  } else if (canonicalMeta?.serverVersion) {
+    targetVersion = canonicalMeta.serverVersion;
+  } else {
+    throw new Error('Target server version could not be determined from bundle metadata');
+  }
+
+  let targetVsixVersion = null;
+  if (requestedVsixVersion) {
+    targetVsixVersion = validateVsixVersion(requestedVsixVersion);
+  } else if (targetMeta?.serverVersion === targetVersion && targetMeta?.vsixVersion) {
+    targetVsixVersion = targetMeta.vsixVersion;
+  } else if (canonicalMeta?.serverVersion === targetVersion && canonicalMeta?.vsixVersion) {
+    targetVsixVersion = canonicalMeta.vsixVersion;
+  } else {
+    throw new Error(
+      `Cannot determine VSIX version for ILS version "${targetVersion}". Specify --vsix-version explicitly.`,
+    );
+  }
+  // --- PHASE 1: REMOTE VALIDATION & FETCH (NO FILE WRITES HERE) ---
+  let collectedPlatforms = null;
+  let renderedMetadataText = null;
+
+  if (requestedVersion || (check && !syncMarketplace)) {
+    collectedPlatforms = await collectPlatformMetadata(targetVersion, fetchFn);
+    renderedMetadataText = renderBundleMetadata({
       version: targetVersion,
+      vsixVersion: targetVsixVersion,
       platforms: collectedPlatforms,
     });
-
-    let existingText = null;
-    let fileExists = false;
-    try {
-      const s = await stat(outputPath);
-      if (!s.isFile()) {
-        throw new Error(`Target path is not a regular file: ${outputPath}`);
-      }
-      existingText = await readFile(outputPath, 'utf8');
-      fileExists = true;
-    } catch (err) {
-      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
-        fileExists = false;
-      } else {
-        throw err;
-      }
-    }
-
-    if (check) {
-      if (!fileExists) {
-        console.log(`[check] Target bundle metadata file does not exist: ${outputPath}`);
-        hasDiff = true;
-      } else if (existingText === renderedText) {
-        console.log(`[check] Bundle metadata is up to date: ${targetVersion}`);
-      } else {
-        console.log(`[check] Bundle metadata differs from upstream ${targetVersion}`);
-        hasDiff = true;
-      }
-    } else {
-      if (fileExists && existingText === renderedText) {
-        console.log(`Bundle metadata is already up to date: ${targetVersion}`);
-      } else {
-        const tempFile = join(dirname(outputPath), `.bundle-metadata-${randomUUID()}.tmp`);
-        try {
-          await writeFile(tempFile, renderedText, 'utf8');
-          await replaceFile(tempFile, outputPath);
-          console.log(`Successfully updated bundle metadata to ${targetVersion} at ${outputPath}`);
-        } finally {
-          await rm(tempFile, { force: true }).catch(() => {});
-        }
-      }
-    }
   }
 
-  if (syncMarketplace) {
-    const vsixPackageJson = await fetchVsxPackageJson({
-      fetch: fetchFn,
-      version: targetVersion,
-    });
-    const extracted = extractVsixConfig(vsixPackageJson);
+  let vsixBundle = null;
+  let mergedMarketplaceJson = null;
+  let isMarketplaceUpToDate = false;
 
+  if (syncMarketplace) {
+    // 1. Fetch and verify VSIX package and server-bundle binding
+    vsixBundle = await fetchVsixBundle({
+      fetch: fetchFn,
+      vsixVersion: targetVsixVersion,
+      expectedServerVersion: targetVersion,
+    });
+
+    // 2. If platform metadata was collected, verify server-bundle sha256 matches CDN hash
+    if (collectedPlatforms) {
+      const defaultPlatform = 'win32';
+      const defaultArch = 'x64';
+      const expectedSha256 = collectedPlatforms[defaultPlatform]?.hashes[defaultArch];
+      if (
+        expectedSha256 &&
+        vsixBundle.serverBundle?.sha256?.toLowerCase() !== expectedSha256.toLowerCase()
+      ) {
+        throw new Error(
+          `Open VSX server-bundle SHA-256 mismatch for ${defaultPlatform}/${defaultArch}: VSIX has ${vsixBundle.serverBundle.sha256}, upstream CDN has ${expectedSha256}`,
+        );
+      }
+    }
+
+    // 3. Extract and merge marketplace config
+    const extracted = extractVsixConfig(vsixBundle.packageJson);
     let currentMarketplace;
     try {
       currentMarketplace = JSON.parse(await readFile(marketplacePath, 'utf8'));
@@ -591,41 +750,105 @@ export async function updateServerBundle(options) {
     }
 
     const merged = mergeMarketplaceConfig(currentMarketplace, extracted);
-    const renderedJson = `${JSON.stringify(merged, null, 2)}\n`;
+    mergedMarketplaceJson = `${JSON.stringify(merged, null, 2)}\n`;
+    isMarketplaceUpToDate = JSON.stringify(currentMarketplace) === JSON.stringify(merged);
+  }
 
-    const isUpToDate = JSON.stringify(currentMarketplace) === JSON.stringify(merged);
+  // --- PHASE 2: CHECK MODE (成组验证) ---
+  if (check) {
+    let hasDiff = false;
 
-    if (check) {
-      if (isUpToDate) {
-        console.log('[check] Marketplace configuration is up to date with upstream VSIX');
+    if (renderedMetadataText !== null) {
+      if (!fileExists) {
+        console.log(`[check] Target bundle metadata file does not exist: ${outputPath}`);
+        hasDiff = true;
+      } else if (existingText === renderedMetadataText) {
+        console.log(`[check] Bundle metadata is up to date: ${targetVersion}`);
       } else {
-        console.log('[check] Marketplace configuration differs from upstream VSIX');
+        console.log(`[check] Bundle metadata differs from upstream ${targetVersion}`);
         hasDiff = true;
       }
-    } else {
-      if (isUpToDate) {
-        console.log('Marketplace configuration is already up to date with upstream VSIX');
+    }
+
+    if (syncMarketplace) {
+      if (isMarketplaceUpToDate) {
+        console.log(
+          `[check] Marketplace configuration is up to date with upstream VSIX ${targetVsixVersion}`,
+        );
       } else {
-        const tempJsonFile = join(dirname(marketplacePath), `.marketplace-${randomUUID()}.tmp`);
-        try {
-          await writeFile(tempJsonFile, renderedJson, 'utf8');
-          await replaceFile(tempJsonFile, marketplacePath);
-          console.log(`Successfully updated marketplace configuration at ${marketplacePath}`);
-        } finally {
-          await rm(tempJsonFile, { force: true }).catch(() => {});
-        }
+        console.log(
+          `[check] Marketplace configuration differs from upstream VSIX ${targetVsixVersion}`,
+        );
+        hasDiff = true;
+      }
+    }
+
+    const jvmResult = await verifyJvmAssets({ targetVersion, resourcesDir });
+    if (jvmResult.ok) {
+      console.log(`[check] JVM extension assets verified for ILS ${targetVersion}`);
+    } else {
+      console.log(
+        `[check] JVM extension assets missing or mismatched for ILS ${targetVersion}: ${jvmResult.reason}`,
+      );
+      hasDiff = true;
+    }
+
+    return hasDiff ? 1 : 0;
+  }
+
+  // --- PHASE 3: UPDATE MODE (REACHED ONLY AFTER ALL REMOTE CHECKS SUCCEED) ---
+  const jvmResult = await verifyJvmAssets({ targetVersion, resourcesDir });
+  if (jvmResult.ok) {
+    console.log(`JVM extension assets verified for ILS ${targetVersion}`);
+  } else {
+    console.log(
+      `[info] JVM extension assets for ILS ${targetVersion} not yet staged (${jvmResult.reason}).\n` +
+        `Follow-up: run 'npm run build:jvm' then 'npm run update-bundle -- --check' to verify.`,
+    );
+  }
+
+  if (renderedMetadataText !== null) {
+    if (fileExists && existingText === renderedMetadataText) {
+      console.log(`Bundle metadata is already up to date: ${targetVersion}`);
+    } else {
+      const tempFile = join(dirname(outputPath), `.bundle-metadata-${randomUUID()}.tmp`);
+      try {
+        await writeFile(tempFile, renderedMetadataText, 'utf8');
+        await replaceFile(tempFile, outputPath);
+        console.log(`Successfully updated bundle metadata to ${targetVersion} at ${outputPath}`);
+      } finally {
+        await rm(tempFile, { force: true }).catch(() => {});
       }
     }
   }
 
-  return hasDiff ? 1 : 0;
+  if (syncMarketplace && mergedMarketplaceJson !== null) {
+    if (isMarketplaceUpToDate) {
+      console.log(
+        `Marketplace configuration is already up to date with upstream VSIX ${targetVsixVersion}`,
+      );
+    } else {
+      const tempJsonFile = join(dirname(marketplacePath), `.marketplace-${randomUUID()}.tmp`);
+      try {
+        await writeFile(tempJsonFile, mergedMarketplaceJson, 'utf8');
+        await replaceFile(tempJsonFile, marketplacePath);
+        console.log(`Successfully updated marketplace configuration at ${marketplacePath}`);
+      } finally {
+        await rm(tempJsonFile, { force: true }).catch(() => {});
+      }
+    }
+  }
+
+  return 0;
 }
 
 function parseCliArgs(args) {
   let version = null;
+  let vsixVersion = null;
   let check = false;
   let syncMarketplace = false;
   let seenVersion = false;
+  let seenVsixVersion = false;
   let seenCheck = false;
   let seenSyncMarketplace = false;
 
@@ -646,6 +869,20 @@ function parseCliArgs(args) {
         }
         version = args[i].trim();
       }
+    } else if (arg === '--vsix-version' || arg.startsWith('--vsix-version=')) {
+      if (seenVsixVersion) {
+        throw new Error('Duplicate --vsix-version flag');
+      }
+      seenVsixVersion = true;
+      if (arg.startsWith('--vsix-version=')) {
+        vsixVersion = arg.slice(15).trim();
+      } else {
+        i++;
+        if (i >= args.length || args[i].startsWith('-')) {
+          throw new Error('--vsix-version flag requires an argument');
+        }
+        vsixVersion = args[i].trim();
+      }
     } else if (arg === '--check') {
       if (seenCheck) {
         throw new Error('Duplicate --check flag');
@@ -664,19 +901,19 @@ function parseCliArgs(args) {
     i++;
   }
 
-  if (!version && !syncMarketplace) {
+  if (!version && !syncMarketplace && !check) {
     throw new Error(
-      'Usage: npm run update-bundle -- [--version <build|latest>] [--check] [--sync-marketplace]',
+      'Usage: npm run update-bundle -- [--version <build|latest>] [--vsix-version <version>] [--check] [--sync-marketplace]',
     );
   }
 
-  return { version, check, syncMarketplace };
+  return { version, vsixVersion, check, syncMarketplace };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   try {
-    const { version, check, syncMarketplace } = parseCliArgs(process.argv.slice(2));
-    const code = await updateServerBundle({ version, check, syncMarketplace });
+    const { version, vsixVersion, check, syncMarketplace } = parseCliArgs(process.argv.slice(2));
+    const code = await updateServerBundle({ version, vsixVersion, check, syncMarketplace });
     process.exitCode = code;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

@@ -48,17 +48,10 @@ export async function detectServerVersion(executable: string): Promise<string | 
   return null;
 }
 
-export async function resolveAndroidExtension(
-  executable: string,
+export async function verifyExtensionDirectory(
+  directory: string,
+  expectedVersion: string = DEFAULT_SERVER_VERSION,
 ): Promise<AndroidExtensionResolution> {
-  const version = await detectServerVersion(executable);
-  if (version !== DEFAULT_SERVER_VERSION)
-    return {
-      reason: `Android extension requires ILS ${DEFAULT_SERVER_VERSION}; detected ${version ?? 'unknown'}`,
-    };
-  const directory = process.env.OMP_ANDROID_LS_EXTENSION_DIR
-    ? resolve(process.env.OMP_ANDROID_LS_EXTENSION_DIR)
-    : fileURLToPath(new URL(`../../resources/ils/${version}/intellij-android`, import.meta.url));
   try {
     if (hasInvalidOptionChars(directory, false))
       return {
@@ -70,7 +63,7 @@ export async function resolveAndroidExtension(
       !manifest ||
       typeof manifest !== 'object' ||
       !('serverVersion' in manifest) ||
-      manifest.serverVersion !== version ||
+      manifest.serverVersion !== expectedVersion ||
       !('classFileVersion' in manifest) ||
       manifest.classFileVersion !== 69 ||
       !('targetJavaVersion' in manifest) ||
@@ -125,6 +118,20 @@ export async function resolveAndroidExtension(
       reason: `Android extension unavailable at ${directory}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+export async function resolveAndroidExtension(
+  executable: string,
+): Promise<AndroidExtensionResolution> {
+  const version = await detectServerVersion(executable);
+  if (version !== DEFAULT_SERVER_VERSION)
+    return {
+      reason: `Android extension requires ILS ${DEFAULT_SERVER_VERSION}; detected ${version ?? 'unknown'}`,
+    };
+  const directory = process.env.OMP_ANDROID_LS_EXTENSION_DIR
+    ? resolve(process.env.OMP_ANDROID_LS_EXTENSION_DIR)
+    : fileURLToPath(new URL(`../../resources/ils/${version}/intellij-android`, import.meta.url));
+  return verifyExtensionDirectory(directory, version);
 }
 
 export function formatPluginOption(pluginPath: string): string {
