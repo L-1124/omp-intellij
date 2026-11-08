@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   type CreateLspSessionOptions,
   createLspSession,
+  type LaunchPaths,
   type LspSession,
   resolveBuildCommand,
   resolveLaunch,
@@ -14,7 +15,13 @@ import {
 import { sanitizeStatus, sanitizeString } from '../shared/runtime-status.js';
 import { canonicalizeProject } from './metadata.js';
 import { findProjectRoot } from './readiness.js';
-import { getWorkspaceConfigDir, maskConfiguredSecrets, validateEnvMap } from './workspace.js';
+import {
+  getWorkspaceConfigDir,
+  maskConfiguredSecrets,
+  readWorkspaceConfig,
+  validateEnvMap,
+  type WorkspaceConfigFile,
+} from './workspace.js';
 
 export interface WorkspaceModelReport {
   project: string;
@@ -92,35 +99,29 @@ export function validateSourceFile(
     throw new Error(`Source file "${resolvedFile}" is outside project root "${resolvedProject}"`);
   }
 
-  return { resolvedFile, resolvedProject };
+  const buildRoot = findProjectRoot(realProj);
+  return { resolvedFile, resolvedProject: buildRoot };
 }
 
 export async function loadConfiguredEnv(
   configDir: string | undefined,
   projectId: string,
+  projectRoot?: string,
 ): Promise<Record<string, string> | null> {
   const targetDir = getWorkspaceConfigDir({ configDir });
-  const configPath = join(targetDir, `${projectId}.json`);
-  let content: string;
+  let parsed: WorkspaceConfigFile | null;
   try {
-    content = await readFile(configPath, 'utf8');
+    parsed = await readWorkspaceConfig(targetDir, projectId, projectRoot);
   } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
-      return null;
+    if (err instanceof Error && /invalid workspace configuration/i.test(err.message)) {
+      throw err;
     }
-    throw err;
+    throw new Error(
+      `Invalid workspace configuration: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch (cause) {
-    throw new Error(`Invalid workspace configuration at ${configPath}`, { cause });
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Invalid workspace configuration at ${configPath}`);
-  }
-  return 'env' in parsed ? validateEnvMap(parsed.env) : null;
+  if (!parsed) return null;
+  return 'env' in parsed && parsed.env ? validateEnvMap(parsed.env) : null;
 }
 
 export function maskAndSanitize(text: string, env: Record<string, string> | null): string {
@@ -278,7 +279,7 @@ export async function inspectWorkspaceModel(
     rootUri,
   } = canonicalizeProject(resolvedProject);
 
-  const configuredEnv = await loadConfiguredEnv(options.configDir, projectId);
+  const configuredEnv = await loadConfiguredEnv(options.configDir, projectId, resolvedProject);
 
   const timeoutSignal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -306,27 +307,50 @@ export async function inspectWorkspaceModel(
       throw err;
     }
 
-    const launchPaths = await resolveLaunch(session, fileUri);
-    if (!launchPaths || typeof launchPaths !== 'object') {
-      throw new Error(`Launch resolution returned invalid response for ${resolvedFile}`);
-    }
-    if (typeof launchPaths.javaExec !== 'string' || !launchPaths.javaExec.trim()) {
-      throw new Error(
-        `Launch resolution returned no java executable for ${resolvedFile} (no project JDK configured?)`,
-      );
-    }
-    for (const field of ['moduleName', 'workingDirectory'] as const) {
-      if (launchPaths[field] !== undefined && typeof launchPaths[field] !== 'string') {
-        throw new Error(`Launch resolution returned invalid ${field}`);
-      }
-    }
-    for (const field of ['classpath', 'modulePath', 'moduleContentPaths'] as const) {
-      const paths = launchPaths[field];
-      if (
-        paths !== undefined &&
-        (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string'))
-      ) {
-        throw new Error(`Launch resolution returned invalid ${field}`);
+    let launchPaths: LaunchPaths | null = null;
+    const canAttemptLaunch =
+      !session.serverCapabilities?.executeCommandProvider ||
+      sessionSupportsCommand(session, 'intellij.java.resolveLaunch');
+
+    if (canAttemptLaunch) {
+      try {
+        launchPaths = await resolveLaunch(session, fileUri);
+        if (
+          !launchPaths ||
+          typeof launchPaths.javaExec !== 'string' ||
+          !launchPaths.javaExec.trim()
+        ) {
+          throw new Error('Launch resolution returned no java executable');
+        }
+        if (launchPaths && typeof launchPaths === 'object') {
+          for (const field of ['moduleName', 'workingDirectory'] as const) {
+            if (launchPaths[field] !== undefined && typeof launchPaths[field] !== 'string') {
+              throw new Error(`Launch resolution returned invalid ${field}`);
+            }
+          }
+          for (const field of ['classpath', 'modulePath', 'moduleContentPaths'] as const) {
+            const paths = launchPaths[field];
+            if (
+              paths !== undefined &&
+              (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string'))
+            ) {
+              throw new Error(`Launch resolution returned invalid ${field}`);
+            }
+          }
+        }
+      } catch (err: unknown) {
+        const isUnknown =
+          !sessionSupportsCommand(session, 'intellij.java.resolveLaunch') &&
+          err &&
+          typeof err === 'object' &&
+          (('code' in err && (err.code === -32600 || err.code === -32601)) ||
+            ('message' in err &&
+              typeof err.message === 'string' &&
+              /unknown command/i.test(err.message)));
+        if (!isUnknown) {
+          throw err;
+        }
+        launchPaths = null;
       }
     }
 
@@ -336,60 +360,97 @@ export async function inspectWorkspaceModel(
       throw err;
     }
 
-    const buildResult = await resolveBuildCommand(session, fileUri);
-    if (!buildResult || typeof buildResult !== 'object') {
-      throw new Error(`Build resolution returned invalid response for ${resolvedFile}`);
+    let buildResult: {
+      supported: boolean;
+      command?: string[];
+      cwd?: string;
+      tool?: string;
+      reason?: string;
+    } = {
+      supported: false,
+      command: [],
+      cwd: '',
+      tool: '',
+      reason: 'Build command not advertised by server',
+    };
+
+    const canAttemptBuild =
+      !session.serverCapabilities?.executeCommandProvider ||
+      sessionSupportsCommand(session, 'intellij.java.resolveBuildCommand');
+
+    if (canAttemptBuild) {
+      try {
+        const res = await resolveBuildCommand(session, fileUri);
+        if (!res || typeof res !== 'object' || typeof res.supported !== 'boolean') {
+          throw new Error(
+            'Build command resolution response missing or invalid boolean "supported" field',
+          );
+        }
+        buildResult = res;
+      } catch (err: unknown) {
+        const isUnknown =
+          !sessionSupportsCommand(session, 'intellij.java.resolveBuildCommand') &&
+          err &&
+          typeof err === 'object' &&
+          (('code' in err && (err.code === -32600 || err.code === -32601)) ||
+            ('message' in err &&
+              typeof err.message === 'string' &&
+              /unknown command/i.test(err.message)));
+        if (!isUnknown) {
+          throw err;
+        }
+        buildResult = {
+          supported: false,
+          command: [],
+          cwd: '',
+          tool: '',
+          reason: 'Build command not supported by server',
+        };
+      }
     }
-    if (typeof buildResult.supported !== 'boolean') {
-      throw new Error(
-        `Build resolution returned missing or invalid boolean "supported" field for ${resolvedFile}`,
-      );
-    }
-    if (
-      buildResult.supported &&
-      (!Array.isArray(buildResult.command) ||
-        buildResult.command.length === 0 ||
-        !buildResult.command.every((arg) => typeof arg === 'string') ||
-        typeof buildResult.cwd !== 'string' ||
-        !buildResult.cwd.trim())
-    ) {
-      throw new Error('Build resolution returned an incomplete supported build command');
-    }
+
+    const defaultJavaExec =
+      typeof launchPaths?.javaExec === 'string' && launchPaths.javaExec.trim()
+        ? launchPaths.javaExec.trim()
+        : '(unsupported by server)';
 
     const report: WorkspaceModelReport = {
       project: maskAndSanitize(canonicalProjectRoot, configuredEnv),
       file: maskAndSanitize(resolvedFile, configuredEnv),
-      javaExec: maskAndSanitize(launchPaths.javaExec, configuredEnv),
+      javaExec: maskAndSanitize(defaultJavaExec, configuredEnv),
       supported: buildResult.supported,
     };
 
-    if (typeof launchPaths.moduleName === 'string' && launchPaths.moduleName.trim()) {
+    if (typeof launchPaths?.moduleName === 'string' && launchPaths.moduleName.trim()) {
       report.moduleName = maskAndSanitize(launchPaths.moduleName, configuredEnv);
     }
     if (
-      Array.isArray(launchPaths.moduleContentPaths) &&
-      launchPaths.moduleContentPaths.every((p) => typeof p === 'string')
+      Array.isArray(launchPaths?.moduleContentPaths) &&
+      launchPaths.moduleContentPaths.every((p: unknown) => typeof p === 'string')
     ) {
-      report.moduleContentPaths = launchPaths.moduleContentPaths.map((p) =>
+      report.moduleContentPaths = launchPaths.moduleContentPaths.map((p: string) =>
         maskAndSanitize(p, configuredEnv),
       );
     }
     if (
-      Array.isArray(launchPaths.classpath) &&
-      launchPaths.classpath.every((p) => typeof p === 'string')
+      Array.isArray(launchPaths?.classpath) &&
+      launchPaths.classpath.every((p: unknown) => typeof p === 'string')
     ) {
-      report.classpath = launchPaths.classpath.map((p) => maskAndSanitize(p, configuredEnv));
+      report.classpath = launchPaths.classpath.map((p: string) =>
+        maskAndSanitize(p, configuredEnv),
+      );
     }
     if (
-      Array.isArray(launchPaths.modulePath) &&
-      launchPaths.modulePath.every((p) => typeof p === 'string')
+      Array.isArray(launchPaths?.modulePath) &&
+      launchPaths.modulePath.every((p: unknown) => typeof p === 'string')
     ) {
-      report.modulePath = launchPaths.modulePath.map((p) => maskAndSanitize(p, configuredEnv));
+      report.modulePath = launchPaths.modulePath.map((p: string) =>
+        maskAndSanitize(p, configuredEnv),
+      );
     }
-    if (typeof launchPaths.workingDirectory === 'string' && launchPaths.workingDirectory.trim()) {
+    if (typeof launchPaths?.workingDirectory === 'string' && launchPaths.workingDirectory.trim()) {
       report.workingDirectory = maskAndSanitize(launchPaths.workingDirectory, configuredEnv);
     }
-
     if (typeof buildResult.tool === 'string' && buildResult.tool.trim()) {
       report.buildTool = maskAndSanitize(buildResult.tool, configuredEnv);
     }
@@ -519,9 +580,10 @@ export async function inspectWorkspaceModel(
                 bestMatchLength,
               });
             }
+            const targetModuleName = launchPaths?.moduleName?.trim();
             let matched =
-              typeof launchPaths.moduleName === 'string' && launchPaths.moduleName.trim()
-                ? parsedModules.find((m) => m.name === launchPaths.moduleName?.trim())
+              typeof targetModuleName === 'string' && targetModuleName.length > 0
+                ? parsedModules.find((m) => m.name === targetModuleName)
                 : undefined;
             if (!matched) {
               for (const candidate of parsedModules) {

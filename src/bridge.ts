@@ -20,10 +20,12 @@ import { IndexBarrier } from './project/index-barrier.js';
 import {
   canonicalizeProject,
   type LeaseHandle,
+  migrateProjectMetadata,
   recordConnection,
   recordReadiness,
   replaceLease,
 } from './project/metadata.js';
+import { findBuildRoot } from './project/readiness.js';
 import { applyWorkspaceOptions } from './project/workspace.js';
 import { connectWithLease, settings } from './server/service.js';
 import { DocumentSymbolAdapter } from './shared/document-symbols.js';
@@ -65,15 +67,16 @@ export async function startBridge(): Promise<void> {
     throw new Error('requestWaitTimeoutMs must be positive');
   }
 
+  let projectPath = findBuildRoot(process.cwd());
   const connState = createConnectionState({
     systemPath: settings.systemPath,
     kind: 'bridge',
+    root: projectPath,
   });
 
   let closing = false;
   let barrier: IndexBarrier;
   let leaseHandle: LeaseHandle | null = null;
-  let projectPath = process.cwd();
   let initializeTimer: NodeJS.Timeout | null = null;
 
   const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
@@ -106,9 +109,31 @@ export async function startBridge(): Promise<void> {
       const p = message.params as
         | { rootUri?: string; rootPath?: string; workspaceFolders?: Array<{ uri: string }> }
         | undefined;
-      const uri = p?.rootUri || p?.workspaceFolders?.[0]?.uri || p?.rootPath;
-      if (uri) {
-        projectPath = uri;
+      let uri = p?.rootUri || p?.workspaceFolders?.[0]?.uri || p?.rootPath;
+      if (p && uri) {
+        const project = canonicalizeProject(findBuildRoot(uri));
+        projectPath = project.nativePath;
+        if (canonicalizeProject(uri).id !== project.id) {
+          uri = project.rootUri;
+          p.rootUri = project.rootUri;
+          if (p.rootPath) p.rootPath = project.nativePath;
+        }
+        if (p.workspaceFolders) {
+          p.workspaceFolders = [
+            ...new Map(
+              p.workspaceFolders.map((folder) => {
+                const root = canonicalizeProject(findBuildRoot(folder.uri));
+                return [
+                  root.id,
+                  canonicalizeProject(folder.uri).id === root.id
+                    ? folder
+                    : { ...folder, uri: root.rootUri },
+                ] as const;
+              }),
+            ).values(),
+          ];
+        }
+        await migrateProjectMetadata(settings.systemPath, project);
         connState
           .update({ root: projectPath, phase: 'connecting', detail: 'Initializing connection' })
           .catch(() => {});
@@ -144,14 +169,6 @@ export async function startBridge(): Promise<void> {
           (paramsObj.initializationOptions as Record<string, unknown>) || {};
         delete initializationOptions.eulaHash;
 
-        // Opt in to intellijExtensions and lazyIntentions so ModCommand quickfixes
-        // are converted to executable LSP commands rather than dropped to null.
-        if (initializationOptions.intellijExtensions === undefined) {
-          initializationOptions.intellijExtensions = true;
-        }
-        if (initializationOptions.lazyIntentions === undefined) {
-          initializationOptions.lazyIntentions = true;
-        }
         rawInitializationOptions = JSON.parse(JSON.stringify(initializationOptions));
         paramsObj.initializationOptions = await applyWorkspaceOptions(
           projectPath,

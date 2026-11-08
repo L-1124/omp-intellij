@@ -71,7 +71,13 @@ export async function verifyWorkspaceEvidence(
   for (const raw of uriMatches) {
     try {
       const canonical = canonicalizeProject(raw);
-      const buildMarker = ['pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle'];
+      const buildMarker = [
+        'pom.xml',
+        'build.gradle',
+        'build.gradle.kts',
+        'settings.gradle',
+        'settings.gradle.kts',
+      ];
       const hasBuild = buildMarker.some((m) =>
         text.includes(`${canonical.canonicalPath.toLowerCase()}/${m}`),
       );

@@ -711,3 +711,60 @@ test('workspace export failures remain visible instead of returning a complete m
     });
   }
 });
+test('workspace model handles missing intellij.java.resolveLaunch gracefully and enriches from exportWorkspace', async (t: TestContext) => {
+  const projectDir = await mkdtemp(join(tmpdir(), 'omp-model-unknown-cmd-'));
+  t.after(() => rm(projectDir, { recursive: true, force: true }));
+  const sourceFile = join(projectDir, 'src', 'App.java');
+  await mkdir(join(projectDir, 'src'), { recursive: true });
+  await writeFile(sourceFile, 'package com.example;\npublic class App {}');
+
+  const fixture = await createTestServer(t, {
+    capabilities: {
+      executeCommandProvider: {
+        commands: ['exportWorkspace'],
+      },
+    },
+    onLaunch: () => ({
+      error: { code: -32600, message: 'Unknown command: intellij.java.resolveLaunch' },
+    }),
+    onExportWorkspace: async (_id, exportDir) => {
+      await writeFile(
+        join(exportDir, 'workspace.json'),
+        JSON.stringify({
+          modules: [
+            {
+              name: 'my-app',
+              contentRoots: [
+                {
+                  path: projectDir,
+                  sourceRoots: [{ path: join(projectDir, 'src'), type: 'java-source' }],
+                },
+              ],
+            },
+          ],
+          libraries: [{ name: 'junit-4.13.2' }],
+          sdks: [
+            {
+              name: 'JDK 21',
+              type: 'JavaSDK',
+              homePath: '/opt/jdks/jdk-21',
+            },
+          ],
+        }),
+      );
+      return { result: null };
+    },
+  });
+
+  const report = await inspectWorkspaceModel(projectDir, sourceFile, {
+    socket: await fixture.connect(),
+    timeoutMs: 10000,
+  });
+
+  assert.equal(report.supported, false);
+  assert.equal(report.moduleName, 'my-app');
+  assert.equal(report.libraryCount, 1);
+  assert.equal(report.sdks?.length, 1);
+  assert.equal(report.classpath, undefined);
+  assert.ok(report.moduleSourceRoots && report.moduleSourceRoots.length > 0);
+});

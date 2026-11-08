@@ -1,19 +1,24 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import type { LspSession } from '../debug/run-core.js';
 import { settings } from '../server/service.js';
 import { sanitizeString } from '../shared/runtime-status.js';
 import { getHostInitializationOptions } from './configuration.js';
 import {
+  type CanonicalProject,
   canonicalizeProject,
   getAllProjectLedgers,
   getProjectLedger,
   type ProjectRecord,
+  pathsEqual,
+  verifyRecordedPathAttribution,
 } from './metadata.js';
 
 export function cleanPath(input: unknown): string {
@@ -108,18 +113,77 @@ export function validateEnvMap(env: unknown): Record<string, string> {
   return result;
 }
 
-async function readWorkspaceConfig(
+export async function readWorkspaceConfig(
   configDir: string,
-  projectId: string,
+  projectIdOrCanonical: string | CanonicalProject,
+  fallbackProjectRoot?: string,
 ): Promise<WorkspaceConfigFile | null> {
+  let projectId: string;
+  let canonical: CanonicalProject | null = null;
+  if (typeof projectIdOrCanonical === 'string') {
+    projectId = projectIdOrCanonical;
+    if (fallbackProjectRoot) {
+      try {
+        canonical = canonicalizeProject(fallbackProjectRoot);
+      } catch {}
+    }
+  } else {
+    canonical = projectIdOrCanonical;
+    projectId = canonical.id;
+  }
+
   const filePath = join(configDir, `${projectId}.json`);
   try {
     const content = await readFile(filePath, 'utf8');
-    return JSON.parse(content) as WorkspaceConfigFile;
+    try {
+      return JSON.parse(content) as WorkspaceConfigFile;
+    } catch (parseErr) {
+      throw new Error(
+        `Invalid workspace configuration: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+      );
+    }
   } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return null;
-    throw err;
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+      // File does not exist, continue to legacy fallback
+    } else {
+      throw err;
+    }
   }
+
+  if (canonical?.legacyId && canonical.legacyId !== projectId) {
+    const legacyPath = join(configDir, `${canonical.legacyId}.json`);
+    try {
+      const content = await readFile(legacyPath, 'utf8');
+      if (verifyRecordedPathAttribution(content, canonical)) {
+        let parsed: WorkspaceConfigFile;
+        try {
+          parsed = JSON.parse(content) as WorkspaceConfigFile;
+        } catch (parseErr) {
+          throw new Error(
+            `Invalid workspace configuration: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+          );
+        }
+        const migrated: WorkspaceConfigFile = {
+          ...parsed,
+          id: canonical.id,
+          canonicalPath: canonical.canonicalPath,
+          nativePath: canonical.nativePath,
+          rootUri: canonical.rootUri,
+          updatedAt: Date.now(),
+        };
+        await writeAtomicJson(filePath, migrated);
+        return migrated;
+      }
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+        // not found
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  return null;
 }
 
 export interface InspectedJdk {
@@ -355,11 +419,12 @@ export async function setWorkspaceJdk(
   if (!projectRoot) throw new Error('Project root is required');
   const targetDir = getWorkspaceConfigDir(options);
   const cleanedRoot = cleanPath(projectRoot);
-  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+  const canonical = canonicalizeProject(cleanedRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonical;
 
   const { javaHome, javaVersion } = validateJdk(jdkHome);
 
-  const existing = await readWorkspaceConfig(targetDir, id);
+  const existing = await readWorkspaceConfig(targetDir, canonical);
 
   const config: WorkspaceConfigFile = {
     ...(existing || {}),
@@ -419,9 +484,10 @@ export async function setWorkspaceEnvVar(
 
   const targetDir = getWorkspaceConfigDir(options);
   const cleanedRoot = cleanPath(projectRoot);
-  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+  const canonical = canonicalizeProject(cleanedRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonical;
 
-  const existing = await readWorkspaceConfig(targetDir, id);
+  const existing = await readWorkspaceConfig(targetDir, canonical);
   const existingEnv = validateEnvMap(existing?.env ?? {});
   existingEnv[cleanedName] = valid[cleanedName];
 
@@ -460,9 +526,10 @@ export async function unsetWorkspaceEnvVar(
 
   const targetDir = getWorkspaceConfigDir(options);
   const cleanedRoot = cleanPath(projectRoot);
-  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+  const canonical = canonicalizeProject(cleanedRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonical;
 
-  const existing = await readWorkspaceConfig(targetDir, id);
+  const existing = await readWorkspaceConfig(targetDir, canonical);
   if (!existing?.env || typeof existing.env !== 'object' || !(cleanedName in existing.env)) {
     return {
       projectRoot: cleanedRoot,
@@ -549,11 +616,12 @@ export async function getWorkspaceInfo(
   const configDir = options.configDir;
   if (!projectRoot) throw new Error('Project root is required');
   const cleanedRoot = cleanPath(projectRoot);
-  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+  const canonical = canonicalizeProject(cleanedRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonical;
   const targetDir = getWorkspaceConfigDir({ configDir });
 
   const projectType = detectProjectType(nativePath);
-  const saved = await readWorkspaceConfig(targetDir, id);
+  const saved = await readWorkspaceConfig(targetDir, canonical);
 
   let ledger: ProjectRecord | null = null;
   try {
@@ -757,6 +825,79 @@ export async function listWorkspaces(
   return results;
 }
 
+const runGit = promisify(execFile);
+
+async function knownWorktreeSource(
+  project: string,
+  systemPath: string,
+): Promise<string | undefined> {
+  let repository = project;
+  while (!existsSync(join(repository, '.git'))) {
+    const parent = dirname(repository);
+    if (parent === repository) return undefined;
+    repository = parent;
+  }
+  if (!statSync(join(repository, '.git')).isFile()) return undefined;
+  let output: string;
+  try {
+    ({ stdout: output } = await runGit(
+      'git',
+      ['-C', project, 'worktree', 'list', '--porcelain', '-z'],
+      {
+        encoding: 'utf8',
+        timeout: 3000,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      },
+    ));
+  } catch {
+    return undefined;
+  }
+  const fields = output.split('\0');
+  if (fields[1] === 'bare') return undefined;
+  const roots = fields
+    .filter((field) => field.startsWith('worktree '))
+    .map((field) => field.slice(9));
+  const current = roots
+    .filter((root) => {
+      const rel = relative(root, project);
+      return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    })
+    .sort((a, b) => b.length - a.length)[0];
+  if (!current || !roots[0] || pathsEqual(current, roots[0])) return undefined;
+  const source = resolve(roots[0], relative(current, project));
+  if (!existsSync(source)) return undefined;
+  const canonical = canonicalizeProject(source);
+  const ledger = await getProjectLedger(systemPath, source);
+  if (!ledger?.lastReady) return undefined;
+  let raw: string;
+  try {
+    raw = await readFile(
+      join(systemPath, 'plugin-metadata', `initialize-${canonical.id}.json`),
+      'utf8',
+    );
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
+      return undefined;
+    throw error;
+  }
+  try {
+    const record: unknown = JSON.parse(raw);
+    if (
+      record &&
+      typeof record === 'object' &&
+      'rootUri' in record &&
+      typeof record.rootUri === 'string' &&
+      record.rootUri.startsWith('file:') &&
+      pathsEqual(fileURLToPath(record.rootUri), source)
+    )
+      return record.rootUri;
+  } catch {
+    console.error('intellij: ignoring invalid source-workspace metadata; using a cold index');
+  }
+  return undefined;
+}
+
 export async function applyWorkspaceOptions(
   projectRoot?: string,
   initOptions: Record<string, unknown> = {},
@@ -764,10 +905,15 @@ export async function applyWorkspaceOptions(
 ): Promise<Record<string, unknown>> {
   if (!projectRoot) return initOptions || {};
   const cleanedRoot = cleanPath(projectRoot);
-  const { nativePath, id } = canonicalizeProject(cleanedRoot);
+  const canonical = canonicalizeProject(cleanedRoot);
+  const { nativePath, id } = canonical;
   const targetDir = getWorkspaceConfigDir(options);
+  if (!Object.hasOwn(initOptions, 'fromWorkspace')) {
+    const source = await knownWorktreeSource(nativePath, options.systemPath ?? settings.systemPath);
+    if (source) initOptions = { ...initOptions, fromWorkspace: source };
+  }
 
-  const saved = await readWorkspaceConfig(targetDir, id);
+  const saved = await readWorkspaceConfig(targetDir, canonical);
   const hasSavedJdk = Boolean(saved?.javaHome);
   const hasSavedEnv = Boolean(
     saved?.env && typeof saved.env === 'object' && Object.keys(saved.env).length > 0,
@@ -903,12 +1049,12 @@ export async function reimportWorkspace(
   const startTime = Date.now();
   if (!projectRoot) throw new Error('Project root is required');
   const cleanedRoot = cleanPath(projectRoot);
-  const { canonicalPath, nativePath, rootUri, id } = canonicalizeProject(cleanedRoot);
+  const canonical = canonicalizeProject(cleanedRoot);
+  const { canonicalPath, nativePath, rootUri, id } = canonical;
   const systemPath = options.systemPath ?? settings.systemPath;
   const configDir = options.configDir;
-
   const targetDir = getWorkspaceConfigDir({ configDir });
-  const saved = await readWorkspaceConfig(targetDir, id);
+  const saved = await readWorkspaceConfig(targetDir, canonical);
   const configRevision = saved?.updatedAt ?? Date.now();
   const plannedEnvKeys = saved?.env ? Object.keys(saved.env).sort() : [];
   const appliedJdk = saved?.javaHome || null;

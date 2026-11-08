@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { executeBuild } from '../src/debug/run-core.js';
+import {
+  canonicalizeProject,
+  getProjectLedger,
+  migrateProjectMetadata,
+  pathsEqual,
+  recordReadiness,
+} from '../src/project/metadata.js';
 import {
   applyWorkspaceOptions,
   cleanPath,
@@ -12,6 +22,7 @@ import {
   getWorkspaceInfo,
   maskConfiguredSecrets,
   maskEnvValue,
+  readWorkspaceConfig,
   setWorkspaceEnvVar,
   setWorkspaceJdk,
   unsetWorkspaceEnvVar,
@@ -856,4 +867,249 @@ test('getWorkspaceInfo accurately tracks persistent importStatus receipt and mar
     await rm(systemPath, { recursive: true, force: true });
     await rm(projDir, { recursive: true, force: true });
   }
+});
+test('canonicalizeProject respects case sensitivity options and platform semantics', () => {
+  const projUpper = '/repo/MyProject';
+  const projLower = '/repo/myproject';
+
+  const sensUpper = canonicalizeProject(projUpper, { caseSensitive: true });
+  const sensLower = canonicalizeProject(projLower, { caseSensitive: true });
+  assert.notEqual(sensUpper.id, sensLower.id);
+  assert.equal(sensUpper.legacyId, sensLower.legacyId);
+  assert.equal(pathsEqual(projUpper, projLower, { caseSensitive: true }), false);
+
+  const insensUpper = canonicalizeProject(projUpper, { caseSensitive: false });
+  const insensLower = canonicalizeProject(projLower, { caseSensitive: false });
+  assert.equal(insensUpper.id, insensLower.id);
+  assert.equal(pathsEqual(projUpper, projLower, { caseSensitive: false }), true);
+});
+
+test('readWorkspaceConfig migrates legacy lowercase config when path attribution matches', async () => {
+  const configDir = join(tmpdir(), `omp-cfg-mig-${Math.random().toString(36).slice(2)}`);
+  await mkdir(configDir, { recursive: true });
+  const projPath = '/repo/TargetApp';
+  const canonical = canonicalizeProject(projPath, { caseSensitive: true });
+
+  try {
+    const legacyFile = join(configDir, `${canonical.legacyId}.json`);
+    const legacyData = {
+      id: canonical.legacyId,
+      canonicalPath: canonical.canonicalPath,
+      nativePath: canonical.nativePath,
+      rootUri: canonical.rootUri,
+      javaHome: '/opt/jdks/jdk-21',
+      env: { MIGRATED_KEY: 'migrated_val' },
+      updatedAt: 1000,
+    };
+    await writeFile(legacyFile, JSON.stringify(legacyData), 'utf8');
+
+    const result = await readWorkspaceConfig(configDir, canonical);
+    assert.ok(result);
+    assert.equal(result?.id, canonical.id);
+    assert.equal(result?.canonicalPath, canonical.canonicalPath);
+    assert.equal(result?.env?.MIGRATED_KEY, 'migrated_val');
+
+    const migratedFile = join(configDir, `${canonical.id}.json`);
+    const rawMigrated = await readFile(migratedFile, 'utf8');
+    const parsedMigrated = JSON.parse(rawMigrated) as { id: string; env?: Record<string, string> };
+    assert.equal(parsedMigrated.id, canonical.id);
+    assert.equal(parsedMigrated.env?.MIGRATED_KEY, 'migrated_val');
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+  }
+});
+
+test('readWorkspaceConfig isolates legacy lowercase config when path belongs to different casing', async () => {
+  const configDir = join(tmpdir(), `omp-cfg-iso-${Math.random().toString(36).slice(2)}`);
+  await mkdir(configDir, { recursive: true });
+  const targetProject = '/repo/caseproject';
+  const otherProject = '/repo/CaseProject';
+
+  const targetCanonical = canonicalizeProject(targetProject, { caseSensitive: true });
+  const otherCanonical = canonicalizeProject(otherProject, { caseSensitive: true });
+
+  try {
+    const legacyFile = join(configDir, `${targetCanonical.legacyId}.json`);
+    const legacyData = {
+      id: targetCanonical.legacyId,
+      canonicalPath: otherCanonical.canonicalPath,
+      nativePath: otherCanonical.nativePath,
+      rootUri: otherCanonical.rootUri,
+      javaHome: '/opt/jdks/other-jdk',
+      env: { OTHER_KEY: 'other_val' },
+      updatedAt: 1000,
+    };
+    await writeFile(legacyFile, JSON.stringify(legacyData), 'utf8');
+
+    const result = await readWorkspaceConfig(configDir, targetCanonical);
+    assert.equal(result, null);
+
+    const otherResult = await readWorkspaceConfig(configDir, otherCanonical);
+    assert.ok(otherResult);
+    assert.equal(otherResult?.canonicalPath, otherCanonical.canonicalPath);
+    assert.equal(otherResult?.env?.OTHER_KEY, 'other_val');
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+  }
+});
+
+test('project ledgers migrate by recorded ownership and preserve filesystem case semantics', async () => {
+  const systemPath = join(tmpdir(), `omp-ledger-migrate-${Math.random().toString(36).slice(2)}`);
+  const projectsDir = join(systemPath, 'plugin-metadata', 'projects');
+  const projectUpper = join(systemPath, 'LedgerProject');
+  const projectLower = join(systemPath, 'ledgerproject');
+  await mkdir(projectsDir, { recursive: true });
+  await mkdir(projectUpper, { recursive: true });
+  await mkdir(projectLower, { recursive: true });
+  const canonicalUpper = canonicalizeProject(projectUpper);
+  try {
+    await writeFile(
+      join(projectsDir, `${canonicalUpper.legacyId}.events.jsonl`),
+      `${JSON.stringify({
+        id: canonicalUpper.legacyId,
+        canonicalPath: canonicalUpper.canonicalPath,
+        nativePath: canonicalUpper.nativePath,
+        rootUri: canonicalUpper.rootUri,
+        kind: 'connection',
+        at: 5000,
+      })}\n`,
+    );
+    const ledgerUpper = await getProjectLedger(systemPath, projectUpper);
+    assert.equal(ledgerUpper?.canonicalPath, canonicalUpper.canonicalPath);
+    assert.equal(ledgerUpper?.lastConnected, 5000);
+    const ledgerLower = await getProjectLedger(systemPath, projectLower);
+    if (pathsEqual(projectUpper, projectLower)) {
+      assert.equal(ledgerLower?.lastConnected, 5000);
+    } else {
+      assert.equal(ledgerLower, null);
+    }
+  } finally {
+    await rm(systemPath, { recursive: true, force: true });
+  }
+});
+test('migrateProjectMetadata safely migrates raw-config, initialize, receipts and events on path attribution match', async () => {
+  const systemPath = join(tmpdir(), `omp-meta-mig-${Math.random().toString(36).slice(2)}`);
+  const metaDir = join(systemPath, 'plugin-metadata');
+  const rawConfigDir = join(metaDir, 'raw-config');
+  const receiptsDir = join(metaDir, 'receipts');
+
+  await mkdir(rawConfigDir, { recursive: true });
+  await mkdir(receiptsDir, { recursive: true });
+
+  const proj = '/repo/TargetService';
+  const canonical = canonicalizeProject(proj, { caseSensitive: true });
+  const legacyId = canonical.legacyId ?? 'legacy-id';
+
+  await writeFile(
+    join(rawConfigDir, `${legacyId}.json`),
+    JSON.stringify({
+      id: legacyId,
+      projectPath: canonical.nativePath,
+      __metadata: { id: legacyId, canonicalPath: canonical.canonicalPath },
+      settings: { 'java.home': '/opt/jdk' },
+    }),
+    'utf8',
+  );
+
+  await writeFile(
+    join(metaDir, `initialize-${legacyId}.json`),
+    JSON.stringify({
+      id: legacyId,
+      rootUri: canonical.rootUri,
+      initializationOptions: { test: true },
+    }),
+    'utf8',
+  );
+
+  await writeFile(
+    join(receiptsDir, `${legacyId}.applied.json`),
+    JSON.stringify({
+      id: legacyId,
+      canonicalPath: canonical.canonicalPath,
+      appliedJdk: '/opt/jdk',
+    }),
+    'utf8',
+  );
+
+  await writeFile(
+    join(receiptsDir, `${legacyId}.import-status.json`),
+    JSON.stringify({
+      id: legacyId,
+      status: 'applied',
+    }),
+    'utf8',
+  );
+
+  try {
+    await migrateProjectMetadata(systemPath, canonical);
+
+    const rawTarget = await readFile(join(rawConfigDir, `${canonical.id}.json`), 'utf8');
+    const parsedRaw = JSON.parse(rawTarget) as { id: string; __metadata?: { id?: string } };
+    assert.equal(parsedRaw.id, canonical.id);
+    assert.equal(parsedRaw.__metadata?.id, canonical.id);
+
+    const initTarget = await readFile(join(metaDir, `initialize-${canonical.id}.json`), 'utf8');
+    const parsedInit = JSON.parse(initTarget) as { id: string };
+    assert.equal(parsedInit.id, canonical.id);
+
+    const receiptTarget = await readFile(join(receiptsDir, `${canonical.id}.applied.json`), 'utf8');
+    const parsedReceipt = JSON.parse(receiptTarget) as { id: string };
+    assert.equal(parsedReceipt.id, canonical.id);
+
+    const importTargetExists = existsSync(join(receiptsDir, `${canonical.id}.import-status.json`));
+    assert.equal(importTargetExists, false);
+
+    assert.ok(existsSync(join(rawConfigDir, `${legacyId}.json`)));
+  } finally {
+    await rm(systemPath, { recursive: true, force: true });
+  }
+});
+
+test('linked worktrees only inherit an attributed ready source URI and preserve explicit options', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-worktree-source-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const main = join(root, 'main');
+  const linked = join(root, 'linked');
+  const systemPath = join(root, 'system');
+  const configDir = join(root, 'profiles');
+  await mkdir(main);
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', main, ...args], { encoding: 'utf8', windowsHide: true });
+  git('init', '--quiet');
+  await writeFile(join(main, 'marker'), 'worktree fixture');
+  git('add', 'marker');
+  git(
+    '-c',
+    'user.name=Test',
+    '-c',
+    'user.email=test@localhost',
+    'commit',
+    '--quiet',
+    '-m',
+    'fixture',
+  );
+  git('worktree', 'add', '--quiet', '-b', 'linked', linked);
+  const options = { systemPath, configDir };
+  assert.equal((await applyWorkspaceOptions(linked, {}, options)).fromWorkspace, undefined);
+  const source = canonicalizeProject(main);
+  const metadata = join(systemPath, 'plugin-metadata');
+  await mkdir(metadata, { recursive: true });
+  const record = join(metadata, `initialize-${source.id}.json`);
+  const originalUri = pathToFileURL(main).href;
+  await writeFile(record, JSON.stringify({ rootUri: originalUri }));
+  assert.equal((await applyWorkspaceOptions(linked, {}, options)).fromWorkspace, undefined);
+  await recordReadiness(systemPath, main);
+  assert.equal((await applyWorkspaceOptions(linked, {}, options)).fromWorkspace, originalUri);
+  assert.equal((await applyWorkspaceOptions(main, {}, options)).fromWorkspace, undefined);
+  assert.equal(
+    (await applyWorkspaceOptions(linked, { fromWorkspace: null }, options)).fromWorkspace,
+    null,
+  );
+  const explicit = 'file:///explicit-source';
+  assert.equal(
+    (await applyWorkspaceOptions(linked, { fromWorkspace: explicit }, options)).fromWorkspace,
+    explicit,
+  );
+  await writeFile(record, JSON.stringify({ rootUri: pathToFileURL(linked).href }));
+  assert.equal((await applyWorkspaceOptions(linked, {}, options)).fromWorkspace, undefined);
 });

@@ -13,7 +13,7 @@ import {
   recoverDebugSession,
 } from '../src/debug/control.js';
 import extension from '../src/extension/extension.js';
-import { canonicalizeProject } from '../src/project/metadata.js';
+import { canonicalizeProject, pathsEqual } from '../src/project/metadata.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
 function createTempDir(prefix: string): string {
@@ -801,4 +801,121 @@ test('an abandoned recovery caller cannot leave the proxy alive after cleanup', 
   release.resolve();
   await recovered.promise;
   assert.equal(phase, 'closed');
+});
+test('debug sessions isolate case-different paths and migrate legacy sessions on path match', async () => {
+  const systemPath = createTempDir('omp-dbg-iso-sys');
+  await mkdir(systemPath, { recursive: true });
+
+  const projUpper = join(systemPath, 'DebugCaseProject');
+  const projLower = join(systemPath, 'debugcaseproject');
+  await mkdir(projUpper, { recursive: true });
+  await mkdir(projLower, { recursive: true });
+
+  const canonUpper = canonicalizeProject(projUpper);
+  const canonLower = canonicalizeProject(projLower);
+
+  const dirUpper = getDebugSessionsDir(systemPath, projUpper);
+  const dirLower = getDebugSessionsDir(systemPath, projLower);
+  if (!pathsEqual(projUpper, projLower)) {
+    assert.notEqual(dirUpper, dirLower);
+  } else {
+    assert.equal(dirUpper, dirLower);
+  }
+  await mkdir(dirUpper, { recursive: true });
+  await mkdir(dirLower, { recursive: true });
+
+  const sessionUpperId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const sessionLowerId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+  const snapshot: DebugSnapshot = {
+    projectRoot: projUpper,
+    mode: 'attach',
+    phase: 'closed',
+    pendingRequests: 0,
+  };
+
+  await writeFile(
+    join(dirUpper, `${sessionUpperId}.json`),
+    JSON.stringify({
+      id: sessionUpperId,
+      pid: process.pid,
+      canonical: canonUpper.canonicalPath,
+      hash: canonUpper.id,
+      projectRoot: canonUpper.nativePath,
+      port: 0,
+      token: 'tok_upper',
+      closed: true,
+      snapshot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }),
+    'utf8',
+  );
+
+  await writeFile(
+    join(dirLower, `${sessionLowerId}.json`),
+    JSON.stringify({
+      id: sessionLowerId,
+      pid: process.pid,
+      canonical: canonLower.canonicalPath,
+      hash: canonLower.id,
+      projectRoot: canonLower.nativePath,
+      port: 0,
+      token: 'tok_lower',
+      closed: true,
+      snapshot: { ...snapshot, projectRoot: projLower },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }),
+    'utf8',
+  );
+
+  try {
+    const listUpper = await listDebugSessions({ systemPath, projectRoot: projUpper });
+    const listLower = await listDebugSessions({ systemPath, projectRoot: projLower });
+
+    const equivalent = pathsEqual(projUpper, projLower);
+    assert.deepEqual(
+      listUpper.map((s) => s.id),
+      equivalent ? [sessionUpperId, sessionLowerId] : [sessionUpperId],
+    );
+    assert.deepEqual(
+      listLower.map((s) => s.id),
+      equivalent ? [sessionUpperId, sessionLowerId] : [sessionLowerId],
+    );
+
+    const legacyId = canonUpper.legacyId ?? 'legacy-id';
+    const legacyDir = join(systemPath, 'plugin-metadata', 'debug-sessions', legacyId);
+    await mkdir(legacyDir, { recursive: true });
+    const sessionLegacyId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+    await writeFile(
+      join(legacyDir, `${sessionLegacyId}.json`),
+      JSON.stringify({
+        id: sessionLegacyId,
+        pid: process.pid,
+        canonical: canonUpper.canonicalPath,
+        hash: legacyId,
+        projectRoot: canonUpper.nativePath,
+        port: 0,
+        token: 'tok_legacy',
+        closed: true,
+        snapshot: { ...snapshot },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }),
+      'utf8',
+    );
+
+    const listUpperWithLegacy = await listDebugSessions({ systemPath, projectRoot: projUpper });
+    assert.ok(listUpperWithLegacy.some((s) => s.id === sessionLegacyId));
+
+    const listLowerWithLegacy = await listDebugSessions({ systemPath, projectRoot: projLower });
+    assert.equal(
+      listLowerWithLegacy.some((s) => s.id === sessionLegacyId),
+      equivalent,
+    );
+  } finally {
+    await rm(systemPath, { recursive: true, force: true });
+  }
 });

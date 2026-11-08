@@ -18,6 +18,7 @@ import {
 import {
   canonicalizeProject,
   type LeaseHandle,
+  migrateProjectMetadata,
   recordConnection,
   recordReadiness,
 } from '../project/metadata.js';
@@ -279,7 +280,8 @@ export async function createLspSession(
   projectRoot: string,
   options: CreateLspSessionOptions = {},
 ): Promise<LspSession> {
-  const { id, nativePath } = canonicalizeProject(projectRoot);
+  const project = canonicalizeProject(findProjectRoot(projectRoot));
+  const { id, nativePath } = project;
 
   const rawInitTimeout = options.initializeTimeoutMs ?? options.initTimeoutMs;
   if (rawInitTimeout !== undefined && (!Number.isFinite(rawInitTimeout) || rawInitTimeout <= 0)) {
@@ -310,6 +312,7 @@ export async function createLspSession(
   if (signal?.aborted) {
     throw signal.reason instanceof Error ? signal.reason : new Error('LSP session aborted');
   }
+  await migrateProjectMetadata(systemPath, project);
 
   const { socket, lease } = await connectWithLease({
     systemPath,
@@ -320,6 +323,7 @@ export async function createLspSession(
   const connState = createConnectionState({
     systemPath,
     kind: 'runner',
+    root: nativePath,
   });
   let leaseHandle: LeaseHandle | null = lease;
   recordConnection(systemPath, nativePath, Date.now()).catch(() => {});

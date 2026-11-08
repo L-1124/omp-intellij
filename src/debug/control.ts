@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { canonicalizeProject } from '../project/metadata.js';
+import { canonicalizeProject, pathsEqual } from '../project/metadata.js';
 
 export type DebugPhase =
   | 'connecting-lsp'
@@ -498,115 +498,136 @@ export async function listDebugSessions(options: {
 }): Promise<DebugSessionInfo[]> {
   const canonical = canonicalizeProject(options.projectRoot);
   const dir = getDebugSessionsDir(options.systemPath, options.projectRoot);
-
-  let entries: string[];
-  try {
-    entries = await readdir(dir);
-  } catch {
-    return [];
-  }
-
-  const results: DebugSessionInfo[] = [];
-
-  for (const entry of entries) {
-    if (!entry.endsWith('.json')) continue;
-    const metaPath = join(dir, entry);
-    let raw: string;
+  const readDirSessions = async (
+    targetDir: string,
+    expectedHash: string,
+  ): Promise<DebugSessionInfo[]> => {
+    let entries: string[];
     try {
-      raw = await readFile(metaPath, 'utf8');
+      entries = await readdir(targetDir);
     } catch {
-      continue;
+      return [];
     }
 
-    const record = parseDebugMetadataRecord(raw);
-    if (!record) continue;
+    const items: DebugSessionInfo[] = [];
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const metaPath = join(targetDir, entry);
+      let raw: string;
+      try {
+        raw = await readFile(metaPath, 'utf8');
+      } catch {
+        continue;
+      }
 
-    if (record.hash !== canonical.id || record.canonical !== canonical.canonicalPath) {
-      continue;
-    }
+      const record = parseDebugMetadataRecord(raw);
+      if (!record) continue;
 
-    if (record.closed) {
-      results.push({
-        id: record.id,
-        pid: record.pid,
-        live: false,
-        snapshot: record.snapshot,
-        detail: record.snapshot.error || record.snapshot.cleanupError || record.snapshot.phase,
-      });
-      continue;
-    }
+      if (record.hash !== expectedHash || !pathsEqual(record.canonical, canonical.canonicalPath)) {
+        continue;
+      }
 
-    if (!isProcessAlive(record.pid)) {
-      results.push({
-        id: record.id,
-        pid: record.pid,
-        live: false,
-        snapshot: record.snapshot,
-        detail: `unrecoverable (proxy PID ${record.pid} exited; backend connection lost)`,
-      });
-      continue;
-    }
-
-    if (!record.port || !record.token) {
-      results.push({
-        id: record.id,
-        pid: record.pid,
-        live: false,
-        snapshot: record.snapshot,
-        detail: 'unrecoverable (missing control endpoint)',
-      });
-      continue;
-    }
-
-    try {
-      const res = await fetch(`http://127.0.0.1:${record.port}/status`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${record.token}` },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (res.ok) {
-        const bodyText = await res.text();
-        const json = parseJsonObject(bodyText);
-        const snap = parseDebugSnapshot(json);
-        if (snap) {
-          const errPart = snap.error ? `; error: ${snap.error}` : '';
-          const pendingPart = snap.pendingRequests > 0 ? `; pending: ${snap.pendingRequests}` : '';
-          results.push({
-            id: record.id,
-            pid: record.pid,
-            live: true,
-            snapshot: snap,
-            detail: `${snap.mode} (${snap.phase})${errPart}${pendingPart}`,
-          });
-        } else {
-          results.push({
-            id: record.id,
-            pid: record.pid,
-            live: false,
-            snapshot: record.snapshot,
-            detail: 'invalid snapshot response',
-          });
-        }
-      } else {
-        results.push({
+      if (record.closed) {
+        items.push({
           id: record.id,
           pid: record.pid,
           live: false,
           snapshot: record.snapshot,
-          detail: `stale (HTTP ${res.status})`,
+          detail: record.snapshot.error || record.snapshot.cleanupError || record.snapshot.phase,
+        });
+        continue;
+      }
+
+      if (!isProcessAlive(record.pid)) {
+        items.push({
+          id: record.id,
+          pid: record.pid,
+          live: false,
+          snapshot: record.snapshot,
+          detail: `unrecoverable (proxy PID ${record.pid} exited; backend connection lost)`,
+        });
+        continue;
+      }
+
+      if (!record.port || !record.token) {
+        items.push({
+          id: record.id,
+          pid: record.pid,
+          live: false,
+          snapshot: record.snapshot,
+          detail: 'unrecoverable (missing control endpoint)',
+        });
+        continue;
+      }
+
+      try {
+        const res = await fetch(`http://127.0.0.1:${record.port}/status`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${record.token}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const bodyText = await res.text();
+          const json = parseJsonObject(bodyText);
+          const snap = parseDebugSnapshot(json);
+          if (snap) {
+            const errPart = snap.error ? `; error: ${snap.error}` : '';
+            const pendingPart =
+              snap.pendingRequests > 0 ? `; pending: ${snap.pendingRequests}` : '';
+            items.push({
+              id: record.id,
+              pid: record.pid,
+              live: true,
+              snapshot: snap,
+              detail: `${snap.mode} (${snap.phase})${errPart}${pendingPart}`,
+            });
+          } else {
+            items.push({
+              id: record.id,
+              pid: record.pid,
+              live: false,
+              snapshot: record.snapshot,
+              detail: 'invalid snapshot response',
+            });
+          }
+        } else {
+          items.push({
+            id: record.id,
+            pid: record.pid,
+            live: false,
+            snapshot: record.snapshot,
+            detail: `stale (HTTP ${res.status})`,
+          });
+        }
+      } catch {
+        items.push({
+          id: record.id,
+          pid: record.pid,
+          live: false,
+          snapshot: record.snapshot,
+          detail: `stale (port ${record.port} unreachable)`,
         });
       }
-    } catch {
-      results.push({
-        id: record.id,
-        pid: record.pid,
-        live: false,
-        snapshot: record.snapshot,
-        detail: `stale (port ${record.port} unreachable)`,
-      });
+    }
+    return items;
+  };
+
+  const results = await readDirSessions(dir, canonical.id);
+  if (canonical.legacyId && canonical.legacyId !== canonical.id) {
+    const legacyDir = join(
+      options.systemPath,
+      'plugin-metadata',
+      'debug-sessions',
+      canonical.legacyId,
+    );
+    const legacyItems = await readDirSessions(legacyDir, canonical.legacyId);
+    const existingIds = new Set(results.map((r) => r.id));
+    for (const item of legacyItems) {
+      if (!existingIds.has(item.id)) {
+        results.push(item);
+      }
     }
   }
-
   results.sort((a, b) => a.id.localeCompare(b.id));
   return results;
 }
@@ -653,6 +674,7 @@ export async function recoverDebugSession(options: {
   } catch {}
 
   let matchedFile: string | null = null;
+  let sourceDir = dir;
   if (entries.includes(`${targetId}.json`)) {
     matchedFile = `${targetId}.json`;
   } else {
@@ -664,11 +686,34 @@ export async function recoverDebugSession(options: {
     }
   }
 
+  if (!matchedFile && canonical.legacyId && canonical.legacyId !== canonical.id) {
+    const legacyDir = join(
+      options.systemPath,
+      'plugin-metadata',
+      'debug-sessions',
+      canonical.legacyId,
+    );
+    let legacyEntries: string[] = [];
+    try {
+      legacyEntries = await readdir(legacyDir);
+    } catch {}
+    if (legacyEntries.includes(`${targetId}.json`)) {
+      matchedFile = `${targetId}.json`;
+      sourceDir = legacyDir;
+    } else {
+      const candidates = legacyEntries.filter((e) => e.endsWith('.json') && e.startsWith(targetId));
+      if (candidates.length === 1) {
+        matchedFile = candidates[0];
+        sourceDir = legacyDir;
+      }
+    }
+  }
+
   if (!matchedFile) {
     throw new Error(`Debug session '${targetId}' not found for current project.`);
   }
 
-  const metaPath = join(dir, matchedFile);
+  const metaPath = join(sourceDir, matchedFile);
   const raw = await readFile(metaPath, 'utf8');
   const record = parseDebugMetadataRecord(raw);
 
@@ -676,7 +721,10 @@ export async function recoverDebugSession(options: {
     throw new Error(`Debug session '${targetId}' metadata is corrupted.`);
   }
 
-  if (record.hash !== canonical.id || record.canonical !== canonical.canonicalPath) {
+  const matchHash =
+    record.hash === canonical.id ||
+    (Boolean(canonical.legacyId) && record.hash === canonical.legacyId);
+  if (!matchHash || record.canonical !== canonical.canonicalPath) {
     throw new Error(
       `Debug session '${record.id}' does not belong to project ${canonical.canonicalPath}`,
     );

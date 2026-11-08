@@ -6,7 +6,15 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { detectProjectRoot } from '../src/debug/run-core.js';
 import type { ProjectStateResult } from '../src/project/connection-state.js';
-import { findProjectRoot, watchIndex } from '../src/project/readiness.js';
+import {
+  findBuildRoot,
+  findModuleRoot,
+  findProjectRoot,
+  isGradleSettingsDynamic,
+  parseGradleSettingsIncludes,
+  parsePomModules,
+  watchIndex,
+} from '../src/project/readiness.js';
 
 test('findProjectRoot searches upward for project markers', async () => {
   const base = join(tmpdir(), `omp-test-find-root-${Math.random().toString(36).slice(2)}`);
@@ -135,23 +143,172 @@ test('findProjectRoot recognizes IntelliJ .idea and .iml module markers', async 
   }
 });
 
-test('findProjectRoot returns nearest nested module root rather than outer aggregator', async () => {
+test('findProjectRoot returns outer aggregator build root while findModuleRoot returns module context', async () => {
   const base = join(tmpdir(), `omp-test-multimodule-${Math.random().toString(36).slice(2)}`);
   const subModule = join(base, 'sub-module');
   const subSrc = join(subModule, 'src', 'main', 'java');
+  const fixtureDir = join(base, 'fixtures', 'independent-test');
+  const fixtureSrc = join(fixtureDir, 'src', 'main', 'java');
 
   await mkdir(subSrc, { recursive: true });
+  await mkdir(fixtureSrc, { recursive: true });
   await writeFile(
     join(base, 'pom.xml'),
-    '<project><modules><module>sub-module</module></modules></project>',
+    `<!-- <modules><module>fixtures/independent-test</module></modules> -->
+    <project>
+      <modules>
+        <module>sub-module</module>
+      </modules>
+    </project>`,
     'utf8',
   );
   await writeFile(join(subModule, 'pom.xml'), '<project></project>', 'utf8');
+  await writeFile(join(fixtureDir, 'pom.xml'), '<project></project>', 'utf8');
 
   try {
-    const res = findProjectRoot(subSrc);
-    assert.equal(res.toLowerCase(), subModule.toLowerCase());
-    assert.equal(detectProjectRoot(subSrc).toLowerCase(), subModule.toLowerCase());
+    // Submodule aggregated by base: build root is base, module root is subModule
+    const buildRoot = findProjectRoot(subSrc);
+    const directBuildRoot = findBuildRoot(subSrc);
+    const moduleRoot = findModuleRoot(subSrc);
+    const explicitModule = findProjectRoot(subSrc, { scope: 'module' });
+
+    assert.equal(buildRoot.toLowerCase(), base.toLowerCase());
+    assert.equal(directBuildRoot.toLowerCase(), base.toLowerCase());
+    assert.equal(moduleRoot.toLowerCase(), subModule.toLowerCase());
+    assert.equal(explicitModule.toLowerCase(), subModule.toLowerCase());
+    assert.equal(detectProjectRoot(subSrc).toLowerCase(), base.toLowerCase());
+
+    // Independent fixture inside repository not declared in parent modules: stays independent
+    const fixtureBuildRoot = findProjectRoot(fixtureSrc);
+    const fixtureModuleRoot = findModuleRoot(fixtureSrc);
+    assert.equal(fixtureBuildRoot.toLowerCase(), fixtureDir.toLowerCase());
+    assert.equal(fixtureModuleRoot.toLowerCase(), fixtureDir.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('findProjectRoot resolves Gradle settings build root and preserves independent fixtures', async () => {
+  const base = join(tmpdir(), `omp-test-gradle-multi-${Math.random().toString(36).slice(2)}`);
+  const coreMod = join(base, 'core');
+  const coreSrc = join(coreMod, 'src', 'main', 'kotlin');
+  const fixtureDir = join(base, 'fixtures', 'standalone-fixture');
+  const fixtureSrc = join(fixtureDir, 'src', 'main', 'kotlin');
+
+  await mkdir(coreSrc, { recursive: true });
+  await mkdir(fixtureSrc, { recursive: true });
+
+  await writeFile(
+    join(base, 'settings.gradle.kts'),
+    `rootProject.name = "gradle-multi"
+    include("core")
+    // include("fixtures/standalone-fixture")
+    `,
+    'utf8',
+  );
+  await writeFile(join(coreMod, 'build.gradle.kts'), '// core build', 'utf8');
+  await writeFile(join(fixtureDir, 'build.gradle.kts'), '// fixture build', 'utf8');
+
+  try {
+    // Core module included in settings.gradle.kts -> build root is base
+    const coreBuildRoot = findProjectRoot(coreSrc);
+    const coreModuleRoot = findModuleRoot(coreSrc);
+    assert.equal(coreBuildRoot.toLowerCase(), base.toLowerCase());
+    assert.equal(coreModuleRoot.toLowerCase(), coreMod.toLowerCase());
+
+    // Standalone fixture not in settings.gradle.kts -> stays fixtureDir
+    const fixtureBuildRoot = findProjectRoot(fixtureSrc);
+    const fixtureModuleRoot = findModuleRoot(fixtureSrc);
+    assert.equal(fixtureBuildRoot.toLowerCase(), fixtureDir.toLowerCase());
+    assert.equal(fixtureModuleRoot.toLowerCase(), fixtureDir.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('parsePomModules handles XML comments, CDATA, subprojects, and profile modules', () => {
+  const pom = `
+    <project>
+      <!-- <modules><module>commented-mod</module></modules> -->
+      <modules>
+        <module>mod-a</module>
+        <subproject>mod-b/pom.xml</subproject>
+        <module><![CDATA[mod-c]]></module>
+      </modules>
+      <profiles>
+        <profile>
+          <id>extra</id>
+          <modules>
+            <module>profile-mod</module>
+          </modules>
+        </profile>
+      </profiles>
+    </project>
+  `;
+  const mods = parsePomModules(pom, '/repo');
+  const modArray = Array.from(mods).map((m) => m.replace(/\\/g, '/'));
+  assert.ok(modArray.some((m) => m.endsWith('/repo/mod-a')));
+  assert.ok(modArray.some((m) => m.endsWith('/repo/mod-b')));
+  assert.ok(modArray.some((m) => m.endsWith('/repo/mod-c')));
+  assert.ok(modArray.some((m) => m.endsWith('/repo/profile-mod')));
+  assert.ok(!modArray.some((m) => m.includes('commented-mod')));
+});
+
+test('parseGradleSettingsIncludes handles Groovy and Kotlin DSL, single/double quotes, and colon notation', () => {
+  const settings = `
+    // include 'commented-one'
+    /* include 'commented-two' */
+    include 'app', ':core:network'
+    include("feature-a", ":feature-b")
+    includeBuild("composite-tool")
+  `;
+  const includes = parseGradleSettingsIncludes(settings, '/repo');
+  const incArray = Array.from(includes).map((m) => m.replace(/\\/g, '/'));
+  assert.ok(incArray.some((m) => m.endsWith('/repo/app')));
+  assert.ok(incArray.some((m) => m.endsWith('/repo/core/network')));
+  assert.ok(incArray.some((m) => m.endsWith('/repo/feature-a')));
+  assert.ok(incArray.some((m) => m.endsWith('/repo/feature-b')));
+  assert.ok(incArray.some((m) => m.endsWith('/repo/composite-tool')));
+  assert.ok(!incArray.some((m) => m.includes('commented')));
+});
+test('findProjectRoot falls back conservatively to nearest settings build root when settings uses dynamic logic', async () => {
+  const base = join(tmpdir(), `omp-test-gradle-dyn-${Math.random().toString(36).slice(2)}`);
+  const dynMod = join(base, 'dynamic-sub');
+  const dynSrc = join(dynMod, 'src', 'main', 'java');
+
+  await mkdir(dynSrc, { recursive: true });
+  const settingsContent = `// dynamic discovery
+    rootDir.listFiles().each { dir ->
+      if (new File(dir, 'build.gradle').exists()) {
+        include dir.name
+      }
+    }
+  `;
+  await writeFile(join(base, 'settings.gradle'), settingsContent, 'utf8');
+  await writeFile(join(dynMod, 'build.gradle'), '// sub', 'utf8');
+
+  try {
+    assert.equal(isGradleSettingsDynamic(settingsContent), true);
+    assert.equal(findProjectRoot(dynSrc).toLowerCase(), base.toLowerCase());
+    assert.equal(findModuleRoot(dynSrc).toLowerCase(), dynMod.toLowerCase());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('findProjectRoot preserves independent subfolder when root settings has no includes and is not dynamic', async () => {
+  const base = join(tmpdir(), `omp-test-gradle-empty-root-${Math.random().toString(36).slice(2)}`);
+  const subMod = join(base, 'standalone-sub');
+  const subSrc = join(subMod, 'src', 'main', 'java');
+
+  await mkdir(subSrc, { recursive: true });
+  await writeFile(join(base, 'settings.gradle'), 'rootProject.name = "root-app"', 'utf8');
+  await writeFile(join(subMod, 'build.gradle'), '// sub', 'utf8');
+
+  try {
+    assert.equal(isGradleSettingsDynamic('rootProject.name = "root-app"'), false);
+    assert.equal(findProjectRoot(subSrc).toLowerCase(), subMod.toLowerCase());
+    assert.equal(findModuleRoot(subSrc).toLowerCase(), subMod.toLowerCase());
   } finally {
     await rm(base, { recursive: true, force: true });
   }

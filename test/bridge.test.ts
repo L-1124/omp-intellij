@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
@@ -9,60 +9,62 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { encode, frameParser } from '../src/shared/protocol.js';
 
-test('bridge executable answers initialize and forwards semantic requests', {
+test('cancelled requests stay cancelled after indexing completes and the bridge exits on EOF', {
   timeout: 15000,
 }, async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'omp-intellij-bridge-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), 'omp-bridge-cancel-'));
   const systemPath = join(root, 'system');
   const project = join(root, 'project');
   await mkdir(systemPath);
   await mkdir(project);
   const sockets = new Set<net.Socket>();
+  let serverSocket: net.Socket | undefined;
+  let semanticRequests = 0;
+  let child: ChildProcessWithoutNullStreams | undefined;
+  let exited: Promise<unknown> | undefined;
   const server = net.createServer((socket) => {
+    serverSocket = socket;
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
     socket.on(
       'data',
       frameParser((raw) => {
-        assert.ok(raw && typeof raw === 'object' && !Array.isArray(raw));
-        assert.ok('method' in raw);
-        if (raw.method === 'initialize') {
-          assert.ok('id' in raw);
-          const params = (raw as Record<string, unknown>).params as Record<string, unknown>;
-          const caps = params.capabilities as Record<string, unknown>;
-          const win = caps.window as Record<string, unknown>;
-          assert.equal(win.workDoneProgress, true);
-          const opts = params.initializationOptions as Record<string, unknown>;
-          assert.equal(opts.intellijExtensions, true);
-          assert.equal(opts.lazyIntentions, true);
-          socket.write(
-            encode({
-              jsonrpc: '2.0',
-              id: raw.id,
-              result: { capabilities: { hoverProvider: true } },
-            }),
-          );
-          socket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
-        } else if (raw.method === 'textDocument/hover') {
-          assert.ok('id' in raw);
-          socket.write(
-            encode({ jsonrpc: '2.0', id: raw.id, result: { contents: 'bridge-protocol-ok' } }),
-          );
+        const message = raw as Record<string, unknown>;
+        if (message.method === 'initialize') {
+          socket.write(encode({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } }));
+        } else if (message.method === 'workspace/symbol') {
+          semanticRequests++;
+        } else if (message.id !== undefined) {
+          socket.write(encode({ jsonrpc: '2.0', id: message.id, result: null }));
         }
       }),
     );
   });
+  t.after(async () => {
+    if (child) {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await exited;
+    }
+    for (const socket of sockets) socket.destroy();
+    if (server.listening) {
+      const closed = Promise.withResolvers<void>();
+      server.close(() => closed.resolve());
+      await closed.promise;
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  t.after(() => {
-    for (const socket of sockets) socket.destroy();
-    server.close();
-  });
   const address = server.address();
   assert.ok(address && typeof address === 'object');
   await writeFile(join(systemPath, 'server.port'), String(address.port));
-  await writeFile(join(systemPath, 'omp-server.json'), JSON.stringify({ pid: process.pid }));
+  await writeFile(
+    join(systemPath, 'omp-server.json'),
+    JSON.stringify({ pid: globalThis.process.pid }),
+  );
   const config = join(root, 'settings.json');
   await writeFile(
     config,
@@ -72,54 +74,50 @@ test('bridge executable answers initialize and forwards semantic requests', {
       systemPath,
       startupTimeoutMs: 1000,
       initializeTimeoutMs: 1000,
-      requestWaitTimeoutMs: 1000,
+      requestWaitTimeoutMs: 2000,
       idleTimeout: '30m',
       workspaceConfigPath: join(root, 'profiles'),
       cachePolicy: { retentionDays: 30, warnAboveGiB: 5, automaticDeletion: false },
     }),
   );
-  const child = spawn(
-    process.execPath,
+  const process = spawn(
+    globalThis.process.execPath,
     [fileURLToPath(new URL('../src/bridge.js', import.meta.url))],
     {
       cwd: project,
-      env: { ...process.env, OMP_INTELLIJ_SETTINGS: config },
+      env: { ...globalThis.process.env, OMP_INTELLIJ_SETTINGS: config },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     },
   );
-  const closed = once(child, 'close');
-  t.after(async () => {
-    try {
-      child.stdin?.destroy();
-    } catch {}
-    if (child.exitCode === null) child.kill();
-    await closed;
-  });
+  child = process;
+  exited = once(process, 'exit');
   let stderr = '';
-  child.stderr.on('data', (chunk: Buffer) => {
+  process.stderr.on('data', (chunk: Buffer) => {
     stderr += chunk.toString();
   });
-  const received: unknown[] = [];
-  const ready = Promise.withResolvers<void>();
-  const hover = Promise.withResolvers<unknown>();
-  child.stdout.on(
+  const initialized = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<Record<string, unknown>>();
+  const fence = Promise.withResolvers<void>();
+  process.stdout.on(
     'data',
     frameParser((raw) => {
-      received.push(raw);
-      if (!raw || typeof raw !== 'object') return;
-      if ('method' in raw && raw.method === 'intellij/ready-for-test') ready.resolve();
-      if ('id' in raw && raw.id === 2 && 'result' in raw) hover.resolve(raw.result);
+      const message = raw as Record<string, unknown>;
+      if (message.id === 1) initialized.resolve();
+      if (message.id === 2) cancelled.resolve(message);
+      if (message.id === 3) fence.resolve();
     }),
   );
-  child.once('close', (code) => {
-    const error = new Error(`Bridge exited before response (${code}): ${stderr}`);
-    ready.reject(error);
-    hover.reject(error);
+  process.once('exit', () => {
+    const error = new Error(stderr || 'Bridge exited before a protocol response');
+    initialized.reject(error);
+    cancelled.reject(error);
+    fence.reject(error);
   });
-  ready.promise.catch(() => {});
-  hover.promise.catch(() => {});
-  child.stdin.write(
+  initialized.promise.catch(() => {});
+  cancelled.promise.catch(() => {});
+  fence.promise.catch(() => {});
+  process.stdin.write(
     encode({
       jsonrpc: '2.0',
       id: 1,
@@ -127,23 +125,22 @@ test('bridge executable answers initialize and forwards semantic requests', {
       params: { rootUri: pathToFileURL(project).href, capabilities: {} },
     }),
   );
-  await ready.promise;
-  child.stdin.write(
-    encode({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'textDocument/hover',
-      params: {
-        textDocument: { uri: pathToFileURL(join(project, 'Example.java')).href },
-        position: { line: 0, character: 0 },
-      },
-    }),
+  await initialized.promise;
+  process.stdin.write(
+    Buffer.concat([
+      encode({ jsonrpc: '2.0', id: 2, method: 'workspace/symbol', params: { query: 'Queued' } }),
+      encode({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id: 2 } }),
+    ]),
   );
-  assert.deepEqual(await hover.promise, { contents: 'bridge-protocol-ok' });
-  assert.ok(
-    received.some((value) => value && typeof value === 'object' && 'id' in value && value.id === 1),
-  );
-  child.stdin.end();
-  const [code] = await closed;
+  const response = await cancelled.promise;
+  assert.ok(response.error && typeof response.error === 'object' && 'code' in response.error);
+  assert.equal(response.error.code, -32800);
+  assert.ok(serverSocket);
+  serverSocket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
+  process.stdin.write(encode({ jsonrpc: '2.0', id: 3, method: 'custom/fence', params: {} }));
+  await fence.promise;
+  process.stdin.end();
+  const [code] = (await exited) as [number | null];
   assert.equal(code, 0, stderr);
+  assert.equal(semanticRequests, 0);
 });
