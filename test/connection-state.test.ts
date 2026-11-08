@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +10,7 @@ import {
   reduceConnectionState,
 } from '../src/project/connection-state.js';
 import { canonicalizeProject } from '../src/project/metadata.js';
+import { getProcessInfo } from '../src/server/service.js';
 
 test('concurrent status reads preserve the final closed record and leave no temporary files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'omp-record-read-close-'));
@@ -51,12 +53,13 @@ test('newer conn wins: newest-started live bridge overrides older ready connecti
     const projectPath = join(tempDir, 'workspace', 'my-project');
     const { canonicalPath } = canonicalizeProject(projectPath);
 
+    const now = Date.now();
     const oldConnRecord = {
       connectionId: 'conn-old',
       kind: 'bridge',
       pid: process.pid,
-      startedAt: 100000,
-      updatedAt: 150000,
+      startedAt: now - 5000,
+      updatedAt: now - 3000,
       seq: 5,
       phase: 'ready',
       detail: 'Old ready index',
@@ -69,8 +72,8 @@ test('newer conn wins: newest-started live bridge overrides older ready connecti
       connectionId: 'conn-new',
       kind: 'bridge',
       pid: process.pid,
-      startedAt: 200000,
-      updatedAt: 205000,
+      startedAt: now - 2000,
+      updatedAt: now - 1000,
       seq: 3,
       phase: 'indexing',
       detail: 'New indexing in progress',
@@ -516,6 +519,396 @@ test('closed connections downgrade license to unknown; disk writes are sanitized
     const snapshot = await readProjectState(tempDir, projectPath);
     assert.equal(snapshot.license?.status, 'unknown');
   } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+test('stale failure does not pollute newly started live connection', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-stale-live-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+    const { canonicalPath } = canonicalizeProject(projectPath);
+
+    // Stale failure from an hour ago with dead PID
+    const staleFailed = {
+      connectionId: 'conn-stale-fail',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 3600000,
+      updatedAt: Date.now() - 3500000,
+      seq: 5,
+      phase: 'failed',
+      detail: 'Stale Gradle sync failure from previous crash',
+      failure: {
+        kind: 'import',
+        stage: 'import',
+        message: 'Stale Gradle error',
+      },
+      canonicalPath,
+      closed: false,
+    };
+    await writeFile(
+      join(connDir, 'conn-stale-fail.json'),
+      JSON.stringify(staleFailed, null, 2),
+      'utf8',
+    );
+
+    // New live connection currently connecting
+    const liveConnecting = {
+      connectionId: 'conn-live-new',
+      kind: 'bridge',
+      pid: process.pid,
+      startedAt: Date.now() - 1000,
+      updatedAt: Date.now() - 500,
+      seq: 1,
+      phase: 'connecting',
+      detail: 'Initializing connection',
+      canonicalPath,
+      closed: false,
+    };
+    await writeFile(
+      join(connDir, 'conn-live-new.json'),
+      JSON.stringify(liveConnecting, null, 2),
+      'utf8',
+    );
+
+    const snapshot = await readProjectState(tempDir, projectPath);
+    assert.equal(snapshot.connectionId, 'conn-live-new');
+    assert.equal(snapshot.phase, 'connecting');
+    assert.equal(snapshot.live, true);
+    assert.equal(snapshot.failure, undefined, 'Stale failure must not pollute live connection');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('stale failure does not pollute subsequent cleanly closed connection', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-stale-close-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+    const { canonicalPath } = canonicalizeProject(projectPath);
+
+    // Old failed connection from 2 hours ago
+    const oldFailure = {
+      connectionId: 'conn-old-fail',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 7200000,
+      updatedAt: Date.now() - 7100000,
+      seq: 2,
+      phase: 'failed',
+      detail: 'Old failure',
+      failure: { kind: 'import', message: 'Old failure' },
+      canonicalPath,
+      closed: false,
+    };
+    await writeFile(
+      join(connDir, 'conn-old-fail.json'),
+      JSON.stringify(oldFailure, null, 2),
+      'utf8',
+    );
+
+    // Subsequent connection that ran and cleanly disconnected
+    const cleanClose = {
+      connectionId: 'conn-clean-close',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 1800000,
+      updatedAt: Date.now() - 1200000,
+      seq: 10,
+      phase: 'disconnected',
+      detail: 'Session ended after the index was ready',
+      canonicalPath,
+      closed: true,
+    };
+    await writeFile(
+      join(connDir, 'conn-clean-close.json'),
+      JSON.stringify(cleanClose, null, 2),
+      'utf8',
+    );
+
+    const snapshot = await readProjectState(tempDir, projectPath);
+    assert.equal(snapshot.connectionId, 'conn-clean-close');
+    assert.equal(snapshot.phase, 'disconnected');
+    assert.equal(snapshot.live, false);
+    assert.equal(
+      snapshot.failure,
+      undefined,
+      'Prior failure must not pollute subsequent clean close',
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('corrupted json records are quarantined to .corrupt with bounded diagnostics', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-corrupt-quarantine-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+
+    const badFile = join(connDir, 'bad-record.json');
+    await writeFile(badFile, '<<< NOT VALID JSON >>>', 'utf8');
+
+    // Backdate mtime beyond CORRUPT_GRACE_MS (e.g. 10 seconds ago)
+    const tenSecondsAgo = new Date(Date.now() - 10000);
+    await utimes(badFile, tenSecondsAgo, tenSecondsAgo);
+
+    // Capture warnings
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+
+    try {
+      const snapshot = await readProjectState(tempDir, projectPath);
+      assert.equal(snapshot.phase, 'not-started');
+
+      const files = await readdir(connDir);
+      assert.ok(!files.includes('bad-record.json'), 'Original broken .json was moved');
+      assert.ok(
+        files.some((f) => f.startsWith('bad-record.json') && f.endsWith('.corrupt')),
+        'Quarantined file .corrupt was created',
+      );
+      assert.ok(
+        warnings.some((w) => w.includes('bad-record.json')),
+        'Diagnostic was logged',
+      );
+
+      // Second read should ignore .corrupt and not log new warnings
+      const warningsBeforeSecondRead = warnings.length;
+      await readProjectState(tempDir, projectPath);
+      assert.equal(
+        warnings.length,
+        warningsBeforeSecondRead,
+        'No duplicate log spam on subsequent poll',
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent write grace period protects recently closed duplicates from premature pruning', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-grace-protect-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+    const { canonicalPath } = canonicalizeProject(projectPath);
+
+    // Newer closed record updated 1 second ago
+    const closedNew = {
+      connectionId: 'conn-closed-new',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 2000,
+      updatedAt: Date.now() - 1000,
+      phase: 'disconnected',
+      canonicalPath,
+      closed: true,
+    };
+    await writeFile(
+      join(connDir, 'conn-closed-new.json'),
+      JSON.stringify(closedNew, null, 2),
+      'utf8',
+    );
+
+    // Older closed record updated 3 seconds ago (within CONCURRENT_WRITE_GRACE_MS = 15s)
+    const closedOlder = {
+      connectionId: 'conn-closed-older',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 5000,
+      updatedAt: Date.now() - 3000,
+      phase: 'disconnected',
+      canonicalPath,
+      closed: true,
+    };
+    await writeFile(
+      join(connDir, 'conn-closed-older.json'),
+      JSON.stringify(closedOlder, null, 2),
+      'utf8',
+    );
+
+    await readProjectState(tempDir, projectPath);
+
+    const remaining = await readdir(connDir);
+    assert.ok(
+      remaining.includes('conn-closed-older.json'),
+      'Older record updated < 15s ago must NOT be pruned immediately (concurrent write grace)',
+    );
+    assert.ok(remaining.includes('conn-closed-new.json'));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('orphan dead records without project path are cleaned up after retention window', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-orphan-clean-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+
+    // Dead orphan record with no canonicalPath updated 2 hours ago (> ORPHAN_RETENTION_MS)
+    const orphanRecord = {
+      connectionId: 'conn-orphan',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 2 * 3600000,
+      updatedAt: Date.now() - 2 * 3600000,
+      phase: 'connecting',
+      canonicalPath: null,
+      closed: false,
+    };
+    const orphanFile = join(connDir, 'conn-orphan.json');
+    await writeFile(orphanFile, JSON.stringify(orphanRecord, null, 2), 'utf8');
+
+    await readProjectState(tempDir, projectPath);
+
+    const remaining = await readdir(connDir);
+    assert.ok(!remaining.includes('conn-orphan.json'), 'Orphaned dead record > 1h was cleaned up');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('dead unclosed records without failure are recycled after DEAD_NON_FAILURE_RETENTION_MS', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-dead-recycle-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+    const { canonicalPath } = canonicalizeProject(projectPath);
+
+    // Dead unclosed record without failure updated 2 hours ago (> 1 hour)
+    const deadUnclosed = {
+      connectionId: 'conn-dead-non-fail',
+      kind: 'bridge',
+      pid: 999999,
+      startedAt: Date.now() - 2 * 3600000,
+      updatedAt: Date.now() - 2 * 3600000,
+      phase: 'connecting',
+      canonicalPath,
+      closed: false,
+    };
+    const file = join(connDir, 'conn-dead-non-fail.json');
+    await writeFile(file, JSON.stringify(deadUnclosed, null, 2), 'utf8');
+
+    await readProjectState(tempDir, projectPath);
+
+    const remaining = await readdir(connDir);
+    assert.ok(
+      !remaining.includes('conn-dead-non-fail.json'),
+      'Dead unclosed non-failure record was recycled',
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+test('quarantine and interrupted cleanup files expire after a day while recent files remain', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-quarantine-retention-'));
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const recent = new Date(Date.now() - 60 * 60 * 1000);
+    const expired = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    for (const suffix of ['corrupt', 'gc']) {
+      const freshFile = join(connDir, `recent.json.${suffix}`);
+      const oldFile = join(connDir, `expired.json.${suffix}`);
+      await writeFile(freshFile, 'retained');
+      await writeFile(oldFile, 'expired');
+      await utimes(freshFile, recent, recent);
+      await utimes(oldFile, expired, expired);
+    }
+    await readProjectState(tempDir, join(tempDir, 'project'));
+    assert.deepEqual((await readdir(connDir)).sort(), ['recent.json.corrupt', 'recent.json.gc']);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('external process identity: real spawned child process validates liveness and detects PID reuse without mock time units', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'omp-real-proc-'));
+  // Spawn a real long-running child process kept alive by stdin without wall-clock timers
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], {
+    stdio: ['pipe', 'ignore', 'ignore'],
+  });
+  assert.ok(child.pid && child.pid > 0, 'Child process must have valid PID');
+
+  try {
+    const connDir = join(tempDir, 'plugin-metadata', 'connections');
+    await mkdir(connDir, { recursive: true });
+    const projectPath = join(tempDir, 'workspace', 'my-project');
+    const { canonicalPath } = canonicalizeProject(projectPath);
+
+    // Query real homologous process info from OS
+    const realInfo = await getProcessInfo(child.pid);
+    assert.ok(realInfo && typeof realInfo.startTime === 'number' && realInfo.startTime > 0);
+
+    // Case 1: Long idle connection for 4 hours with matching homologous processStartTime remains live
+    const idleRecord = {
+      connectionId: 'conn-real-idle',
+      kind: 'bridge',
+      pid: child.pid,
+      processStartTime: realInfo.startTime,
+      startedAt: Date.now() - 4 * 3600000,
+      updatedAt: Date.now() - 4 * 3600000,
+      seq: 1,
+      phase: 'ready',
+      detail: 'IntelliJ index ready',
+      canonicalPath,
+      closed: false,
+    };
+    const idleFile = join(connDir, 'conn-real-idle.json');
+    await writeFile(idleFile, JSON.stringify(idleRecord, null, 2), 'utf8');
+
+    const liveSnapshot = await readProjectState(tempDir, projectPath);
+    assert.equal(liveSnapshot.connectionId, 'conn-real-idle');
+    assert.equal(liveSnapshot.phase, 'ready');
+    assert.equal(
+      liveSnapshot.live,
+      true,
+      'Real child process with matching startTime must remain live even after hours of inactivity',
+    );
+
+    // Case 2: Mismatched processStartTime detects PID reuse and does not treat as live
+    const reusedRecord = {
+      connectionId: 'conn-real-reused',
+      kind: 'bridge',
+      pid: child.pid,
+      processStartTime: realInfo.startTime + 999999,
+      startedAt: Date.now() - 60000,
+      updatedAt: Date.now() - 60000,
+      seq: 2,
+      phase: 'ready',
+      detail: 'Reused record',
+      canonicalPath,
+      closed: false,
+    };
+    await writeFile(idleFile, JSON.stringify(reusedRecord, null, 2), 'utf8');
+
+    const reusedSnapshot = await readProjectState(tempDir, projectPath);
+    assert.equal(
+      reusedSnapshot.live,
+      false,
+      'Mismatched startTime on real PID must be identified as reused',
+    );
+    assert.equal(reusedSnapshot.phase, 'disconnected');
+    assert.match(reusedSnapshot.detail, /reused/);
+  } finally {
+    try {
+      child.stdin?.end();
+      child.kill('SIGKILL');
+    } catch {}
     await rm(tempDir, { recursive: true, force: true });
   }
 });

@@ -444,3 +444,40 @@ test('individual request cancellation does not abort other queued requests or fa
   assert.equal(h.upstream.filter((m) => m.id === 15).length, 1);
   h.barrier.dispose();
 });
+
+test('IndexBarrier onStateChange callback errors are handled cleanly without crashing or duplicate log spam', () => {
+  let errorCount = 0;
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map(String).join(' '));
+  };
+
+  try {
+    const barrier = new IndexBarrier({
+      sendServer: () => {},
+      sendClient: () => {},
+      onStateChange: () => {
+        errorCount++;
+        throw new Error('listener failure test');
+      },
+    });
+
+    // Trigger state changes that invoke onStateChange
+    barrier.fromClient(
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } },
+      Buffer.from(''),
+    );
+    barrier.fromServer({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } }, Buffer.from(''));
+    barrier.fromServer({ method: 'intellij/ready-for-test', params: {} }, Buffer.from(''));
+
+    assert.ok(errorCount >= 2, 'Listener was called multiple times');
+    // The first error was logged, consecutive identical errors within 5s are throttled
+    assert.ok(
+      logged.some((msg) => msg.includes('IndexBarrier onStateChange error: listener failure test')),
+    );
+    barrier.dispose();
+  } finally {
+    console.error = originalError;
+  }
+});

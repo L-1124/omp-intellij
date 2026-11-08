@@ -1,6 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import {
+  type FileHandle,
+  link,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
+import { getProcessInfo, type ProcessIdentity } from '../server/service.js';
 import { replaceFile } from '../shared/atomic-file.js';
 import {
   type FailureDetail,
@@ -12,8 +26,103 @@ import {
 } from '../shared/runtime-status.js';
 import { canonicalizeProject } from './metadata.js';
 
-const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+// Invariant boundaries for connection record retention and concurrency protection
+export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEAD_NON_FAILURE_RETENTION_MS = 60 * 60 * 1000;
+export const ORPHAN_RETENTION_MS = 60 * 60 * 1000;
+export const CONCURRENT_WRITE_GRACE_MS = 15 * 1000;
+export const CORRUPT_GRACE_MS = 5 * 1000;
+let currentProcessStartTime: number | undefined;
 
+const processInfoCache = new Map<number, { info: ProcessIdentity | null; expiresAt: number }>();
+async function getCachedProcessInfo(pid: number): Promise<ProcessIdentity | null> {
+  const now = Date.now();
+  const cached = processInfoCache.get(pid);
+  if (cached && now < cached.expiresAt) {
+    return cached.info;
+  }
+  const info = await getProcessInfo(pid).catch(() => null);
+  processInfoCache.set(pid, { info, expiresAt: now + 5000 });
+  if (processInfoCache.size > 100) {
+    const first = processInfoCache.keys().next().value;
+    if (first !== undefined) processInfoCache.delete(first);
+  }
+  return info;
+}
+
+async function safeUnlinkRecord(
+  file: string,
+  expectedStat: Stats,
+  isAlive?: boolean,
+  pidExists?: boolean,
+  pidReused?: boolean,
+): Promise<void> {
+  // Never delete records for live processes or existing external PIDs that cannot be proven reused
+  if (isAlive || (pidExists && !pidReused)) return;
+
+  try {
+    const cur = await stat(file);
+    // Ensure the file on disk has not been atomically replaced by a concurrent writer
+    if (
+      cur.ino !== expectedStat.ino ||
+      cur.mtimeMs !== expectedStat.mtimeMs ||
+      cur.size !== expectedStat.size
+    ) {
+      return;
+    }
+    const removed = `${file}.${randomUUID()}.gc`;
+    await rename(file, removed);
+    const moved = await stat(removed);
+    if (
+      moved.ino !== expectedStat.ino ||
+      moved.mtimeMs !== expectedStat.mtimeMs ||
+      moved.size !== expectedStat.size
+    ) {
+      // A replacement that won the race must be restored without overwriting a later publication.
+      await link(removed, file);
+    }
+    await unlink(removed);
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return;
+    recordWriteErrorLog(
+      file,
+      sanitizeString(error instanceof Error ? error.message : String(error)),
+    );
+  }
+}
+const lastWriteErrorByPath = new Map<
+  string,
+  { message: string; count: number; lastLogTime: number }
+>();
+const warnedCorruptFiles = new Set<string>();
+
+function recordWriteErrorLog(filePath: string, message: string): void {
+  const now = Date.now();
+  const prev = lastWriteErrorByPath.get(filePath);
+  if (prev && prev.message === message && now - prev.lastLogTime < 5000) {
+    prev.count++;
+    return;
+  }
+  const countSuffix = prev && prev.count > 1 ? ` (suppressed ${prev.count - 1} duplicates)` : '';
+  console.error(`intellij connection-state write error: ${message}${countSuffix}`);
+  lastWriteErrorByPath.set(filePath, { message, count: 1, lastLogTime: now });
+  if (lastWriteErrorByPath.size > 50) {
+    const firstKey = lastWriteErrorByPath.keys().next().value;
+    if (firstKey) lastWriteErrorByPath.delete(firstKey);
+  }
+}
+
+function recordCorruptedRecordDiagnostic(file: string, error: unknown): void {
+  if (warnedCorruptFiles.has(file)) return;
+  warnedCorruptFiles.add(file);
+  if (warnedCorruptFiles.size > 100) {
+    const first = warnedCorruptFiles.values().next().value;
+    if (first) warnedCorruptFiles.delete(first);
+  }
+  const rawMsg = error instanceof Error ? error.message : String(error);
+  const safeMsg = sanitizeString(rawMsg);
+  console.warn(`[intellij] Corrupted connection record quarantined: ${file} (${safeMsg})`);
+}
 export interface ProgressPayload {
   token?: unknown;
   title?: string;
@@ -39,6 +148,7 @@ export interface ConnectionRecord extends StateRecord {
   connectionId: string;
   kind: string;
   pid: number;
+  processStartTime?: number;
   startedAt: number;
   updatedAt: number;
   seq: number;
@@ -357,6 +467,9 @@ export function createConnectionState(options: {
   pid?: number;
   connectionId?: string;
   onWriteError?: (error: unknown) => void;
+  root?: string;
+  rootUri?: string;
+  projectPath?: string;
 }) {
   const {
     systemPath,
@@ -374,18 +487,43 @@ export function createConnectionState(options: {
   let seq = 0;
   let closed = false;
 
+  let initialCanonical: string | null = null;
+  let initialRootUri: string | null = null;
+  const initialRoot = options.root ?? options.rootUri ?? options.projectPath;
+  if (initialRoot) {
+    try {
+      const canonical = canonicalizeProject(initialRoot);
+      initialCanonical = canonical.canonicalPath;
+      initialRootUri = canonical.rootUri;
+    } catch {}
+  }
+
+  const processStartTimePromise: Promise<number | undefined> =
+    pid === process.pid && currentProcessStartTime !== undefined
+      ? Promise.resolve(currentProcessStartTime)
+      : getCachedProcessInfo(pid)
+          .then((info) => {
+            if (info && typeof info.startTime === 'number' && info.startTime > 0) {
+              if (pid === process.pid) currentProcessStartTime = info.startTime;
+              return info.startTime;
+            }
+            return undefined;
+          })
+          .catch(() => undefined);
+
   let currentRecord: ConnectionRecord = {
     connectionId,
     kind,
     pid,
+    processStartTime: pid === process.pid ? currentProcessStartTime : undefined,
     startedAt,
     updatedAt: startedAt,
     seq: 0,
     phase: 'connecting',
     detail: '',
     progress: null,
-    rootUri: null,
-    canonicalPath: null,
+    rootUri: initialRootUri,
+    canonicalPath: initialCanonical,
     closed: false,
     initializeRequestId: null,
     generation: 0,
@@ -397,6 +535,13 @@ export function createConnectionState(options: {
   function enqueueWrite(snapshot: ConnectionRecord, isClose = false): Promise<void> {
     writeQueue = writeQueue.then(async () => {
       if (closed && !isClose) return;
+      if (currentRecord.processStartTime === undefined) {
+        const st = await processStartTimePromise;
+        if (typeof st === 'number' && st > 0) {
+          currentRecord.processStartTime = st;
+          snapshot.processStartTime = st;
+        }
+      }
       const tempPath = `${filePath}.${randomUUID()}.tmp`;
       try {
         await mkdir(dir, { recursive: true });
@@ -406,7 +551,7 @@ export function createConnectionState(options: {
       } catch (err: unknown) {
         const rawMsg = err instanceof Error ? err.message : String(err);
         const message = sanitizeString(rawMsg);
-        console.error(`intellij connection-state write error: ${message}`);
+        recordWriteErrorLog(filePath, message);
         if (onWriteError) {
           try {
             onWriteError(err);
@@ -530,8 +675,13 @@ export async function readProjectState(
     return sanitizeStatus(emptyResult) as ProjectStateResult;
   }
   let targetCanonical: string;
+  let targetId: string;
+  let caseSensitive: boolean;
   try {
-    targetCanonical = canonicalizeProject(projectPath).canonicalPath.toLowerCase();
+    const target = canonicalizeProject(projectPath);
+    targetCanonical = target.canonicalPath;
+    targetId = target.id;
+    caseSensitive = target.isCaseSensitive ?? false;
   } catch {
     const invalidResult: ProjectStateResult = {
       phase: 'not-started',
@@ -565,29 +715,141 @@ export async function readProjectState(
 
   const now = Date.now();
   const matchingConnections: ConnectionRecord[] = [];
-  const closedByProject = new Map<string, Array<{ file: string; record: ConnectionRecord }>>();
+  const closedByProject = new Map<
+    string,
+    Array<{
+      file: string;
+      record: ConnectionRecord;
+      stat: Stats;
+      pidExists: boolean;
+      pidReused: boolean;
+    }>
+  >();
 
   for (const entry of entries) {
-    if (!entry.endsWith('.json')) continue;
+    if (!entry.endsWith('.json')) {
+      if (entry.endsWith('.corrupt') || entry.endsWith('.gc')) {
+        try {
+          const st = await stat(join(dir, entry));
+          if (now - st.mtimeMs > 24 * 60 * 60 * 1000) {
+            await unlink(join(dir, entry)).catch(() => {});
+          }
+        } catch {}
+      }
+      continue;
+    }
     const file = join(dir, entry);
+    let fileHandle: FileHandle | null = null;
+    let statWhenRead: Stats;
+    let content: string;
+    try {
+      fileHandle = await open(file, 'r');
+      statWhenRead = await fileHandle.stat();
+      content = await fileHandle.readFile({ encoding: 'utf8' });
+    } catch (readErr: unknown) {
+      if (
+        readErr &&
+        typeof readErr === 'object' &&
+        'code' in readErr &&
+        (readErr.code === 'ENOENT' || readErr.code === 'EBUSY')
+      ) {
+        continue;
+      }
+      recordCorruptedRecordDiagnostic(file, readErr);
+      continue;
+    } finally {
+      await fileHandle?.close().catch(() => {});
+    }
+
     let record: ConnectionRecord;
     try {
-      const content = await readFile(file, 'utf8');
       record = JSON.parse(content) as ConnectionRecord;
-    } catch {
+    } catch (parseErr: unknown) {
+      if (now - statWhenRead.mtimeMs < CORRUPT_GRACE_MS) {
+        continue;
+      }
+
+      // Re-verify the file identity on disk before attempting quarantine
+      try {
+        const cur = await stat(file);
+        if (
+          cur.ino !== statWhenRead.ino ||
+          cur.mtimeMs !== statWhenRead.mtimeMs ||
+          cur.size !== statWhenRead.size
+        ) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      recordCorruptedRecordDiagnostic(file, parseErr);
+      const corruptTarget = `${file}.${randomUUID()}.corrupt`;
+      try {
+        await rename(file, corruptTarget);
+      } catch {
+        // Never unlink the source file on rename failure to prevent deleting newly placed files
+        continue;
+      }
+
+      // Post-rename verification to guarantee the quarantined file matches the observed content
+      try {
+        const quarantinedContent = await readFile(corruptTarget, 'utf8');
+        if (quarantinedContent !== content) {
+          // Restore without replacing a newer record published by another writer.
+          await link(corruptTarget, file);
+          await unlink(corruptTarget);
+        }
+      } catch {}
       continue;
     }
 
-    if (!record || typeof record !== 'object') continue;
-    if (record.canonicalPath != null && typeof record.canonicalPath !== 'string') continue;
+    if (!record || typeof record !== 'object') {
+      await safeUnlinkRecord(file, statWhenRead);
+      continue;
+    }
+    if (record.canonicalPath != null && typeof record.canonicalPath !== 'string') {
+      await safeUnlinkRecord(file, statWhenRead);
+      continue;
+    }
 
     let isAlive = false;
+    let pidExists = false;
+    let pidReused = false;
     if (!record.closed && Number.isSafeInteger(record.pid) && record.pid > 0) {
-      try {
-        process.kill(record.pid, 0);
-        isAlive = true;
-      } catch (err: unknown) {
-        if (err && typeof err === 'object' && 'code' in err && err.code !== 'ESRCH') isAlive = true;
+      if (record.pid === process.pid) {
+        pidExists = true;
+      } else {
+        try {
+          process.kill(record.pid, 0);
+          pidExists = true;
+        } catch (err: unknown) {
+          if (err && typeof err === 'object' && 'code' in err && err.code !== 'ESRCH') {
+            pidExists = true;
+          }
+        }
+      }
+
+      if (pidExists) {
+        if (typeof record.processStartTime === 'number' && record.processStartTime > 0) {
+          const info = await getCachedProcessInfo(record.pid);
+          if (info && typeof info.startTime === 'number' && info.startTime > 0) {
+            const isMatch =
+              process.platform === 'linux'
+                ? info.startTime === record.processStartTime
+                : Math.abs(info.startTime - record.processStartTime) <= 3000;
+            if (isMatch) {
+              isAlive = true;
+            } else {
+              isAlive = false;
+              pidReused = true;
+            }
+          } else {
+            isAlive = true;
+          }
+        } else {
+          isAlive = true;
+        }
       }
     }
 
@@ -599,8 +861,9 @@ export async function readProjectState(
         record.isAlive = false;
       } else {
         record.phase = 'disconnected';
-        record.detail =
-          lastPhase === 'ready'
+        record.detail = pidReused
+          ? `Connection process exited (PID ${record.pid} reused by another process)`
+          : lastPhase === 'ready'
             ? 'Connection process exited after the index was ready'
             : `Connection process exited (last phase: ${lastPhase})`;
         record.isAlive = false;
@@ -609,31 +872,61 @@ export async function readProjectState(
       record.isAlive = true;
     }
 
+    const recordAge = now - (record.updatedAt || record.startedAt || 0);
     if (!record.isAlive || record.closed) {
-      const age = now - (record.updatedAt || record.startedAt || 0);
-      if (age > RETENTION_MS) {
-        await unlink(file).catch(() => {});
-        continue;
+      if (recordAge > CONCURRENT_WRITE_GRACE_MS) {
+        if (recordAge > RETENTION_MS) {
+          await safeUnlinkRecord(file, statWhenRead, record.isAlive, pidExists, pidReused);
+          continue;
+        }
+        if (!record.canonicalPath && recordAge > ORPHAN_RETENTION_MS) {
+          await safeUnlinkRecord(file, statWhenRead, record.isAlive, pidExists, pidReused);
+          continue;
+        }
+        if (
+          !record.closed &&
+          !record.failure &&
+          record.phase !== 'failed' &&
+          recordAge > DEAD_NON_FAILURE_RETENTION_MS
+        ) {
+          await safeUnlinkRecord(file, statWhenRead, record.isAlive, pidExists, pidReused);
+          continue;
+        }
       }
+
       if (record.canonicalPath) {
-        const key = record.canonicalPath.toLowerCase();
+        let key: string;
+        try {
+          key = canonicalizeProject(record.canonicalPath).id;
+        } catch {
+          key = caseSensitive ? record.canonicalPath : record.canonicalPath.toLowerCase();
+        }
         const list = closedByProject.get(key) || [];
-        list.push({ file, record });
+        list.push({ file, record, stat: statWhenRead, pidExists, pidReused });
         closedByProject.set(key, list);
       }
     }
 
     let matches = false;
     if (record.canonicalPath) {
-      const connCanonical = record.canonicalPath.toLowerCase();
-      if (connCanonical === targetCanonical) {
+      let recordId: string | null = null;
+      let recordCanonical = record.canonicalPath;
+      try {
+        const c = canonicalizeProject(record.canonicalPath);
+        recordId = c.id;
+        recordCanonical = c.canonicalPath;
+      } catch {}
+
+      if (recordId !== null && recordId === targetId) {
         matches = true;
-      } else if (
-        targetCanonical.startsWith(
-          connCanonical.endsWith('/') ? connCanonical : `${connCanonical}/`,
-        )
-      ) {
-        matches = true;
+      } else {
+        const a = caseSensitive ? targetCanonical : targetCanonical.toLowerCase();
+        const b = caseSensitive ? recordCanonical : recordCanonical.toLowerCase();
+        if (a === b) {
+          matches = true;
+        } else if (a.startsWith(b.endsWith('/') ? b : `${b}/`)) {
+          matches = true;
+        }
       }
     }
 
@@ -650,7 +943,16 @@ export async function readProjectState(
           (a.record.updatedAt || a.record.startedAt || 0),
       );
       for (let i = 1; i < list.length; i++) {
-        await unlink(list[i].file).catch(() => {});
+        const itemAge = now - (list[i].record.updatedAt || list[i].record.startedAt || 0);
+        if (itemAge > CONCURRENT_WRITE_GRACE_MS) {
+          await safeUnlinkRecord(
+            list[i].file,
+            list[i].stat,
+            false,
+            list[i].pidExists,
+            list[i].pidReused,
+          );
+        }
       }
     }
   }

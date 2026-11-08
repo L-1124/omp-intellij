@@ -7,7 +7,30 @@ export { reduceConnectionState };
 const REQUEST_FAILED = -32803;
 const REQUEST_CANCELLED = -32800;
 const CONTENT_MODIFIED = -32801;
+const MAX_PENDING_INDEX_REQUESTS = 128;
+const MAX_QUEUED_INDEX_BYTES = 16 * 1024 * 1024;
 
+let lastBarrierCallbackError = '';
+let lastBarrierCallbackErrorTime = 0;
+let suppressedBarrierCallbackCount = 0;
+
+function logBarrierCallbackError(err: unknown): void {
+  const safeErrMsg =
+    err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
+  const now = Date.now();
+  if (safeErrMsg === lastBarrierCallbackError && now - lastBarrierCallbackErrorTime < 5000) {
+    suppressedBarrierCallbackCount++;
+    return;
+  }
+  const countSuffix =
+    suppressedBarrierCallbackCount > 0
+      ? ` (suppressed ${suppressedBarrierCallbackCount} duplicates)`
+      : '';
+  suppressedBarrierCallbackCount = 0;
+  lastBarrierCallbackError = safeErrMsg;
+  lastBarrierCallbackErrorTime = now;
+  console.error(`IndexBarrier onStateChange error: ${safeErrMsg}${countSuffix}`);
+}
 interface PendingEntry {
   message: { id: unknown; method?: string; params?: Record<string, unknown> };
   frame: Buffer;
@@ -96,9 +119,7 @@ export class IndexBarrier {
       try {
         this.onStateChange({ ...this.state });
       } catch (err) {
-        const safeErrMsg =
-          err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
-        console.error(`IndexBarrier onStateChange error: ${safeErrMsg}`);
+        logBarrierCallbackError(err);
       }
     }
   }
@@ -175,9 +196,7 @@ export class IndexBarrier {
         try {
           this.onStateChange({ ...this.state });
         } catch (err) {
-          const safeErrMsg =
-            err instanceof Error ? sanitizeString(err.message) : sanitizeString(String(err));
-          console.error(`IndexBarrier onStateChange error: ${safeErrMsg}`);
+          logBarrierCallbackError(err);
         }
       }
     }
@@ -197,6 +216,13 @@ export class IndexBarrier {
       this.root = params?.rootUri || params?.workspaceFolders?.[0]?.uri || params?.rootPath || null;
       this.initializeRequestId = message.id ?? null;
       this.ready = false;
+      this.failure = null;
+      this.failureKind = undefined;
+      this._applyState(message, 'client');
+      this.sendServer(frame);
+      return;
+    }
+    if (message.method === 'intellij/reloadWorkspace') {
       this.failure = null;
       this.failureKind = undefined;
       this._applyState(message, 'client');
@@ -252,7 +278,10 @@ export class IndexBarrier {
       this.reject(message as { id: unknown }, REQUEST_FAILED, this.failure, this.state.failure);
       return;
     }
-    if (this.pending.size >= 128 || this.queuedBytes + frame.length > 16 * 1024 * 1024) {
+    if (
+      this.pending.size >= MAX_PENDING_INDEX_REQUESTS ||
+      this.queuedBytes + frame.length > MAX_QUEUED_INDEX_BYTES
+    ) {
       this.reject(
         message as { id: unknown },
         REQUEST_FAILED,
