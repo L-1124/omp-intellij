@@ -104,7 +104,7 @@ npm run build
 npm pack --dry-run --json --ignore-scripts
 ```
 
-编译使用目标发行包的 JBR 25 `javac`；缺少 JAR 工具时使用 `JAVA_HOME` 或 PATH 中的完整 JDK 25。发布包包含一个自有 JAR、ABI/SHA-256 清单和校验文件，二进制原样进入 `.runtime/<hash>`。本次已加入阶段 A/B（XML 符号与 Manifest 引用）、阶段 D（Compose 命名检查豁免）与既有 definition 迁移；阶段 C 与阶段 H 待后续启用。
+JVM 模块采用标准 Gradle Java 布局与固定 Wrapper 9.8.0。入口使用目标发行包 JBR 25，要求 `build.txt` 精确为 `ILS-271.2085.0`；无需外部 `jar` 工具或全局 Gradle。发布包包含自有 JAR、官方原始 `adblib` / `adblib-tools` 9.4.1、ABI/SHA-256 清单与旁挂校验文件；依赖锁和校验元数据随源码分发，构建缓存排除在 npm 包外。三个二进制原样进入 `.runtime/<hash>`。
 
 启动层校验精确版本与资产摘要，并合并已有 `IJ_JAVA_OPTIONS` / `plugin.path`。不可用原因写入 `<systemPath>/launcher.log`；原生 LSP/DAP 保留。已有共享服务不热加载新 JAR，启用更新须先关闭消费者，再安全重启。
 
@@ -132,6 +132,28 @@ npm pack --dry-run --json --ignore-scripts
 ```
 
 后续断点、继续执行、栈帧、变量和输出查询均使用同一原生工具。完整参数以 `xd://debug` 文档为准。
+
+### Android JDWP attach
+
+在工程目录执行，CLI 与 DAP 使用相同配置和 `systemPath`：
+
+```sh
+node dist/android/debug-attach-cli.js prepare --package com.example.app --device emulator-5554
+```
+
+也可用 `--pid` 精确选择进程；可选 `--adb`，以及互斥的 `--timeout-ms` / `--timeout`（秒）。成功输出一行 JSON，其中 `debug` 可直接传给原生 `debug` 工具。目标应用由调用者预先启动并启用调试；产品路径只附加，不安装、启动或停止应用。
+
+官方 adblib 在 ILS 内管理设备、进程及 JDWP proxy。prepare handle 保留5分钟；DAP 认领后绑定该 LSP 连接，detach 先释放 native debugger，再释放 proxy 并关闭 LSP。尚未 attach 时可显式清理：
+
+```sh
+node dist/android/debug-attach-cli.js cleanup --key <cleanupKey>
+```
+
+重复清理返回 `cleaned:false,reason:"already_cleaned"`；服务不可用或关闭失败明确报错。CLI stdout 仅 JSON，日志到 stderr；成功0、运行错误1、参数错误2。ILS 重启后需要重新 prepare。阶段完成状态与实际验收记录见 `plan.md` §9.4。
+
+ILS 271 的 Android 对象变量检查使用同步 JDI 与会话级静默渲染（MuteRenderer）；最后一个 Android 调试会话结束后恢复原 JDI 设置。该配置避免了 ART 运行时复杂对象在 presentation 通知链处超时，同时保留了 JDI 字段反射与显式求值。
+
+MyHook 真实工程与 fixture 已验证原生 attach、断点、调用栈、表达式求值、单步执行、对象字段逐级展开及 continue 恢复，详见 `plan.md` §9.4 与 §9.7。
 
 ## 管理命令
 

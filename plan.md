@@ -14,7 +14,7 @@
 | B    | Manifest 类属性触发 `textDocument/references`（含既有 Android `definition` 迁移与旧 TS 解析链删除）           | **已完成**（`271.2085.0` JVM 生产实现 + 源码集合等价/并发取消实测通过）  |
 | C    | 资源 XML 声明触发 Java/Kotlin 语义引用查询，与导航共用 JVM 查询服务                                           | 待实施（共享 `AndroidContext` / `ResourceResolver` / `AndroidRequests`） |
 | D    | 语义确认的 Composable 函数命名检查豁免                                                                        | **已完成**（`271.2085.0` 生产实现 + K2 Analysis API + 隔离集成实测通过） |
-| E    | 独立 Android `prepare-attach` / `cleanup` 编排入口，与原生 DAP 组合                                           | 待实施（原生 Android DAP 双场景已验证）                                  |
+| E    | JVM adblib `prepare` / `claim` / `release`，CLI 与原生 DAP 编排                                              | **已完成**（`271.2085.0` JVM 生产实现；fixture 7/7、MyHook 原生 attach、断点/步进、会话级 renderer mute 对象字段展开与 continue 实测通过） |
 | F    | 断连清理、新会话恢复及多工程隔离验收；仅修复复现的缺陷                                                        | **A/B 与 definition 路径已完成**；待随 C/D/E/H 增量合入                  |
 | G    | 开启 intellijExtensions 协议扩展支持，完整支持 ModCommand QuickFix，不新增 Bridge 黑名单                      | **已完成**                                                               |
 | H    | 同进程内嵌官方 Android Lint 与 AAR Compose 规则，经 `LSDiagnosticProvider` 接入原生 `textDocument/diagnostic` | 待实施（263 探针与 6 JAR 依赖集已验证，待 271 生产集成与验收）           |
@@ -112,7 +112,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
 - 库表声明 `Gradle: android:r:null`，但对应 R.jar 在导入后仍不存在。`sourceRoots` 包含 Java 与 `src/main/resources`，不包含 Android `res/`；字节码检查显示导入器未提取完整 namespace、自定义 Manifest 和资源根信息。
 - 271 XML 配置注册了语法诊断、Inspection、QuickFix、批处理检查和通用 definition，未注册 XML documentSymbol/references Provider。插件可向既有 XML 语言追加 Provider；不得重复注册 `"xml"` 语言。多个 `LSDefinitionProvider` 采用流式并集聚合，因此 `R.*` 源码优先改用平台 `DirectNavigationProvider`（见 §2.7）。
 - 用 `javap` 比较的八个核心 XML PSI 接口在 263、271 的公共签名一致；模块位置与插件依赖有变化。这不是整个扩展跨版本兼容的证明。
-- 早期探针证据见 §13.4；正式生产实现已在 `jvm/android-ls-extension/` 完成并通过 271 验收。
+- 早期探针证据见 §13.4；正式生产实现已在 `jvm/intellij-android/` 完成并通过 271 验收。
 ### 2.6 实测原生能力、MCP 发现与 xd://lsp 映射基线
 
 - **实测 MCP 能力广告**：基于真实 `xd://lsp` 在包含 `pom.xml` 的工程环境中实测验证，服务端在 `initialize` capabilities 中广告了 `list-mcp-tools` 与 `run-mcp-tool`；调用 `list-mcp-tools` 成功返回 22 个内置工具的描述与 `inputSchema`。
@@ -159,7 +159,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
    - Windows 下 `IJ_JAVA_OPTIONS` 中的路径若含反斜杠 `\` 会被参数解析器吞掉转义字符，必须统一转为 `/` 并支持合并已有逗号/分号分隔的 `-Dplugin.path`。
 9. **ILS 271 自带 JBR25 工具链缺失 `jar` / `jdk.jartool`**：
    - 实测 ILS `271.2085.0` 自带的 `jbr/bin` 包含 `javac.exe`（`25.0.4.1`），但**未包含 `jar.exe` / `javap.exe`，且裁剪了 `jdk.jartool` 模块**。
-   - 因此 `build.mjs` 编译固定优先使用发行包自带 `jbr/bin/javac --release 25`，归档优先探测 `jdk.jartool`，缺失时回退至 `JAVA_HOME` 或系统 PATH 中的 JDK 25 `jar` 工具；而 `check-assets.mjs` 采用纯 Node 直接解析无压缩 ZIP Local File Header 与 classfile 字节码头部（校验魔数 `0xCAFEBABE` 与 major `69`），使 `npm run prepack` / `check:assets` 完全不依赖外部 JDK 工具。
+   - 构建现由 Gradle 9.8.0 Java 插件完成，使用发行包 JBR 25 的 toolchain/release=25，Gradle 自行创建 STORED、固定顺序与时间戳的归档。`scripts/build-jvm.mjs` 仅选择 SDK/JBR 并调用 Wrapper；资产检查器继续独立检查自有 classfile major69、SPI 与插件描述符。
 
 
 ## 3. 官方实现参照与采用范围
@@ -212,7 +212,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
    - **已广告 MCP 工具发现与执行**：服务端广告 `list-mcp-tools` 与 `run-mcp-tool` 时，经 `request` 调用前者读取当前工具的 description/inputSchema，再按 `{"command":"run-mcp-tool","arguments":[{"tool":"工具名","arguments":{}}]}` 封装调用后者。22 项仅是本次观察数量，不固定为契约。已有能力无需在 Bridge 或客户端再复制成专用工具。
 
 3. **第三梯次：独立 JVM 扩展补齐缺失的 Android 语义（阶段 A–D/H）**
-   - 仅在第一、第二梯次经过实测证实存在明确语义缺口时，才由独立 JVM 扩展（`jvm/android-ls-extension/`）挂载：基于 IntelliJ 内部 XML PSI、K2 UAST 和已导入 Gradle 模块模型补齐 Android 语义；
+   - 仅在第一、第二梯次经过实测证实存在明确语义缺口时，才由独立 JVM 扩展（`jvm/intellij-android/`）挂载：基于 IntelliJ 内部 XML PSI、K2 UAST 和已导入 Gradle 模块模型补齐 Android 语义；
    - 严禁倒退回在 TS 端自定义 XML 解析器（如 `saxes`）；严禁在未验证明确缺口前新增自定义 projectView 或工程树解析工具；
    - 尊重已验证的 XML PSI 与 JVM 回退设计，保持 A–H 既定交付边界。
 
@@ -220,7 +220,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
 
 | 文件/模块                                                        | 职责                                                                                                                                                           |
 | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jvm/android-ls-extension/` 的工程上下文                         | 从当前 Project 的模块、SDK、依赖和源码取得 Android 上下文，供导航、引用与 Lint 共用                                                                            |
+| `jvm/intellij-android/` 的工程上下文                         | 从当前 Project 的模块、SDK、依赖和源码取得 Android 上下文，供导航、引用与 Lint 共用                                                                            |
 | JVM XML 大纲 Provider                                            | 基于当前 XML PSI 实现阶段 A，注册到既有 `"xml"` 语言                                                                                                           |
 | JVM definition/references Provider 与查询服务                    | 识别 Manifest 类属性、资源声明和代码 R 引用，解析目标、校验来源、执行语义搜索                                                                                  |
 | 同一 JVM 模块的 Compose suppressor、`OmpLintDiagnosticProvider`  | 阶段 D/H，保持现有范围                                                                                                                                         |
@@ -445,129 +445,74 @@ DocumentSymbol 的结构支持与 references 的字段搜索支持分别声明�
 
 ## 9. E：Android Java/JDWP Attach 编排
 
-### 9.1 实际工具边界
+### 9.1 边界与构建
 
-`xd://debug` 提供宿主机 pid、host、port、以秒计的 timeout，没有 deviceId/packageName 参数。DAP 本身允许扩展 arguments，当前工具入口和本项目 attach 解析链尚未提供 Android selectors。
+官方 `adblib:9.4.1`、`adblib-tools:9.4.1` 在 ILS JVM 内发现设备、跟踪实际 JDWP 进程并提供 loopback proxy；现有 IntelliJ DAP 负责断点、栈、变量与单步。TS 仅使用标准 `workspace/executeCommand`；产品路径不安装 APK、启动 Activity、force-stop 应用或管理 ADB forward。
 
-采用两阶段：独立 prepare 返回现有 debug attach 参数，原生工具执行 attach，生命周期清理本次 forward。交付不声称原生工具已新增 Android 参数。
+`jvm/intellij-android` 使用标准 Gradle Java 布局、Wrapper 9.8.0、JBR25 和精确 `ILS-271.2085.0` SDK。插件 ID 与包名为 `org.jetbrains.android`，避免与官方 Android 插件同时加载。两个官方库关闭传递依赖，复用平台 Kotlin/协程/protobuf；Gradle 锁文件与 SHA-256 verification metadata 随构建输入分发。私带另一套 Kotlin/协程与 TS ADB 回退均不在方案内。
 
-### 9.2 拟新增命令和输入输出
+### 9.2 标准命令与 CLI
 
-实现后的 CLI 示例：
+所有命令只有一个 JSON 对象参数：`arguments: [{...}]`。
+
+| command | 输入 | 成功结果 |
+| --- | --- | --- |
+| `omp.android.debug.prepare` | `packageName` 或正整数 `pid`；可选 `deviceId`、`adbPath`、`timeoutMs` | `success`、`cleanupKey`、`expiresAt`、设备/进程身份、loopback host/port、现有 debug attach 配置 |
+| `omp.android.debug.claim` | loopback `host`、`port` | `{claimed:false}` 或 `{claimed:true,cleanupKey}` |
+| `omp.android.debug.release` | `cleanupKey` | `{success:true,cleaned:true}`；已清理为 `cleaned:false,reason:"already_cleaned"` |
 
 ```sh
-node dist/android/debug-attach-cli.js prepare --package com.app.myhook --device emulator-5554 --timeout-ms 10000
-node dist/android/debug-attach-cli.js cleanup --key <prepare返回的cleanupKey>
+node dist/android/debug-attach-cli.js prepare --package com.example.app --device emulator-5554 --timeout-ms 10000
+node dist/android/debug-attach-cli.js cleanup --key <cleanupKey>
 ```
 
-1. **参数规则**：
-   - `packageName` 与正整数 `pid` 二选一；`deviceId` 可省略，但仅允许恰好一台 online 且已授权设备。
-   - `packageName` 对应多个可调试进程时返回候选 PID/名称列表，要求显式传入 `pid`；不默认截取第一个。
-   - 超时控制：支持 `--timeout-ms <毫秒>` 与 `--timeout <秒>`（内部转为毫秒）。
-2. **输入输出与退出码契约**：
-   - stdout **仅输出单行结构化 JSON**，诊断/调试日志输出至 stderr。
-   - 退出码契约：
-     - `prepare`：成功返回 `0`；设备/进程/端口/超时等任意阶段失败返回 `1`，参数非法返回 `2`；
-     - `cleanup`（**严格幂等**）：指定 `cleanupKey` 的租约存在时，执行 `adb forward --remove` 并删除租约，返回 `0`（`{ success: true, cleaned: true }`）；若租约已不存在（已由 DAP 代理回收或重复调用），**同样返回 `0`**（`{ success: true, cleaned: false, reason: "already_cleaned" }`）；仅在参数缺失或非法时返回非零。
-   - `prepare` 成功输出结构：
+CLI 与 DAP 必须连接相同 ILS/systemPath。`prepare` 支持 `--pid`、`--adb`、互斥的 `--timeout-ms` / `--timeout`（秒）；超时范围为整数 1..300000ms，默认10000ms。stdout 仅一行 JSON，日志到 stderr；成功0、运行失败1、非法参数2。信号取消等待连接清理，使用130/143退出码。导入模块不执行 CLI。
 
-     ```json
-     {
-       "success": true,
-       "cleanupKey": "uuid-v4",
-       "deviceId": "emulator-5554",
-       "pid": 4628,
-       "processName": "com.app.myhook",
-       "host": "127.0.0.1",
-       "port": 50558,
-       "jdwpTarget": "jdwp:4628",
-       "debug": {
-         "action": "attach",
-         "adapter": "intellij",
-         "host": "127.0.0.1",
-         "port": 50558,
-         "timeout": 10
-       }
-     }
-     ```
+参数错误 `-32602`；取消 `-32800`；设备/资源预期错误 `-32803`，data 带 `reason`、`message` 与必要候选。原因包括 `adb_not_found`、`adb_unavailable`、`no_device`、`ambiguous_device`、`unauthorized_device`、`device_offline`、`process_not_found`、`ambiguous_process`、`not_jdwp`、`target_changed`、`lease_conflict`、`lease_expired`、`dependency_unavailable`、`proxy_failed`、`cleanup_failed`、`timeout`。
 
-### 9.3 状态判定、进程匹配与错误码全集
+### 9.3 目标与生命周期验收契约
 
-1. **ADB 解析顺序**：
-   - 独立模块按 `--adb` 显式路径、`ANDROID_HOME/platform-tools`、`ANDROID_SDK_ROOT/platform-tools`、`PATH` 顺序解析，使用实测可执行文件调用。
-2. **设备状态判定依据**：
-   - 解析 `adb devices -l` 输出行，依据第二列严格区分：`device`（就绪在线）、`unauthorized`（未授权）、`offline`（离线）；不依赖易产生单点失效的 `adb get-state`。
-3. **进程匹配依据**：
-   - 优先执行 `adb -s <serial> shell ps -A -o PID,PPID,NAME`（Toybox 标准列格式：第 0 列 PID、第 1 列 PPID、第 2 列进程名）；
-   - 若低版本设备不支持 `-o` 参数，回退至 `adb -s <serial> shell ps -A`，按首行表头动态解析 `PID` 与 `NAME`/`CMD` 列索引；
-   - 进程名匹配：在宿主机进行全词比对 `NAME === targetPackage` 或子进程前缀比对 `NAME.startsWith(targetPackage + ":")`。
-   - 核对目标 PID 存在于 `adb -s <serial> jdwp` 输出集合中；不向 forward 端口发送独立预检 JDWP 探针，防止单次握手通道被消费。
-4. **错误码全集（4 大类 13 项）**：
+- 每次 prepare 创建独立 child AdbSession，从该 child 取得设备与进程；官方 Flow 驱动设备、进程、属性和 proxy 状态。初始化加载与有效空列表分别处理，等待保持可取消。
+- 指定 serial 精确选择；自动选择要求恰好一台 ONLINE。包身份优先官方 packageNames 精确成员，兼容 processName 全名或 `package + ":"` 边界；多候选按 PID 排序后拒绝猜选。目标只来自实际 JdwpProcess；保留对象生命周期身份。
+- 同目标 reservation 在创建 proxy 前原子取得；proxy 的真实 loopback socket 就绪后才发布。调试器完成唯一 JDWP 握手，prepare 不主动连接端口探活。
+- 内存 handle 状态为 PREPARED → CLAIMED → CLOSING → CLOSED。PREPARED 固定保留5分钟，跨 CLI 退出；claim 取消 timer 并绑定连接 scope 的 Job。
+- release、TTL、owner EOF、设备/进程结束、dispose 共用关闭路径；child.close 后等待其 Job 结束。显式 release 独立10秒截止；关闭失败保留根因与可重试状态。
+- DAP 直接调用 wrapper，无通用生命周期 hook。shutdown 顺序：取消 startup、等待 claim settle → native disconnect/transport teardown → release → LSP close → control/退出。普通 JVM 无 handle 时不启动 ADB。
+- attach 保持 `terminateDebuggee:false`；timeout 秒/毫秒归一化以及实际 frameId/scope 透传沿用原契约。
+- `DebuggerManagerListener` 在 debugger manager thread 识别 Android VM，仅在 Android 会话存续时关闭 `debugger.async.jdi`，最后一次 detach/remove 恢复原值。同时在 `XDebuggerManagerListener.processStarted` 与会话启动时通过 `XDebugSessionImpl.sessionData` 启用会话级 `MuteRendererUtils`（静默富展示与自动计算，避免 ART 子节点 presentation 超时），字段依然支持按需展开与显式求值。
 
-| 类别     | 错误码 (`error.code`)       | 说明与恢复建议                                          |
-| -------- | --------------------------- | ------------------------------------------------------- |
-| **环境** | `adb_not_found`             | 未找到 ADB 可执行文件；检查 ANDROID_HOME 或指定 `--adb` |
-|          | `no_device`                 | 未发现已连接设备                                        |
-|          | `ambiguous_device`          | 存在多台已连接设备但未指定 `--device`                   |
-|          | `unauthorized_device`       | 设备未在屏幕上接受 USB 调试授权                         |
-|          | `device_offline`            | 设备处于 offline 状态                                   |
-| **目标** | `process_not_found`         | 指定包名无运行中进程，或目标未启用 debuggable           |
-|          | `ambiguous_process`         | 目标包名存在多个运行进程，需显式指定 `--pid`            |
-|          | `not_jdwp`                  | 进程存在但不在 `adb jdwp` 列表中（未开启调试支持）      |
-|          | `target_changed`            | 在准备与建立期间目标 PID/进程名发生变动                 |
-| **租约** | `forward_failed`            | `adb forward tcp:0 jdwp:<pid>` 执行失败或退出码非 0     |
-|          | `lease_conflict`            | 目标进程在当前设备上已存在活动且未过期的租约            |
-|          | `lease_not_found`           | 指定的 cleanupKey 格式非法或未记录                      |
-| **协议** | `attach_failed` / `timeout` | 后续 DAP 阶段握手失败或超时                             |
+### 9.4 验证记录与完成门禁
 
-### 9.4 租约落盘契约与 DAP Proxy Finalizer 组合
+- 标准 Gradle 迁移后真实 Android XML 集成12/12通过，覆盖 A/B、Compose 抑制与既有 definition。
+- 三资产完整性回归已覆盖缺失、额外、篡改、companion、重复与越界路径；两个原始官方库的 SHA-256 固定校验。每个依赖的字节变化均实测改变 `.runtime/<hash>`。
+- CLI 子进程非法参数/导入安全、RPC 错误保留、取消及清理失败，以及 DAP claim 失败/期间 EOF、disconnect → release → close 顺序已通过聚焦回归。
+- Java fixture 使用 AGP9.4.1、Gradle9.8.0、SDK37/26/37、Java21，包名 `com.example.ompattachfixture`，已离线 assembleDebug。
+- 2026-11-08：JVM30/30、TS467/467、真实 Android7/7及最终 XML12/12通过，均无跳过。设备矩阵覆盖普通启动、`am start -D`、Locals 与对象字段展开、单步、detach 保留 PID、强杀后自动释放端口及 sibling 工程存活、目标退出、独立 cleanup 幂等和待处理 prepare 取消。使用 `emulator-5554` 与 `F:/cache/gradle`。
+- 本地 marketplace 已安装 `2026.1107.0`，三资产校验与 `npm pack --dry-run --json --ignore-scripts` 通过。独立 MyHook OMP 会话与 fixture 均已全量跑通原生 attach、断点、栈、表达式求值、步进、对象多层字段展开及 continue 恢复（§9.7）。`omp plugin doctor --json` 的宿主 tools 数组处理异常与插件自身 `intellij doctor` 分别记录。
 
-1. **落盘位置与原子写入**：
-   - 复用 `src/project/metadata.ts` 与 `settings.systemPath` 约定，统一存放在：
+### 9.5 Android 对象 presentation 超时定位（2026-11-08）
 
-     ```text
-     <settings.systemPath>/plugin-metadata/android-attach/<cleanupKey>.json
-     ```
-   - 采用 `writeAtomicJson`（写入 `${cleanupKey}.${randomUUID()}.tmp` 后原子 `rename`）。
-   - 租约结构：
+- 对照官方 [`DebuggerUtilsAsync`](https://github.com/JetBrains/intellij-community/blob/c5ad8a3b87d1d07062d5fb2937b95bd0a398ea1d/java/debugger/impl/src/com/intellij/debugger/impl/DebuggerUtilsAsync.java)：异步 JDI 由全局 Registry 开关控制，没有逐 VM 参数。
+- 真实 AVD 中基本类型 `evaluate` 立即返回，`this` 求值和 Locals presentation 超时；等待期间 debugger manager thread 空闲，未观察到 `toString()` 方法调用死锁。关闭异步 JDI 的启动参数对照与 JVM 监听器修复均使原始 Scenario 1 完整通过。
+- VM proxy 访问须位于 debugger manager thread。通过 `sessionCreated` 注册 `DebugProcessListener.processAttached` 提前应用设置；消息总线 `sessionAttached` 的调度回查作为幂等补充，避免 EDT 通知晚于初始暂停。
+- 实测日志记录 Android attach 后 `debugger.async.jdi=false`，detach 后恢复 `true`。删除启动活动中的全局 renderer/stepping/auto-expression 修改及代理层硬编码变量补值；所有变量由真实 VM 返回。
 
-     ```ts
-     export interface AndroidAttachLease {
-       cleanupKey: string;
-       createdAt: number;
-       ownerPid: number;
-       ownerStartTime: number;
-       deviceId: string;
-       targetPid: number;
-       targetPackage: string;
-       localPort: number;
-       jdwpTarget: string;
-       state: 'prepared' | 'attached';
-     }
-     ```
+### 9.6 强杀清理的 scheduler 自等待
 
-2. **PID 复用与孤儿租约清理**：
-   - 每次 `prepare` 或 `cleanup` 时扫描该目录：
-     - **热路径快速判定**：调用 Node.js `process.kill(ownerPid, 0)`（耗时 <0.1ms）；若抛出 `ESRCH`，说明创建者进程已消亡，判定为孤儿租约；
-     - **冷路径防复用**：若 `process.kill` 返回存活但怀疑 PID 被系统回收，调用 `getProcessInfo(ownerPid)` 比对 `startTime === ownerStartTime`；
-     - 对确认孤儿的租约，自动执行 `adb -s <deviceId> forward --remove tcp:<localPort>` 并删除租约文件。
-3. **DAP Proxy 窄钩子解耦（`beforeAttach` 与 `onFinalize`）**：
-   - `DapProxyOptions` 仅增加两个可选异步钩子，通用代理绝不导入或直接执行 ADB：
-     - `beforeAttach?: (target: { host: string; port: number }) => Promise<void>`：当收到 DAP `attach` 请求且 `host` 为回环地址时，原子检索并认领 `localPort === target.port` 且 `state === 'prepared'` 的租约，将其状态置为 `attached` 并记录清理上下文；普通 JVM attach 端口无匹配租约时直接跳过；
-     - `onFinalize?: () => Promise<void> | void`：挂载进入 DAP proxy 既有的幂等 `shutdown` promise，在正常 detach、attach 失败、超时、EOF 或 SIGTERM 时执行 `adb forward --remove` 与租约删除。
-   - 退出语义：DAP `disconnect` 保持 `terminateDebuggee: false`，绝不向设备发送 `am force-stop`，保持应用存活。
-   - 栈帧透传：`dap-proxy` 对 `stackTrace` 响应原样透传（仅经 `normalizeSourcePaths` 路径规范化），不删减、不伪造折叠栈帧，确保 `stackFrame.id`、局部变量作用域与求值句柄完全准确。
+- 生产 handle scheduler 为单线程。owner 回调若在该线程同步调用 `release()`，会等待同一队列中的 `doClose()`；10秒截止到达后关闭任务才获得执行机会。调小 child Job 等待时间或提前删除 handle 均不能修复该自等待。
+- owner 进入 cancelling 阶段时只在锁内调用 `beginCloseLocked`，由 scheduler 异步执行关闭，不等待 owner 子协程完成。新增回归使用生产单线程 scheduler 和未完成子协程，验证 owner 尚未 completed 时 handle 已关闭。
+- `childSession.close()` 或等待 Job 结束失败时，保留 handle 与根因并使 close future 异常完成，允许显式重试；仅成功关闭后移除端口和目标 reservation。既有失败后重试测试通过。
 
-### 9.5 超时规范与实测契约
+### 9.7 MyHook 真实工程独立 OMP 验收（2026-11-08）
 
-1. **超时归一化契约（受 `test/dap-proxy.test.ts:615` 保护）**：
-   - IntelliJ 后端 DAP 的 `intellij_jvm` attach 请求严格要求**毫秒（ms）**，默认值 `30000`（30 秒）。
-   - OMP 原生 `xd://debug` 工具 schema 参数单位为**秒**（如 `timeout: 60`）。
-   - `dap-proxy.ts` 保持既有归一化规则：`args.timeout <= 300 ? Math.round(args.timeout * 1000) : Math.round(args.timeout)`；此契约受现有回归测试锁定，保证外部传入秒级或毫秒级均能安全映射至后端的毫秒参数。
-   - `debug-attach-cli` 内部对 ADB 轮询与进程发现采用显式毫秒超时（`--timeout-ms`）。
-2. **验收场景**：
-   - 运行中普通进程（PID 4628）与 `am start -D` 等待进程均通过原生 debug 工具命中断点、读取变量、单步、detach 后应用存活。
-   - 负例覆盖：ADB 未安装、设备离线/未授权、目标退出/重启、多进程未加 PID、端口被占冲突、DAP proxy 被强制终止后的孤儿回收。
+- 会话 `01a1bacf-8adc-7301-8f1a-c3764c7bd704`，工作目录 `F:/source/MyHook`，模型 `google-antigravity/gemini-3.8-flash`，使用已安装 marketplace 插件 `2026.1107.0`。保留现有应用数据、权限与 Xposed 配置，不以 fixture 结果代替 MyHook 结论。
+- 已观察：MyHook 索引 ready；MainActivity/MainViewModel 以及 Java/Kotlin 互调的符号、定义和引用正确；Manifest 类属性定位到 Kotlin 声明；hover、补全、code actions 列表和 rename dry-run 可返回结果。真实源文件诊断为空仅证明当前文档返回空诊断，未完成未保存语法错误的正反例验证；把 `didOpen` 当 request 的失败不计为诊断通过证据。
+- `:app:assembleDebug -g F:/cache/gradle` 成功：47 个 actionable tasks，8 执行、39 up-to-date；`:app:testDebugUnitTest -g F:/cache/gradle` 成功，JUnit XML 汇总25套件、112项、0失败/错误/跳过。保留 Gradle 10 弃用与 Kotlin JVM target25回退24的原始警告，不将缓存构建描述为全量重编译。
+- 真实 `com.app.myhook` 在 `emulator-5554` 上原生 `debug attach` 成功；命中 `MainActivity.kt:66`，读取调用栈与 `ON_RESUME`，单步进入 `MainViewModel.kt:115`，表达式返回真实类名。结束后 `debug sessions` 为空，CLI cleanup 返回 `already_cleaned`，应用 PID7736仍存活。
+- **已解决：对象字段与恢复执行**。排查证实超时并非 `toString()` 死锁，而是 ART 同步 JDI 环境下子节点 presentation 富文本渲染通知链挂起。在 `AndroidDebuggerListener` 中实现 `XDebuggerManagerListener`，于会话启动时通过 `MuteRendererUtils.INSTANCE.getOrCreateFlow(data).setValue(true)` 开启会话级静默渲染（保留字段原始反射展开与显式求值）。实测验证：`event` 枚举 43ms、`MainActivity`（116 字段）780ms、`viewModel$delegate` 113ms、`MainViewModel` 119ms、`uiState` 100ms；`continue` <5ms 恢复，PID 7736 保持存活。
+- **待解决：工程模型接口**。`model(MainActivity.kt)` 记录到 `-32600: Unknown command: intellij.java.resolveLaunch`；接口拒绝与 JDK/SDK 不可用分别处理，不据此推断所有271实例均缺该命令。
+- **资源导航缺口**。Manifest 的 `@string/app_name` 未找到定义；`MyHookScreen.kt:410` 的 `R.string.myhook_title` 返回生成的 `R.jar!/com/app/myhook/R.class`，未到达已存在的 `res/values/strings.xml:3`。该结果不计为源码优先资源导航通过。
+
 
 ## 10. F：断连恢复和健壮性
 
@@ -579,13 +524,13 @@ node dist/android/debug-attach-cli.js cleanup --key <prepare返回的cleanupKey>
 | Bridge/socket 结束，服务端健康 | 结束旧请求，释放本连接租约；新客户端重新初始化                       |
 | 已验证拥有的服务进程退出       | 现有生命周期锁/owner 检查清理旧状态，新客户端启动新服务              |
 | 服务端存活但无响应/索引停滞    | 截止时间失败并报告阶段；不盲目 kill/restart                          |
-| DAP 结束                       | 清理本次会话及 forward；新会话重新配置断点/线程，不继续旧 session ID |
+| DAP 结束                       | 清理本次 native debugger 与 JVM child/proxy；新会话重新配置断点/线程，不继续旧 session ID |
 
 现有恢复行为已有实际正例，暂不新增心跳、无限重连或跨会话状态重放。LSP 新会话重新 initialize、导入及同步当前文档；客户端负责重新发送所需文档。
 
 ### 10.2 生产验收
 
-既有实验已覆盖双工程隔离、关闭一个连接不影响另一个、服务进程退出及新 Bridge 启动后真实 definition。新增路径还需覆盖初始化、索引等待、JVM 导航/引用搜索、显式资源命令和暂停 DAP 时断连，核对请求、forward 与租约释放。
+既有实验已覆盖双工程隔离、关闭一个连接不影响另一个、服务进程退出及新 Bridge 启动后真实 definition。新增路径覆盖初始化、索引等待、JVM 导航/引用搜索、显式资源命令和暂停 DAP 时断连，核对请求与 JVM handle/proxy 释放。
 
 安装缓存中的 OMP 原生客户端须完成新会话真实查询。若 OMP 管理器未重建已退出客户端，定位并报告该层证据；Bridge 不假装透明恢复。
 
@@ -599,20 +544,19 @@ RenameFix 曾出现的丢失现象已查明根因并解决：服务端在转换�
 
 ### 12.1 构建与内容
 
-- 独立目录 `jvm/android-ls-extension/`，以当前 ILS 发行包作为 compileOnly SDK。Java 25 / classfile 69，与实测服务端运行时一致。
-- 自有 JAR（`android-ls-extension.jar`）只含自有类、`META-INF/plugin.xml`、SPI services（`META-INF/services/com.jetbrains.ls.api.features.LanguageServerExtension`）和版本元数据；不 shade ILS、Kotlin、协程或 Android Studio 的二进制。
-- `plugin.xml` 声明 `org.jetbrains.ls.core`、`com.intellij.modules.platform`、`com.intellij.modules.java`、`org.jetbrains.ls.plugin.kotlin`、`org.jetbrains.ls.feature.xml` 及 `<directNavigationProvider implementation="org.omp.intellij.android.AndroidResourceNavigation"/>`；`<idea-version since-build="271"/>` 不设 `until-build`（因 ILS 运行时 `idea.plugins.compatible.build=999.SNAPSHOT`），由启动层锁定 `271.2085.0`。
+- 独立目录 `jvm/intellij-android/`，以当前 ILS 发行包作为 compileOnly SDK。Java 25 / classfile 69，与实测服务端运行时一致。
+- 自有 JAR（`intellij-android.jar`）只含自有类、`META-INF/plugin.xml`、SPI services（`META-INF/services/com.jetbrains.ls.api.features.LanguageServerExtension`）和版本元数据；不 shade ILS、Kotlin、协程或 Android Studio 的二进制。
+- `plugin.xml` 声明 `org.jetbrains.ls.core`、`com.intellij.modules.platform`、`com.intellij.modules.java`、`org.jetbrains.ls.plugin.kotlin`、`org.jetbrains.ls.feature.xml`，以及 `org.jetbrains.android` 命名空间下的导航 Provider、调试会话监听器与字段可见性 Provider；`<idea-version since-build="271"/>` 不设 `until-build`（因 ILS 运行时 `idea.plugins.compatible.build=999.SNAPSHOT`），由启动层锁定 `271.2085.0`。
 - 编译 classpath 取自同一 ILS 发行包的 core、analysis、projectModel、UAST、language-server API/analyzer、Java PSI/UAST、Kotlin 分析 API，以及 `plugins/xml/lib/modules/` 中的 XML PSI/parser/DOM 和 Provider 基类所在模块。以实际插件描述符和 JAR 校验依赖，不沿用 263 的根 lib 布局；Lint 另加 §14.2 的 6 个核心 JAR。
-- 编译优先使用该精确发行包自带 `jbr/bin/javac`（`--release 25`）；因发行包 JBR 裁剪了 `jar` 与 `jdk.jartool`，打包优先探测 `jdk.jartool`，缺失时回退至 `JAVA_HOME` 或系统 PATH 中的 JDK 25 `jar` 工具。`jvm/android-ls-extension/build.mjs` 通过 `--no-compress` 与固定时间戳产出确定性单 JAR，跨盘 staging 后原子落盘，并在任意失败分支清理临时目录。
-- `package.json` 配置调整：
-  - **保留 `dist/` 契约**：`"files"` 列表保留 `"dist/"`，以满足 `"main": "dist/index.js"`、`"types": "dist/index.d.ts"` 与 `"bin": {"omp-intellij-lsp": "./dist/bridge.js", "omp-intellij-dap": "./dist/debug/dap-proxy.js"}` 的入口契约；列表为：`["dist/", "src/", "jvm/android-ls-extension/", "resources/ils/", "scripts/clean-runtime.mjs", "settings.json", ".omp-plugin/marketplace.json", "README.md"]`；
-  - `"scripts"` 包含 `"build:jvm": "node jvm/android-ls-extension/build.mjs"`、`"check:assets": "node jvm/android-ls-extension/check-assets.mjs"`、`"clean:runtime": "node scripts/clean-runtime.mjs"` 与维护命令 `"update-bundle": "npm run build && node scripts/update-server-bundle.mjs"`；
+- `scripts/build-jvm.mjs` 使用该精确发行包的 JBR 启动本工程 Wrapper，传入显式 toolchain 路径并调用 `stageExtension --no-daemon`。Gradle 创建自有 STORED 归档，官方依赖保持原始字节；同文件系统 staging 与 rollback 保护现有资产，manifest 最后原子替换。
+- `package.json.files` 显式分发源码、Wrapper、Gradle 构建输入/锁/校验元数据、三 JAR 与 TS 入口，排除 build/ 和 .gradle/ 缓存。
+- `build:jvm` 指向 `scripts/build-jvm.mjs`；`check:assets` 指向现有资产检查器。
   - `"prepack"` 脚本为 `"npm run build && npm run check:assets"`（校验当前阶段发布的精确版本 JAR、ABI、体积、清单与 `.sha256` 旁挂文件，不强求打包机存在 JDK25/ILS 编译环境）。
 - 复制 Apache-2.0 参考代码及分发 Apache-2.0 Lint 运行库时保留必要版权与许可证声明；整个 ILS/Kotlin 发行包继续沿用既有下载和 EULA 流程。
 
 ### 12.2 安装资产链与插件目录布局
 
-1. 发布目录为 `resources/ils/271.2085.0/android-ls-extension/lib/`。当前 A/B 与 definition 交付仅包含自有 `android-ls-extension.jar`（`145970` 字节，SHA-256 `04083921499f260a4d238abcd64cbee8fb0be314eff5a4e770a275f7ca4d8bf4`）、`manifest.json` 和 `.sha256` 校验文件；阶段 H 验收后再按 §14.2 纳入 6 个 Lint 依赖 JAR。
+1. 发布目录为 `resources/ils/271.2085.0/intellij-android/`。`lib/` 精确包含自有 `intellij-android.jar`、官方原始 `adblib-9.4.1.jar`、`adblib-tools-9.4.1.jar` 及各自 `.sha256`；根目录包含 `manifest.json`。官方 JAR 内的 LICENSE 原样保留。Java25/major69 指自有类，官方库按锁定原始摘要验证。
 2. 通过 `npm pack --dry-run --json --ignore-scripts` 检查包清单，确认 `dist/` 编译产物、JVM 扩展源码/脚本与已启用 JAR 资产均在发布归档内。
 3. `src/plugin.ts` 二进制与文本分流资产链：
    - 文本资产（`settings.json`、`marketplace.json`、`package.json`）按 `utf8` 字符串参与 hash 与复制；
@@ -701,7 +645,7 @@ npm pack --dry-run --json --ignore-scripts
 3. **13 项错误码与排查**：环境、目标、租约、协议的状态及恢复建议；
 4. **Android Lint 边界**：单文件 pull 诊断、`Scope.JAVA_FILE` 源码规则、第三方规则白名单；
 5. **AGP 兼容范围**：区分 MyHook AGP `9.4.1` 的实测、其他版本待验收项，以及动态 DSL、flavor 和自定义资源根的限制；
-6. **资产清单**：记录目标版本 `resources/ils/271.2085.0/` 下当前发布的 `android-ls-extension.jar` 及后续阶段 H 启用时的 6 个 Lint 依赖 JAR 的版本、体积与 SHA-256。
+6. **资产清单**：记录目标版本 `resources/ils/271.2085.0/` 下当前发布的 `intellij-android.jar` 及后续阶段 H 启用时的 6 个 Lint 依赖 JAR 的版本、体积与 SHA-256。
 
 ### 13.4 研究证据索引
 
@@ -773,7 +717,7 @@ npm pack --dry-run --json --ignore-scripts
 
 获取与构建锁定规则：
 1. 构建脚本按 `--android-sdk`、`ANDROID_HOME`、`ANDROID_SDK_ROOT` 顺序定位 `cmdline-tools`（校验 `source.properties` 的 `Pkg.Revision=23.0` 及上表 6 个文件的 SHA-256），或从 Google Maven（`https://dl.google.com/dl/android/maven2/`）下载固定版本并校验 SHA-256。
-2. 在 271 重跑兼容矩阵后，将 6 个 JAR 复制到 `resources/ils/271.2085.0/android-ls-extension/lib/`，与自有 JAR 同级；哈希不匹配或文件缺失时构建失败。
+2. 在 271 重跑兼容矩阵后，将 6 个 JAR 复制到 `resources/ils/271.2085.0/intellij-android/lib/`，与自有 JAR 同级；哈希不匹配或文件缺失时构建失败。
 3. 将来若启用 `Scope.RESOURCE_FILE` / `Scope.CLASS_FILE` 规则或实现 `getResources` 返回非空仓库，需追加 `tools.sdk-common.jar`（提供 `com.android.ide.common.resources.ResourceRepository`）并重跑兼容矩阵。
 
 ### 14.3 原生诊断挂载与 LSP 协议契约
