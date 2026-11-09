@@ -69,8 +69,8 @@ val isValidIls = resolvedHome != null && buildTxt.isFile && buildTxt.readText().
 if (!isValidIls) {
     logger.warn(
         "[WARN] ILS $targetVersion SDK not resolved at ${ilsHomeDir.absolutePath}.\n" +
-        "Run `node ../../scripts/setup-dev-env.mjs` to auto-configure development environment,\n" +
-        "or specify `ils.home=<path>` in jvm/intellij-android/local.properties."
+                "Run `node ../../scripts/setup-dev-env.mjs` to auto-configure development environment,\n" +
+                "or specify `ils.home=<path>` in jvm/intellij-android/local.properties."
     )
 }
 
@@ -116,16 +116,43 @@ dependencyLocking {
 }
 
 val adblibVersion = "9.4.1"
+val lintVersion = "32.4.1"
+val kxml2Version = "2.3.0"
 
 dependencies {
     compileOnly(compileSdkJars)
     testCompileOnly(compileSdkJars)
     testRuntimeOnly(ilsLibJars + ilsPluginJars)
 
+
     implementation("com.android.tools.adblib:adblib:$adblibVersion") {
         isTransitive = false
     }
     implementation("com.android.tools.adblib:adblib-tools:$adblibVersion") {
+        isTransitive = false
+    }
+    implementation("com.android.tools.lint:lint-api:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("com.android.tools.lint:lint-checks:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("com.android.tools.lint:lint-model:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("com.android.tools:common:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("com.android.tools:sdklib:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("net.sf.kxml:kxml2:$kxml2Version") {
+        isTransitive = false
+    }
+    implementation("com.android.tools:sdk-common:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("com.android.tools.layoutlib:layoutlib-api:$lintVersion") {
         isTransitive = false
     }
 
@@ -306,11 +333,25 @@ $assetsJson
 
 tasks.register<StageExtensionTask>("stageExtension") {
     group = "build"
-    description = "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/$targetVersion/intellij-android/"
+    description =
+        "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/$targetVersion/intellij-android/"
 
     builtJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
     runtimeClasspath.from(configurations.named("runtimeClasspath"))
-    expectedUpstreamNames.set(setOf("adblib-$adblibVersion.jar", "adblib-tools-$adblibVersion.jar"))
+    expectedUpstreamNames.set(
+        setOf(
+            "adblib-$adblibVersion.jar",
+            "adblib-tools-$adblibVersion.jar",
+            "lint-api-$lintVersion.jar",
+            "lint-checks-$lintVersion.jar",
+            "lint-model-$lintVersion.jar",
+            "common-$lintVersion.jar",
+            "sdklib-$lintVersion.jar",
+            "kxml2-$kxml2Version.jar",
+            "sdk-common-$lintVersion.jar",
+            "layoutlib-api-$lintVersion.jar"
+        )
+    )
     serverVersion.set(targetVersion)
     gradleVersion.set(gradle.gradleVersion)
     extensionDir.set(layout.projectDirectory.dir("../../resources/ils/$targetVersion/intellij-android"))

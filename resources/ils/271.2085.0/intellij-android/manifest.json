@@ -12,8 +12,8 @@
     {
       "name": "intellij-android.jar",
       "path": "lib/intellij-android.jar",
-      "sha256": "3f21a1fd3c64db2d592f3736ab6d38c4e59e2ed77338ba4fb8f6f46d22345630",
-      "size": 378273
+      "sha256": "ef5c994da405ea06a361fff4312e06dbd16ace733c91a9f596c44d8d8033fb28",
+      "size": 527394
     },
     {
       "name": "adblib-9.4.1.jar",
@@ -26,6 +26,54 @@
       "path": "lib/adblib-tools-9.4.1.jar",
       "sha256": "2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c",
       "size": 2009058
+    },
+    {
+      "name": "common-32.4.1.jar",
+      "path": "lib/common-32.4.1.jar",
+      "sha256": "cace5b28f2342119fe1a2db5baa36f8bd3391a086788e04fb8326bb70d6c4989",
+      "size": 570281
+    },
+    {
+      "name": "kxml2-2.3.0.jar",
+      "path": "lib/kxml2-2.3.0.jar",
+      "sha256": "f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2",
+      "size": 43858
+    },
+    {
+      "name": "layoutlib-api-32.4.1.jar",
+      "path": "lib/layoutlib-api-32.4.1.jar",
+      "sha256": "24d9d0877a956ebd6e586640147bc6bd52ce904f0e6ab740be0899271e354543",
+      "size": 126836
+    },
+    {
+      "name": "lint-api-32.4.1.jar",
+      "path": "lib/lint-api-32.4.1.jar",
+      "sha256": "e6a6e0244b5a9a325580c0a8901b94e1a8b37e0cca7030f5fcb06186f7f46b61",
+      "size": 1417813
+    },
+    {
+      "name": "lint-checks-32.4.1.jar",
+      "path": "lib/lint-checks-32.4.1.jar",
+      "sha256": "61e6b0a90d6fe8a5ac5d4d8519fb1134fd064fbba12525dcfc08ce4b43ffd0ae",
+      "size": 7256470
+    },
+    {
+      "name": "lint-model-32.4.1.jar",
+      "path": "lib/lint-model-32.4.1.jar",
+      "sha256": "81ac1f03f390f0aa8308d389a8bbe4238f9bd843ff705556f68564f6ee257cf1",
+      "size": 164882
+    },
+    {
+      "name": "sdk-common-32.4.1.jar",
+      "path": "lib/sdk-common-32.4.1.jar",
+      "sha256": "0ef83f5f212f2fce8300a167ba256d1cd81e4cda6adc868f7025a8dbdd2ae14f",
+      "size": 1684326
+    },
+    {
+      "name": "sdklib-32.4.1.jar",
+      "path": "lib/sdklib-32.4.1.jar",
+      "sha256": "d0bbe0e03155a7bdd9bac03567b6b26797f81a778f55d5eadc3e71e7a0a27434",
+      "size": 1909475
     }
   ]
 }

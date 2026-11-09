@@ -51,18 +51,25 @@ public final class AndroidSources {
         public final Map<com.intellij.openapi.module.Module, AndroidLayout> layouts = new HashMap<>();
 
         public Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file) {
+            this(server, file, openVersions(server));
+        }
+
+        public Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file, Map<String, Integer> openVersions) {
             if (CURRENT.get() != null) throw new IllegalStateException("Nested Android source scope");
             this.server = server;
-            snapshotOpenDocuments();
+            initialOpenVersions.putAll(openVersions);
             CURRENT.set(this);
             observe(file);
         }
 
-        private void snapshotOpenDocuments() {
-            if (server == null) return;
-            for (com.jetbrains.lsp.protocol.URI uri : server.getDocuments().openDocuments()) {
-                initialOpenVersions.put(uri.getUri(), version(server, uri.getUri()));
+        public static Map<String, Integer> openVersions(com.jetbrains.ls.api.core.LSServer server) {
+            Map<String, Integer> versions = new HashMap<>();
+            if (server != null) {
+                for (com.jetbrains.lsp.protocol.URI uri : server.getDocuments().openDocuments()) {
+                    versions.put(uri.getUri(), version(server, uri.getUri()));
+                }
             }
+            return versions;
         }
 
         public void verify() {
@@ -116,7 +123,7 @@ public final class AndroidSources {
         }
     }
 
-    static String text(Path path) {
+    public static String text(Path path) {
         path = path.toAbsolutePath().normalize();
         Scope scope = CURRENT.get();
         if (scope == null) throw new IllegalStateException("Android source reads require a request scope");
@@ -145,6 +152,11 @@ public final class AndroidSources {
         return file == null ? null : PsiManager.getInstance(project).findFile(file);
     }
 
+    public static String memoryText(Project project, Path path) {
+        PsiFile file = current(project, path);
+        return file == null ? text(path) : file.getText();
+    }
+
     public static Scope open(VirtualFile file) {
         return new Scope(null, file);
     }
@@ -158,7 +170,7 @@ public final class AndroidSources {
         }
     }
 
-    private static Integer version(com.jetbrains.ls.api.core.LSServer server, String uri) {
+    public static Integer version(com.jetbrains.ls.api.core.LSServer server, String uri) {
         if (server == null) return null;
         try {
             return (Integer) DOCUMENT_VERSION.invokeExact(server.getDocuments(), uri);
@@ -170,7 +182,7 @@ public final class AndroidSources {
     }
 
 
-    static PsiFile kotlinScript(Project project, VirtualFile root) {
+    public static PsiFile kotlinScript(Project project, VirtualFile root) {
         Path path = Path.of(root.getPath(), "build.gradle.kts").toAbsolutePath().normalize();
         PsiFile current = current(project, path);
         if (current != null) return current;
@@ -183,7 +195,7 @@ public final class AndroidSources {
         return file;
     }
 
-    static XmlFile xml(Project project, Path path) {
+    public static XmlFile xml(Project project, Path path) {
         path = path.toAbsolutePath().normalize();
         PsiFile current = current(project, path);
         if (current != null) return current instanceof XmlFile xml ? xml : null;

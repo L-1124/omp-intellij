@@ -5,6 +5,39 @@
       <verify-signatures>false</verify-signatures>
    </configuration>
    <components>
+      <component group="com.android.tools" name="common" version="32.4.1">
+         <artifact name="common-32.4.1-sources.jar">
+            <sha256 value="61c72dfa55d90d38b543d569ca3688037f8a4d948112aa1071a4a287c6a4ba6f" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="common-32.4.1.jar">
+            <sha256 value="cace5b28f2342119fe1a2db5baa36f8bd3391a086788e04fb8326bb70d6c4989" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="common-32.4.1.pom">
+            <sha256 value="9d0456a3387c72157049a43d1a27cc73c859afe4d2d04dac1e6738b0a86e4a29" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="com.android.tools" name="sdk-common" version="32.4.1">
+         <artifact name="sdk-common-32.4.1-sources.jar">
+            <sha256 value="e09a0de2b21ff620c8a5e91ec129b142e3833968fc4e7ce93a692033c10e9b02" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="sdk-common-32.4.1.jar">
+            <sha256 value="0ef83f5f212f2fce8300a167ba256d1cd81e4cda6adc868f7025a8dbdd2ae14f" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="sdk-common-32.4.1.pom">
+            <sha256 value="568254c8b3188c8c70e8d87e92071a8ff4612f43ad7caa5794b35663c0aceb88" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="com.android.tools" name="sdklib" version="32.4.1">
+         <artifact name="sdklib-32.4.1-sources.jar">
+            <sha256 value="eb7d9fc8866c645f399ad2fc9c34b075b46e3a439031416255612600b1631b24" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="sdklib-32.4.1.jar">
+            <sha256 value="d0bbe0e03155a7bdd9bac03567b6b26797f81a778f55d5eadc3e71e7a0a27434" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="sdklib-32.4.1.pom">
+            <sha256 value="0c57e090b63fdca469464aea57415f54fa9b301345ece188801d6ff9e4c4f5d2" origin="Official Google Maven"/>
+         </artifact>
+      </component>
       <component group="com.android.tools.adblib" name="adblib" version="9.4.1">
          <artifact name="adblib-9.4.1-sources.jar">
             <sha256 value="16075b3fe078563e9bb00b40fd570b009a149e52f4dbb4be8afb4202f1cecc7c" origin="Official Google Maven"/>
@@ -27,6 +60,50 @@
             <sha256 value="66a8f669bcef45c523b85d583d3390bba21849f2eb9120dee3c801ed285bd93e" origin="Official Google Maven"/>
          </artifact>
       </component>
+      <component group="com.android.tools.layoutlib" name="layoutlib-api" version="32.4.1">
+         <artifact name="layoutlib-api-32.4.1-sources.jar">
+            <sha256 value="c2dbddbb3b1a82e95aa6e591a5f19b3dd06853b6b7d2fa7904a4486484c7d4c2" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="layoutlib-api-32.4.1.jar">
+            <sha256 value="24d9d0877a956ebd6e586640147bc6bd52ce904f0e6ab740be0899271e354543" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="layoutlib-api-32.4.1.pom">
+            <sha256 value="85d01c42e8aa66334ce0343c649f07365a0d447c6772a8608a113a7af94240cd" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="com.android.tools.lint" name="lint-api" version="32.4.1">
+         <artifact name="lint-api-32.4.1-sources.jar">
+            <sha256 value="cece490c485dd0fea51dcfa7624c55014a48782adbb51f8135accd5ea8c52b38" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="lint-api-32.4.1.jar">
+            <sha256 value="e6a6e0244b5a9a325580c0a8901b94e1a8b37e0cca7030f5fcb06186f7f46b61" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="lint-api-32.4.1.pom">
+            <sha256 value="5deb997cdabbfa22fd4cbff4dad3deb286507c3c011c17cec0235fb46e936042" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="com.android.tools.lint" name="lint-checks" version="32.4.1">
+         <artifact name="lint-checks-32.4.1-sources.jar">
+            <sha256 value="9c714ce6504124cdb9662d4fec47830c02bda3d2bbda31aef6669803e0cc28d0" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="lint-checks-32.4.1.jar">
+            <sha256 value="61e6b0a90d6fe8a5ac5d4d8519fb1134fd064fbba12525dcfc08ce4b43ffd0ae" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="lint-checks-32.4.1.pom">
+            <sha256 value="b0444648bf3401f4157abde2afe7934628d8e542921b84d8fd05f525553d93ef" origin="Official Google Maven"/>
+         </artifact>
+      </component>
+      <component group="com.android.tools.lint" name="lint-model" version="32.4.1">
+         <artifact name="lint-model-32.4.1-sources.jar">
+            <sha256 value="2b71c402a328bc9c7b58aafac862e89d180e47d84a163f63107e8270cbf93009" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="lint-model-32.4.1.jar">
+            <sha256 value="81ac1f03f390f0aa8308d389a8bbe4238f9bd843ff705556f68564f6ee257cf1" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="lint-model-32.4.1.pom">
+            <sha256 value="a10760ae7db0686d59aa9643ba96b31d1473ef8e887cadce85115de0aa6850ae" origin="Official Google Maven"/>
+         </artifact>
+      </component>
       <component group="junit" name="junit" version="4.13.2">
          <artifact name="junit-4.13.2-sources.jar">
             <sha256 value="34181df6482d40ea4c046b063cb53c7ffae94bdf1b1d62695bdf3adf9dea7e3a" origin="Official Maven Central"/>
@@ -36,6 +113,17 @@
          </artifact>
          <artifact name="junit-4.13.2.pom">
             <sha256 value="569b6977ee4603c965c1c46c3058fa6e969291b0160eb6964dd092cd89eadd94" origin="Official Maven Central"/>
+         </artifact>
+      </component>
+      <component group="net.sf.kxml" name="kxml2" version="2.3.0">
+         <artifact name="kxml2-2.3.0-sources.jar">
+            <sha256 value="85495366666158b58961e8911ced0f6f3bc92f1ebee865518b493fdb90760250" origin="Official Maven Central"/>
+         </artifact>
+         <artifact name="kxml2-2.3.0.jar">
+            <sha256 value="f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2" origin="Official Maven Central"/>
+         </artifact>
+         <artifact name="kxml2-2.3.0.pom">
+            <sha256 value="31ce606f4e9518936299bb0d27c978fa61e185fd1de7c9874fe959a53e34a685" origin="Official Maven Central"/>
          </artifact>
       </component>
       <component group="org.hamcrest" name="hamcrest-core" version="1.3">

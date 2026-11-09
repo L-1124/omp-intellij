@@ -9,6 +9,11 @@
   <depends>com.intellij.modules.java</depends>
   <depends>org.jetbrains.ls.plugin.kotlin</depends>
   <depends>org.jetbrains.ls.feature.xml</depends>
+  <dependencies>
+    <module name="intellij.libraries.asm"/>
+    <module name="intellij.libraries.asm.tools"/>
+    <module name="intellij.libraries.guava"/>
+  </dependencies>
   <projectListeners>
     <listener class="org.jetbrains.android.debug.AndroidDebuggerListener"
               topic="com.intellij.debugger.impl.DebuggerManagerListener"/>

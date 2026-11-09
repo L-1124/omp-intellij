@@ -8,10 +8,26 @@ const EXTENSION_ASSETS = [
   'intellij-android.jar',
   'adblib-9.4.1.jar',
   'adblib-tools-9.4.1.jar',
+  'lint-api-32.4.1.jar',
+  'lint-checks-32.4.1.jar',
+  'lint-model-32.4.1.jar',
+  'common-32.4.1.jar',
+  'sdklib-32.4.1.jar',
+  'kxml2-2.3.0.jar',
+  'sdk-common-32.4.1.jar',
+  'layoutlib-api-32.4.1.jar',
 ] as const;
 const UPSTREAM_SHA256: Readonly<Record<string, string>> = {
   'adblib-9.4.1.jar': 'ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9',
   'adblib-tools-9.4.1.jar': '2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c',
+  'lint-api-32.4.1.jar': 'e6a6e0244b5a9a325580c0a8901b94e1a8b37e0cca7030f5fcb06186f7f46b61',
+  'lint-checks-32.4.1.jar': '61e6b0a90d6fe8a5ac5d4d8519fb1134fd064fbba12525dcfc08ce4b43ffd0ae',
+  'lint-model-32.4.1.jar': '81ac1f03f390f0aa8308d389a8bbe4238f9bd843ff705556f68564f6ee257cf1',
+  'common-32.4.1.jar': 'cace5b28f2342119fe1a2db5baa36f8bd3391a086788e04fb8326bb70d6c4989',
+  'sdklib-32.4.1.jar': 'd0bbe0e03155a7bdd9bac03567b6b26797f81a778f55d5eadc3e71e7a0a27434',
+  'kxml2-2.3.0.jar': 'f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2',
+  'sdk-common-32.4.1.jar': '0ef83f5f212f2fce8300a167ba256d1cd81e4cda6adc868f7025a8dbdd2ae14f',
+  'layoutlib-api-32.4.1.jar': '24d9d0877a956ebd6e586640147bc6bd52ce904f0e6ab740be0899271e354543',
 };
 
 export interface AndroidExtensionResolution {

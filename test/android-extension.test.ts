@@ -117,7 +117,19 @@ test('resolveAndroidExtension rejects invalid characters in extension directory'
   }
 });
 
-const assetNames = ['intellij-android.jar', 'adblib-9.4.1.jar', 'adblib-tools-9.4.1.jar'];
+const assetNames = [
+  'intellij-android.jar',
+  'adblib-9.4.1.jar',
+  'adblib-tools-9.4.1.jar',
+  'lint-api-32.4.1.jar',
+  'lint-checks-32.4.1.jar',
+  'lint-model-32.4.1.jar',
+  'common-32.4.1.jar',
+  'sdklib-32.4.1.jar',
+  'kxml2-2.3.0.jar',
+  'sdk-common-32.4.1.jar',
+  'layoutlib-api-32.4.1.jar',
+];
 
 async function extensionFixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'omp-assets-'));
@@ -335,7 +347,18 @@ test('Windows plugin paths retain filesystem case-insensitive identity', {
   );
 });
 
-for (const name of ['adblib-9.4.1.jar', 'adblib-tools-9.4.1.jar']) {
+for (const name of [
+  'adblib-9.4.1.jar',
+  'adblib-tools-9.4.1.jar',
+  'lint-api-32.4.1.jar',
+  'lint-checks-32.4.1.jar',
+  'lint-model-32.4.1.jar',
+  'common-32.4.1.jar',
+  'sdklib-32.4.1.jar',
+  'kxml2-2.3.0.jar',
+  'sdk-common-32.4.1.jar',
+  'layoutlib-api-32.4.1.jar',
+]) {
   test(`extension rejects substituted ${name} even with a self-consistent manifest`, async (t) => {
     const { extension, executable, manifestPath } = await extensionFixture(t);
     const bytes = Buffer.from('substituted dependency');

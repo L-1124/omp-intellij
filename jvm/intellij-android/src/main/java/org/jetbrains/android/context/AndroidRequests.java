@@ -15,6 +15,7 @@ import com.jetbrains.lsp.protocol.TextDocumentIdentifier;
 import kotlinx.coroutines.flow.Flow;
 import kotlinx.coroutines.flow.FlowKt;
 import org.jetbrains.android.resource.AndroidSources;
+
 import java.util.List;
 
 
@@ -56,6 +57,57 @@ public final class AndroidRequests {
                                     return values;
                                 }, result), next),
                         values -> collector.emit(values, continuation), continuation));
+        return FlowKt.flatMapConcat(batches, (values, continuation) -> FlowKt.asFlow(values));
+    }
+
+    public record DiagnosticResult<T>(List<T> values, Runnable onVerified) {
+        public DiagnosticResult(List<T> values) {
+            this(values, () -> {
+            });
+        }
+    }
+
+    public interface DiagnosticQuery<T> {
+        DiagnosticResult<T> run(Project project, PsiFile file, Document document);
+    }
+
+    public static <T> Flow<T> diagnosticQuery(LSServer server, TextDocumentIdentifier identifier,
+                                              DiagnosticQuery<T> query) {
+        Flow<List<T>> batches = FlowKt.flow((collector, continuation) -> {
+            var openVersions = AndroidSources.Scope.openVersions(server);
+            return AndroidRequests.<DiagnosticResult<T>>chain(next -> server.withAnalysisContext((context, scope, result) ->
+                                CoroutinesKt.readAction(() -> {
+                                    ProgressManager.checkCanceled();
+                                    Project project = context.getProject();
+                                    VirtualFile virtualFile = PositionKt.findVirtualFile(identifier);
+                                    PsiFile file = virtualFile == null ? null : PsiManager.getInstance(project).findFile(virtualFile);
+                                    if (file == null) return new DiagnosticResult<T>(List.of());
+                                    Document document = PsiDocumentManager.getInstance(project).getDocument(file);
+                                    if (document == null) return new DiagnosticResult<T>(List.of());
+                                    long stamp = document.getModificationStamp();
+                                    try (var sources = new AndroidSources.Scope(server, virtualFile, openVersions)) {
+                                        AndroidSources.observeCompiledArchive(java.nio.file.Path.of(virtualFile.getPath()));
+                                        DiagnosticResult<T> values = query.run(project, file, document);
+                                        ProgressManager.checkCanceled();
+                                        if (stamp != document.getModificationStamp())
+                                            return AndroidRequests.<RuntimeException, DiagnosticResult<T>>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException("content_modified", -32801, null, null));
+                                        return new DiagnosticResult<>(values.values(), () -> {
+                                            sources.verify();
+                                            values.onVerified().run();
+                                        });
+                                    } catch (AndroidQueryException error) {
+                                        return AndroidRequests.<RuntimeException, DiagnosticResult<T>>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException(error.getMessage(), error.getErrorCode(), null, error));
+                                    }
+                                }, result), next),
+                        values -> {
+                            try {
+                                values.onVerified().run();
+                            } catch (AndroidQueryException error) {
+                                return AndroidRequests.<RuntimeException, Object>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException(error.getMessage(), error.getErrorCode(), null, error));
+                            }
+                            return collector.emit(values.values(), continuation);
+                        }, continuation);
+        });
         return FlowKt.flatMapConcat(batches, (values, continuation) -> FlowKt.asFlow(values));
     }
 
