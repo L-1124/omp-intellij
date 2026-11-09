@@ -2,7 +2,7 @@
 
 ## 核心结论
 
-1. **ILS 原生 Android 语义空白与扩展架构**：IntelliJ Managed Server（ILS 271.2085.0）发行包未包含 Android 核心插件（0 个 Android / ADB 相关类）。本项目通过 `LanguageServerExtension` SPI 与声明式 `plugin.xml` 构建独立 JVM 插件 `intellij-android.jar`，补齐 Android XML `DocumentSymbol`、Manifest 类属性到 Kotlin/Java 代码的 `references`、`R.*` 资源的 `DirectNavigationProvider` 源码跳转，以及基于 K2 Analysis API 的 `@Composable` 命名检查抑制（`ComposeSuppressor`）。
+1. **原生导入与 Android 语义扩展分工**：ILS `271.2085.0` 已包含 Gradle Android 模型导入能力；发行包未提供本项目所需的 Android XML 语义与 Lint 规则。独立 JVM 插件 `intellij-android.jar` 通过 `LanguageServerExtension` SPI 与 `plugin.xml` 补齐 XML 大纲、Manifest 类及资源声明的代码引用、`R.*` 的源码优先导航与 K2 `@Composable` 命名抑制。Lint 原生能力与自有实现状态分别记录，见协议专题和 `plan.md` §14。
 2. **插件 ID 对齐与互斥原则**：插件 ID 严格对齐官方 `org.jetbrains.android`。IntelliJ 平台 PluginManager 对同 ID 插件实行单例互斥加载，确保当前轻量级服务端按官方模块语义运行；未来若宿主动态注入官方完整插件，将自动触发单例互斥，杜绝类加载与扩展点双重注册冲突。
 3. **工程化与构建体系**：使用 `jvm/intellij-android/` 标准 Gradle 9.8.0 Java 工程。目标 ILS 版本从 `src/server/bundle-metadata.ts` 读取，编译工具链使用该 ILS 的 JBR 25（classfile 69）；`gradle.lockfile` 和 `verification-metadata.xml` 锁定依赖及摘要。`stageExtension` 生成 manifest 与 `.sha256`，运行时复用 `verifyExtensionDirectory` 验证清单、ABI、字节大小和哈希，不再依赖独立 `check-assets` 脚本。
 4. **源码审查优先于反编译推测**：本地实测横评 4 款现代反编译器（`jcdc`、`javajive`、`abyssflower`、`vinylite`）表明：`jcdc` 对 Java 21+ 语法（Sealed 类、Record、TWR、模式匹配）和内部类折叠还原度最高；`abyssflower` 凭借 `@Metadata` Protobuf 解析在 Kotlin 语法还原上断层领先；但任何反编译器在字节码脱糖、泛型擦除和架构设计意图上均存在不可逆失真。核心方案必须以官方开源仓库（`JetBrains/intellij-community`、`JetBrains/android` 提交 `544c9ef8`、AOSP `platform/tools/base`）作为第一权威依据，杜绝盲目依靠反编译黑盒猜解协议。
@@ -123,6 +123,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
                   new AndroidDocumentSymbols(XML),
                   new AndroidReferencesProvider(),
                   new AndroidDefinitionProvider(),
+                  new AndroidResourceCommands(),
                   new ComposeSuppressor.Entry(),
                   new AndroidDebugCommands()
               ),
@@ -194,16 +195,25 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 - **选区范围规范（`selectionRange`）**：必须精确指向 `attribute.getValueElement().getValueTextRange()`（剥离单双引号），若无属性值则回退为标签名称的 TextRange，严禁把包含引号或整个 XML 标签范围作为选区。
 - **降级兼容**：ILS 服务端仅输出层级 `DocumentSymbol[]`。当客户端在初始化能力中显式声明 `hierarchicalDocumentSymbolSupport: false` 时，TypeScript 桥接层自动调用 `flattenDocumentSymbols` 将树形结构 DFS 展平为平铺的 `SymbolInformation[]`，并注入 `containerName`。
 
-### 4. Manifest 类引用反查与 R 资源跳转契约
+### 4. Manifest、资源声明引用与 R 资源跳转契约
 
 - **Manifest 类属性 references 查询**：
   - 触发条件：光标位于 `AndroidManifest.xml` 中 `<activity>`, `<service>`, `<provider>`, `<receiver>`, `<instrumentation>`, `<application>`, `<activity-alias>` 的 `android:name` 或 `android:targetActivity` 属性值内。
   - 目标解析：基于当前模块的 `GlobalSearchScope`，通过 `JavaPsiFacade.getInstance(project).findClasses` 查找 Java / Kotlin PSI 类。
   - 异常响应：若类未定义，返回错误码 `-32803`，错误信息包含 `target_unresolved: <类全限定名>`；若存在多重冲突声明，返回 `ambiguous_target: <类全限定名>`。
   - 引用反查结果：通过 `FindUsagesManager` 检索所有 Kotlin/Java 代码引用（过滤 XML 来源），追加剥离引号后的当前属性位置。若客户端请求带 `context.includeDeclaration: true`，同步追加目标类的源码声明定义位置。
+- **资源 XML 声明 references 查询**：
+  - 标准 XML 请求与 `omp.findResourceFieldReferences` 在 JVM 内共用字段查询，不在 Bridge 转发第二次 RPC。显式命令协议 v1 的精确模块、namespace、R 字段和物理编译来源见 `plan.md` §7.2。
+  - 按当前模块、变体与 AGP merger 证明声明身份和编译字段；同名、同 FQN 的独立模块不能仅因名称相同而合并。声明来源缺失或失效返回具体错误，合法零引用返回 `[]`。
+  - 官方对照：`ProjectLightResourceClassService.getLightRClassesContainingModuleResources` 枚举 owner 及依赖它的消费模块中的 R 表示；`AndroidResourcesFindUsagesHandlerFactory` 再按资源上下文收缩范围。ILS 适配同样先证明 owner/依赖关系，再枚举真实编译字段副本，不能只搜索 owner 的一个字段或仅按 namespace 扫全工程。
+  - `includeDeclaration: false` 仅返回 Java/Kotlin 的真实语义引用；`true` 额外加入当前 XML 声明，不加入其他限定符副本、字节码字段或 XML 使用点。
+  - 使用当前 PSI 的引用范围及 UTF-16 行列；在原生挂起读操作内搜索，复用请求取消和 `AndroidSources.Scope` 的文档版本、磁盘来源校验。显式命令与标准请求使用相同边界。
+  - `attr`、`declare-styleable` 派生字段、布局 `@+id` 扩展搜索及 XML 到 XML 引用保持阶段 C 的既定边界，不能把普通字段搜索视为这些路径已实现。
+  - 271 验收：隔离真实导入集成 27/27，通过 `core -> lib -> app`（含未打开的同包 Java）、同 namespace 独立模块、各 values/文件类型、限定符跳转、缺失/过时来源、严格命令参数，以及 12,002 引用工作负载的取消 `-32800`、并发编辑 `-32801` 和恢复。MyHook 只读查询 `nav_settings`，三入口一致返回 `MyHookBottomBar.kt` 两处及 `SettingsScreen.kt` 一处。
+  - H 原生诊断正反例独立于上述扩展验收：编译类型错误正常；Java/Kotlin `NewApi` 与 Compose `UnrememberedMutableState` 缺口确认。尚未实现 `AndroidLintProvider`，原始环境、控制组与结果见 [协议与生命周期专题](ils-protocol-and-lifecycle.md)。
 - **`R.*` 资源的 `DirectNavigationProvider` 契约**：
   - 原生缺陷：Kotlin / Java 中跳转 `R.string.xxx` 时，ILS 原生仅返回 AGP 生成的 `R.jar` 字节码反编译类（`R$string.class`）。
-  - 源码优先机制：实现 `com.intellij.navigation.DirectNavigationProvider`（`AndroidResourceNavigation`）。当导航元素为 `*.R` 内的 `PsiField` 且来源为 JAR 时，提取模块资源索引，解析 AGP 资源来源，优先构造指向 XML 源码具体 `<string name="xxx">` 标签的虚拟 PSI 元素（`Declaration extends FakePsiElement`）；若源码映射失效，则安全回退返回原生 `PsiField`。
+  - 源码优先机制：实现 `com.intellij.navigation.DirectNavigationProvider`（`AndroidResourceNavigation`）。当导航元素为 `*.R` 内的 `PsiField` 且来源为 JAR 时，提取模块资源索引，解析 AGP 资源来源，优先构造指向 XML 源码具体声明的虚拟 PSI 元素（`Declaration extends FakePsiElement`）；若源码映射失效，则返回 `null`，保留原生字节码导航。
 
 ### 5. 基于 K2 Analysis API 的 Compose 命名抑制契约
 
@@ -332,6 +342,10 @@ cd jvm/intellij-android
 3. `gradle/verification-metadata.xml` 自动校验上游官方库的 SHA-256；
 4. `stageExtension` 任务自动生成 `manifest.json` 与伴随的 `.sha256` 签名文件。
 
+本轮最终回归：`npm test` 501/501；`npm run build:jvm` 成功并暂存三资产；独立 ILS 271 的 `android-xml.test.js` 27/27，无跳过；`npm pack --dry-run --json --ignore-scripts` 成功。实际 Android 导入、PSI 引用、错误/取消恢复均由上述隔离进程执行；共享用户 ILS 与 MyHook 源码保持不变。
+
+集成测试同时隔离原生索引：`initialize.initializationOptions.indexDir` 指向测试沙箱的 `index/`，随沙箱统一回收。仅设置服务端 `systemPath` 仍会使用默认的用户索引缓存；验证资源查询时不能因此向共享缓存写入大量临时工程索引。
+
 ### 3. 反编译器选型横评与技术适用边界
 
 在前期调研与逆向探索中，我们针对 4 款低 Star / 现代反编译 CLI 工具（3 款 Rust、1 款 Go）在同一基准测试集上进行了全面实测：
@@ -363,16 +377,26 @@ cd jvm/intellij-android
 
 ### 4. 官方源码核验流程与规范
 
-在开发此类深度依赖 IDE 底层 PSI、UAST 和语言服务的扩展时，**反编译仅用于定位未公开类的字节码签名，所有架构设计与关键逻辑必须以官方源码为唯一权威依据**。
+实现先对照官方 Android 插件源码与 Community 插件开发文档；涉及 ILS 私有协议、模型导入或快照的版本差异，再用当前发行包的定向反编译核对。文档示例不能替代 271 的运行验收，反编译结果也不作为可直接复制的源码。
 
 - **IntelliJ 平台核心与 LSP API**：
   查阅 [JetBrains/intellij-community](https://github.com/JetBrains/intellij-community)：
   - `platform/lang-impl/src/com/intellij/find/findUsages/`：查阅 `FindUsagesManager` 与 `FindUsagesHandler` 选项生命周期。
   - `platform/core-api/src/com/intellij/navigation/DirectNavigationProvider.java`：查阅源码导航优先判定顺序。
+  - [PSI References](https://plugins.jetbrains.com/docs/intellij/psi-references.html)：使用真实 `PsiReference.resolve()`、`ReferencesSearch` 与显式 scope；不可用文本同名匹配代替目标身份。
+  - [Coroutine Read Actions](https://plugins.jetbrains.com/docs/intellij/coroutine-read-actions.html)：采用允许写操作的挂起读操作，在遍历中调用 `ProgressManager.checkCanceled()`，不手动抛取消异常或跨重试保存 PSI 结果。
+  - [Workspace Model](https://plugins.jetbrains.com/docs/intellij/workspace-model.html)：不可变模型快照、模块与库实体及 Project Model 互操作；模型缺失应在明确的导入/模型扩展边界补齐，查询期不偷偷修改全局 classpath。
 - **Android 官方语义与 Lint 实现**：
   查阅 [JetBrains/android](https://github.com/JetBrains/android)（参考提交 `544c9ef8`）：
   - `android/src/org/jetbrains/android/dom/converters/PackageClassConverter.java`：核验 Manifest 类名解析与候选顺序。
   - `android/src/org/jetbrains/android/dom/structure/resources/ResourceStructureViewBuilder.java`：核验资源 XML 标签与大纲属性层级。
+  - [AndroidResourcesFindUsagesHandlerFactory.kt](https://github.com/JetBrains/android/blob/544c9ef84f8ee3024c1f9779725db34bf5dd38a6/android/src/org/jetbrains/android/AndroidResourcesFindUsagesHandlerFactory.kt)：资源身份与上下文 scope 交集、文件资源和 attr/styleable 的独立搜索路径。
+  - [AndroidResolveScopeEnlarger.kt](https://github.com/JetBrains/android/blob/544c9ef84f8ee3024c1f9779725db34bf5dd38a6/android/src/org/jetbrains/android/AndroidResolveScopeEnlarger.kt)：R 类查找器必须配套模块依赖限定的 resolve scope；只注册 Finder 无法保证同包 `R.string` 绑定。ILS 适配保留真实 JAR PSI，仅将 owner 和已导入依赖的当前变体归档加入解析范围。
+  - [ResourceRepositoryToPsiResolver.kt](https://github.com/JetBrains/android/blob/544c9ef84f8ee3024c1f9779725db34bf5dd38a6/android/src/com/android/tools/idea/res/psi/ResourceRepositoryToPsiResolver.kt)：按真实声明的 use scope 合并资源搜索范围；本项目按已导入模块及来源落实对应隔离，不移植完整 AndroidFacet/ResourceRepository。
+  - [AndroidResourceClassPsiElementFinder.kt](https://github.com/JetBrains/android/blob/544c9ef84f8ee3024c1f9779725db34bf5dd38a6/android/src/com/android/tools/idea/res/AndroidResourceClassPsiElementFinder.kt)：官方 R 类由 `LightResourceClassService` 按 scope 提供，依赖完整 Android 模型。本扩展保留真实编译 R 字段契约，不能用临时合成同名类掩盖 ILS 导入缺项。
+  - [ProjectLightResourceClassService.kt](https://github.com/JetBrains/android/blob/544c9ef84f8ee3024c1f9779725db34bf5dd38a6/android/src/com/android/tools/idea/res/ProjectLightResourceClassService.kt)：`getLightRClassesAccessibleFromModule` 与 `getLightRClassesContainingModuleResources` 分别表达“消费方能访问哪些 R”和“哪些 R 包含 owner 的资源”，两者不能混用。
+  - [Android light classes 开发文档](https://github.com/JetBrains/android/blob/544c9ef84f8ee3024c1f9779725db34bf5dd38a6/android/docs/android-light-classes.md)：`PsiElementFinder`、Java/Kotlin resolve scope 与导航需协同验证；找到一个 `PsiClass` 不能证明消费代码已能绑定它，必须检查真实引用结果。
+  - [MergingLogPersistUtil.java](https://android.googlesource.com/platform/tools/base/+/refs/heads/mirror-goog-studio-main/sdk-common/src/main/java/com/android/ide/common/blame/MergingLogPersistUtil.java)：同时核验 AGP 9.4.1 对应 `sdk-common:32.4.1` 的 sources JAR。`multi-v2` 在目标与来源坐标相同时省略 `to`；省略的结束坐标继承起始坐标。限定符声明映射必须按该协议还原。
   - `compose-ide-plugin/src/com/android/tools/compose/ComposeSuppressor.kt`：核验 Composable 函数命名检查抑制逻辑。
 - **Android Studio 调试与 ADB 链路**：
   查阅 Google AOSP `platform/tools/base`（分支 `mirror-goog-studio-main`）：

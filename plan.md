@@ -4,7 +4,7 @@
 
 在 `omp-intellij` 中补齐 Android XML 符号、XML 到 Java/Kotlin 引用查询、Compose 命名检查适配、内嵌官方 Android/Compose Lint 实时诊断和设备端 JDWP 编排。复用 IntelliJ 的 PSI、K2 UAST、索引和调试器，参考 Android 官方插件的资源身份、作用域、规则装载和会话所有权设计。
 
-本文区分探针实测、生产实现和验收要求。临时探针未安装到共享服务，MyHook 生产源码未修改。阶段 A、阶段 B 与既有 Android definition 已迁入 `271.2085.0` 的 JVM 扩展并通过隔离实测，旧 TS XML/Gradle 解析链与 `saxes` 已删除；阶段 C/D/E/H 按各自章节继续推进。
+本文区分探针实测、生产实现和验收要求。临时探针未安装到共享服务，MyHook 生产源码未修改。阶段 A、B、D、E 与既有 Android definition 已在 `271.2085.0` 完成生产实现及对应验收，旧 TS XML/Gradle 解析链与 `saxes` 已删除；阶段 C、H 继续按原生缺口推进，F 随新增路径增量验收。
 
 ### 1.1 交付项
 
@@ -12,12 +12,12 @@
 | ---- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | A    | Android values XML、Manifest 的 `textDocument/documentSymbol`                                                 | **已完成**（`271.2085.0` JVM 生产实现 + 双模块/MyHook 实测通过）                                                                           |
 | B    | Manifest 类属性触发 `textDocument/references`（含既有 Android `definition` 迁移与旧 TS 解析链删除）           | **已完成**（`271.2085.0` JVM 生产实现 + 源码集合等价/并发取消实测通过）                                                                    |
-| C    | 资源 XML 声明触发 Java/Kotlin 语义引用查询，与导航共用 JVM 查询服务                                           | 待实施（共享 `AndroidContext` / `ResourceResolver` / `AndroidRequests`）                                                                   |
+| C    | 资源 XML 声明触发 Java/Kotlin 语义引用查询，与导航共用 JVM 查询服务                                           | **已完成**（271 XML 集成 27/27；MyHook 三处精确位置；官方 Finder + resolve scope + owner/消费方 R 副本）                                   |
 | D    | 语义确认的 Composable 函数命名检查豁免                                                                        | **已完成**（`271.2085.0` 生产实现 + K2 Analysis API + 隔离集成实测通过）                                                                   |
 | E    | JVM adblib `prepare` / `claim` / `release`，CLI 与原生 DAP 编排                                               | **已完成**（`271.2085.0` JVM 生产实现；fixture 7/7、MyHook 原生 attach、断点/步进、会话级 renderer mute 对象字段展开与 continue 实测通过） |
-| F    | 断连清理、新会话恢复及多工程隔离验收；仅修复复现的缺陷                                                        | **A/B 与 definition 路径已完成**；待随 C/D/E/H 增量合入                                                                                    |
+| F    | 断连清理、新会话恢复及多工程隔离验收；仅修复复现的缺陷                                                        | **A/B/C 与 definition 路径已完成**；D/E 既有证据见各节，H 自有 Provider 随实现增量验收                                                     |
 | G    | 声明宿主配置的 intellijExtensions，透明转发 ModCommand 交互，不新增 Bridge 编辑器实现                         | **协议透传已完成；交互式重构由 OMP 宿主兑现**                                                                                              |
-| H    | 同进程内嵌官方 Android Lint 与 AAR Compose 规则，经 `LSDiagnosticProvider` 接入原生 `textDocument/diagnostic` | 待实施（263 探针与 6 JAR 依赖集已验证，待 271 生产集成与验收）                                                                             |
+| H    | 同进程内嵌官方 Android Lint 与 AAR Compose 规则，经 `LSDiagnosticProvider` 接入原生 `textDocument/diagnostic` | **271 原生正反例验证完成：NewApi/Compose 缺口确认**；自有 Provider 尚待实现                                                                |
 
 ### 1.2 边界
 
@@ -120,7 +120,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
   - 调用 `run-mcp-tool` 传入 `[{tool:'get_project_modules', arguments:{}}]` 成功返回 `structuredContent.modules: [{name: 'omp-intellij-root', type: 'JAVA_MODULE'}]`。实测证实：模块信息仅包含模块名称与基础类型，并不暴露源码根（source roots）、content roots、包命名空间（namespace）或 AGP 构建变体（variant），不能替代 Android 工程上下文；
   - 调用 `get_project_dependencies` 在临时 marker Maven 工程上返回 `dependencies: []`，这仅是对照工程结果，不构成 Android 依赖解析证据，亦无完整依赖图保证；
   - 调用 `list_directory_tree` 即使传入 `projectPath` 仍报错 `'The project directory cannot be determined.'`，直接证实广告能力不等于端到端操作可用（advertisement != operational proof）。
-- **Android 等价性待验收**：上述调用没有验证 Android XML 语义或 Android/Compose Lint 规则是否可用。`lint_files`、`get_file_problems` 的 schema 只描述通用检查入口；须在目标 Android 工程用具体规则正反例核对，不能仅凭工具名称判断已满足或无法满足阶段 H。
+- **Android 等价性验收边界**：上述早期 MCP 调用未验证 Android XML 或 Lint 语义；本轮 271 原生诊断正反例已完成，结果见 §14.1。通用 schema 和能力广告仍不能替代具体规则结果。
 - **协议语义与清单边界**：
   - LSP `capabilities` 并非服务端所有自定义 RPC 的穷尽清单；
   - `notebookDocumentSync` 属于 LSP 3.17 标准能力，非 IntelliJ 私有扩展；
@@ -223,7 +223,7 @@ HookLogProvider 的执行代码调用数为零，KDoc 链接仍是合法语义�
 | `jvm/intellij-android/` 的工程上下文                             | 从当前 Project 的模块、SDK、依赖和源码取得 Android 上下文，供导航、引用与 Lint 共用                                                     |
 | JVM XML 大纲 Provider                                            | 基于当前 XML PSI 实现阶段 A，注册到既有 `"xml"` 语言                                                                                    |
 | JVM definition/references Provider 与查询服务                    | 识别 Manifest 类属性、资源声明和代码 R 引用，解析目标、校验来源、执行语义搜索                                                           |
-| 同一 JVM 模块的 Compose suppressor、`OmpLintDiagnosticProvider`  | 阶段 D/H，保持现有范围                                                                                                                  |
+| 同一 JVM 模块的 Compose suppressor、`AndroidLintProvider`        | 阶段 D/H，保持现有范围                                                                                                                  |
 | `src/shared/document-symbols.ts`、`src/bridge.ts`                | 通用文档/请求生命周期及客户端不支持层级符号时的 DFS 展平；已删除 `navigation-relay.ts` 的 Android 拦截，不解析 XML，不推导 Android 身份 |
 | 旧 `src/android/xml.ts`、`navigation.ts`、`resource-resolver.ts` | 已迁移至 JVM 并连同 `types.ts`、旧测试和 `saxes` 依赖一并删除                                                                           |
 | `src/android/debug-attach.ts`、`debug-attach-cli.ts`             | ADB 设备、PID、forward 和租约管理，仍放在 TS                                                                                            |
@@ -380,7 +380,7 @@ type/name 是已核对的 R 类型和字段名。classOrigins 是调用方提供
 }
 ```
 
-references 为标准 Location[]；origin.classOrigins 记录实际参与查询的物理类来源，服务端确认它们属于本次 owner/快照。`references: []` 表示字段已解析但零引用；nav_settings 的 263 基线为三处。失败返回 JSON-RPC error，不保留 status + 空数组失败格式。未知命令的历史原生响应为 `-32600`；显式调用前检查命令广告，保留实际原生错误。
+references 为标准 Location[]；origin.classOrigins 记录实际参与查询的 owner 归档及导入消费方的当前变体编译副本，服务端确认它们属于同一资源归属和快照。`references: []` 表示字段已解析但零引用；nav_settings 的 263 基线及 271 MyHook 实测均为三处。失败返回 JSON-RPC error，不保留 status + 空数组失败格式。未知命令的历史原生响应为 `-32600`；显式调用前检查命令广告，保留实际原生错误。
 
 ### 7.3 服务端执行
 
@@ -393,15 +393,17 @@ references 为标准 Location[]；origin.classOrigins 记录实际参与查询�
 7. 读操作可能被写操作取消后重试；每次尝试内部收集结果，结束后才返回纯 Location 数据，避免重试重复追加。
 8. `element.textRange.startOffset + reference.rangeInElement` 计算真实范围；在读操作内取当前 Document 的行列。读锁外不保存 PSI 对象。
 
+配套解析遵循官方 `AndroidResourceClassPsiElementFinder` 与 `AndroidResolveScopeEnlarger`：ILS 未索引的库 R 归档只按真实 class 字节构造平台编译 PSI；限定到已导入模块、依赖及当前变体，并加入 Java resolve scope。仅能 `findClasses` 成功不足以证明未打开源码中的同包引用可绑定。查询同时枚举 owner 与消费方内实际包含该 namespace 的 R 副本；同 namespace 不同 owner 的歧义拒绝合并。官方源码固定链接见专题文档 §4。
+
 ### 7.4 支持范围与 includeDeclaration
 
-| 范围                                                                 | 生产计划                                                                               |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| string                                                               | 已有字段搜索、身份和取消探针；接入标准 XML 请求                                        |
-| color/dimen/bool/integer/array/plurals/id/style 等普通 values 声明   | 按真实符号清单映射 R 字段，逐类型验收                                                  |
-| drawable/mipmap/layout/anim/animator/raw/xml 等文件资源              | 保留独立文件资源处理，按现有来源映射和真实字段逐类型验收；不把文件任意位置当成资源名称 |
-| declare-styleable/attr 派生字段、`@+id` 的跨布局声明                 | 官方另有扩展搜索路径，本次不冒充已实现；保留原生行为并在支持说明列明                   |
-| Android 框架、AAR 外部 XML 声明、未解析 placeholder、XML 到 XML 搜索 | 不由本阶段接管                                                                         |
+| 范围                                                                 | 生产计划                                                             |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| string                                                               | 已完成；MyHook 三处与 fixture 精确位置、合法零引用通过               |
+| color/dimen/bool/integer/array/plurals/id/style 等普通 values 声明   | 已完成逐类型真实字段及范围验收                                       |
+| drawable/mipmap/layout/anim/animator/raw/xml 等文件资源              | 已完成逐类型来源与真实字段验收；仅文件资源根节点作为查询入口         |
+| declare-styleable/attr 派生字段、`@+id` 的跨布局声明                 | 官方另有扩展搜索路径，本次不冒充已实现；保留原生行为并在支持说明列明 |
+| Android 框架、AAR 外部 XML 声明、未解析 placeholder、XML 到 XML 搜索 | 不由本阶段接管                                                       |
 
 DocumentSymbol 的结构支持与 references 的字段搜索支持分别声明。false 只返回约定范围内的 Java/Kotlin 语义引用，不返回 R 字段声明；true 在此基础上增加当前查询 XML 声明，不加入所有限定符声明或字节码字段。
 
@@ -582,7 +584,7 @@ omp plugin install --force omp-intellij@omp-intellij
 核对安装缓存中 `.runtime`、`.lsp.json`、`.dap.json`、JAR 资产目录和源码属于同一次版本；核对原生 LSP/DAP 发现、命令广告及 `textDocument/diagnostic` 返回，不能以扩展工具可调用代替验证。
 
 版本与验收范围分别记录：
-1. **目标版本 `271.2085.0`**：默认安装版本已更新并在 `src/server/bundle-metadata.ts` 中锁定；上游源实测存在分歧：GitHub Lua（`server_bundles.lua`）实际解析为 `263.7084.0`，而 Open VSX `1.0.86` 指向 `271.2085.0`，并非“解析一致”。六个平台归档的 SHA-256 与体积已按 CDN 旁挂文件与 Content-Length 实测核验并锁定在生成元数据中。**阶段 A、阶段 B、既有 Android definition 迁移及 JVM 扩展构建/加载链已在 `271.2085.0` 完成生产实现并通过双模块 Fixture 与 MyHook 隔离验收**；阶段 C/D/H 待在 271 上继续实施与验收。
+1. **目标版本 `271.2085.0`**：默认安装版本在 `src/server/bundle-metadata.ts` 中锁定。上游源实测存在分歧：GitHub Lua（`server_bundles.lua`）解析为 `263.7084.0`，Open VSX `1.0.86` 指向 `271.2085.0`。六个平台归档的 SHA-256 与体积已按 CDN 旁挂文件与 Content-Length 核验。阶段 A、B、D、E、既有 Android definition 及 JVM 扩展构建/加载链已在 271 完成生产实现与对应验收；阶段 C、H 尚待完成。
 2. **历史版本 `263.7084.0`**：资源字段命令、Compose suppressor、诊断 Provider 与 Lint 矩阵在此版本验证。八个 XML PSI 接口签名一致不能证明整个扩展可直接用于 271；263 结果严格标记为历史基线，不得代替 271 生产验收。
 
 维护工具与加载要求：
@@ -600,7 +602,7 @@ omp plugin install --force omp-intellij@omp-intellij
 1. **原生入口验收**：先按 §4.0 发现标准能力及 MCP schema，再在 271 Android 隔离工程执行 §5–8、§14 的对应正反例，记录具体 URI、范围与规则结果。完整满足契约的项目直接使用原生实现；不满足的项目执行下述 JVM 补齐规格。是否进入补齐分支由同一验收集合决定，不重新选择架构，不以非空响应或工具名称判断完成。
 2. **缺口的 JVM 上下文与 A/B、definition 切换（已完成）**：已建立 271 的构建/加载与版本校验，直接读取模块/SDK/依赖及当前 XML PSI；完成原生目标并存、`DirectNavigationProvider` 源码优先级和错误传播验收，一次性切换并删除了 `src/android/navigation.ts`、`resource-resolver.ts`、`xml.ts`、`types.ts`、`src/shared/navigation-relay.ts` 及 `saxes`。
 3. **阶段 C/D**：仅对原生验收未满足的项实施 §7/§8；资源 references Provider 与字段命令共用 JVM 服务，Compose 抑制复用原生检查扩展机制。已通过原生验收的项不重复注册 Provider/suppressor。
-4. **阶段 H 与发布资产**：按 §14 正反例判定现有诊断是否完整。原生满足时不加载重复 Lint；缺口分支使用下文 6 JAR 及 OmpLint Provider 规格，在 271 全矩阵通过后发布。未构建模型与构建产物来源分别验收；资产数量按实际启用的自有模块记录，不为了凑固定 JAR 数量重复分发上游实现。
+4. **阶段 H 与发布资产**：271 原生正反例已确认规则缺口；后续按 §14 实现 `AndroidLintProvider` 并验证对应依赖，在全矩阵通过后发布。未构建模型与构建产物来源分别验收；资产数量按实际启用模块记录，不重复分发原生已提供的实现。
 5. **阶段 E**：独立 `prepare`/`cleanup`、窄 DAP 生命周期组合、明确超时单位。
 6. **阶段 F 和 G**：把新增路径纳入故障矩阵，按复现修复；G 保持现状。
 
@@ -627,25 +629,25 @@ npm pack --dry-run --json --ignore-scripts
 
 ### 13.3 最终验收矩阵
 
-| 阶段              | 完成条件                                                                                                                                                                                                  | 当前状态                                                                                   |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| A                 | 真实安装链的标准 documentSymbol 返回 §5 的正式符号树；优先采用原生，原生不满足时才加载自有 JVM Provider。范围、未保存内容、层级/平面、错误 XML 和非 Android 行为均通过                                    | **已完成**（`271.2085.0` 实测通过）                                                        |
-| B/definition 迁移 | 三组件 false/true 精确到位置，包含当前属性且无无关类；KDoc 和别名语义保持；原有 R/XML 与 Manifest definition 无回归；TS XML 业务链已删除                                                                  | **已完成**（`271.2085.0` 实测通过，旧 TS 链与 `saxes` 已删除）                             |
-| C                 | 三处 nav_settings、合法零引用、限定符/变体/模块隔离、来源失效、内存多文件真实搜索中取消全部通过                                                                                                           | 待实施                                                                                     |
-| D                 | 七项正反例及 TestFunctionName、注册生命周期和取消通过，无普通诊断回归                                                                                                                                     | **已完成**（`271.2085.0` 实测通过）                                                        |
-| E                 | 实际设备双场景断点、栈、变量、单步、detach、forward 所有权和失败清理通过                                                                                                                                  | 待实施（原生 DAP 双场景已验证）                                                            |
-| F                 | 故障后旧请求结束、资源释放，新会话真实语义查询可用，其他工程不受影响                                                                                                                                      | **A/B 与 definition 路径已验证通过**（含在途取消 `-32800`、在途编辑 `-32801`、跨工程隔离） |
-| G                 | 默认开启 intellijExtensions 协议扩展，Rename 与 ModCommand 正常生成与执行；不新增 Bridge 黑名单                                                                                                           | **已完成**                                                                                 |
-| H                 | 标准 textDocument/diagnostic 满足原生编译诊断、Java/Kotlin NewApi 及 Compose 规则正反例；缺口分支另验 6 JAR、模型前提、lint.xml、故障隔离和缓存。MCP 多文件检查不代替标准请求验收，不重复加载已存在的规则 | 待实施（263 探针与 6 JAR 依赖集已验证，待 271 集成）                                       |
-| 发布              | npm 入口与实际启用的版本资产完整；自有 JAR 字节改变使 runtime hash 改变；本地安装发现与精确 ABI 验收通过。只有采用自有 Lint 分支时分发对应 6 个依赖 JAR                                                   | **单 JAR 资产链已完成并验收**（`154337` 字节，classfile 69）；阶段 H 6 JAR 待启用时并入    |
+| 阶段              | 完成条件                                                                                                                                                                                                  | 当前状态                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| A                 | 真实安装链的标准 documentSymbol 返回 §5 的正式符号树；优先采用原生，原生不满足时才加载自有 JVM Provider。范围、未保存内容、层级/平面、错误 XML 和非 Android 行为均通过                                    | **已完成**（`271.2085.0` 实测通过）                                                     |
+| B/definition 迁移 | 三组件 false/true 精确到位置，包含当前属性且无无关类；KDoc 和别名语义保持；原有 R/XML 与 Manifest definition 无回归；TS XML 业务链已删除                                                                  | **已完成**（`271.2085.0` 实测通过，旧 TS 链与 `saxes` 已删除）                          |
+| C                 | 三处 nav_settings、合法零引用、限定符/变体/模块隔离、来源失效、内存多文件真实搜索中取消全部通过                                                                                                           | **已完成**（271 集成 27/27；12,002 引用工作负载、取消/编辑后恢复；MyHook 三处精确引用） |
+| D                 | 七项正反例及 TestFunctionName、注册生命周期和取消通过，无普通诊断回归                                                                                                                                     | **已完成**（`271.2085.0` 实测通过）                                                     |
+| E                 | 实际设备双场景断点、栈、变量、单步、detach、forward 所有权和失败清理通过                                                                                                                                  | **已完成**（271 JVM/CLI 编排、fixture 与 MyHook 原生 DAP 验收，见 §9）                  |
+| F                 | 故障后旧请求结束、资源释放，新会话真实语义查询可用，其他工程不受影响                                                                                                                                      | **A/B/C 与 definition 路径已验证通过**；H 自有实现按后续 Provider 验收                  |
+| G                 | 尊重宿主初始化能力，透传 ModCommand 交互；不新增 Bridge 编辑引擎或命令黑名单                                                                                                                              | **协议透传已完成；交互式重构由 OMP 宿主兑现**                                           |
+| H                 | 标准 textDocument/diagnostic 满足原生编译诊断、Java/Kotlin NewApi 及 Compose 规则正反例；缺口分支另验 6 JAR、模型前提、lint.xml、故障隔离和缓存。MCP 多文件检查不代替标准请求验收，不重复加载已存在的规则 | **271 原生验证完成，规则缺口确认；自有实现待实施**，见专题文档原始用例摘要              |
+| 发布              | npm 入口与实际启用的版本资产完整；自有 JAR 字节改变使 runtime hash 改变；本地安装发现与精确 ABI 验收通过。只有采用自有 Lint 分支时分发对应 6 个依赖 JAR                                                   | **当前三 JAR 资产链已完成并验收**；阶段 H 的 Lint 依赖仅在缺口分支启用时并入            |
 
-生产完成后更新 README 并清除临时产物；不自动提交或覆盖远端。文档包含：
+生产完成后更新现有 `docs/` 并清除临时产物；根目录 README 按用户要求保持原样，不自动提交或覆盖远端。文档包含：
 1. **能力与环境**：A–H 的 LSP 方法、DAP 指令、CLI 命令和已验收环境；
 2. **两阶段调试用法**：`debug-attach-cli prepare` 与 `cleanup` 的参数、返回 JSON 结构与配合原生 DAP 工具的用法；
 3. **13 项错误码与排查**：环境、目标、租约、协议的状态及恢复建议；
 4. **Android Lint 边界**：单文件 pull 诊断、`Scope.JAVA_FILE` 源码规则、第三方规则白名单；
 5. **AGP 兼容范围**：区分 MyHook AGP `9.4.1` 的实测、其他版本待验收项，以及动态 DSL、flavor 和自定义资源根的限制；
-6. **资产清单**：记录目标版本 `resources/ils/271.2085.0/` 下当前发布的 `intellij-android.jar` 及后续阶段 H 启用时的 6 个 Lint 依赖 JAR 的版本、体积与 SHA-256。
+6. **资产清单**：目标版本当前发布 `intellij-android.jar`、`adblib-9.4.1.jar` 与 `adblib-tools-9.4.1.jar`，版本和 SHA-256 由 manifest 与构建/加载链核验；阶段 H 采用自有 Lint 时再记录对应 6 个依赖 JAR。
 
 ### 13.4 研究证据索引
 
@@ -661,11 +663,15 @@ npm pack --dry-run --json --ignore-scripts
 - `local://android-import-271-evidence.json`：干净 MyHook 副本的模块/库导出、导入任务、缺失 R.jar 和原生 XML 请求结果。
 - `local://xml-psi-271-evidence.json`、`local://xml-psi-271-source.java`：七组 XML PSI 实验、未保存文本、范围和局部错误恢复；手工提交文档分支未触发，不复制到生产。
 - `local://xml-provider-271-evidence.json`：原生 XML 大纲 Provider 的完整双向协议记录及核心 XML API 签名比较。
-- `local://ProbeXmlDocumentSymbolProvider.java`、`local://ProbeSymbolExtension.java`、`local://probe-plugin.xml`：实际加载的 271 大纲探针；符号类型、文件识别和 selectionRange 仍需按 §5 实现。
+- `local://ProbeXmlDocumentSymbolProvider.java`、`local://ProbeSymbolExtension.java`、`local://probe-plugin.xml`：历史 271 大纲探针；正式生产实现与符号类型、文件识别、selectionRange 验收已完成，见 §5。
 
 ## 14. H：内嵌官方 Android Lint 与 Jetpack Compose 规则诊断
 
 ### 14.1 实测基线
+
+当前 ILS `271.2085.0` 的原生正反例已在独立服务与隔离 MyHook 副本验证：Java/Kotlin 类型错误可检出并随修正清除；Android SDK 与 Compose 符号解析有效，但 `NewApi`、`UnrememberedMutableState` 的正例未检出，MCP 检查入口返回错误。完整环境、用例、实际诊断及范围见 `docs/ils-protocol-and-lifecycle.md` 的“ILS 271 原生诊断正反例”。本轮仅完成原生验证，以下自有 Lint 规格仍为后续实现；Provider 命名统一为 `AndroidLintProvider`。
+
+以下为历史 263 内嵌探针，不能当作 271 自有 Provider 已验收。
 
 在 ILS `263.7084.0`（JBR 25）同进程内运行官方 Android Lint（`ApiDetector`）与随 Jetpack Compose AAR 分发的 `UnrememberedStateDetector`，直接复用当前请求的 `ctx.project`、内存未保存 PSI（`PsiJavaFileImpl` / `KtFile`）与 K2 FIR UAST（`JavaUFile` / `KotlinUFile`），不启动外部 CLI 进程，不加载 `lint-psi` 替代编译器。
 
@@ -726,11 +732,11 @@ npm pack --dry-run --json --ignore-scripts
 
 1. **接口与语言注册**：
    - `LanguageServerExtension.getConfiguration()` 返回 `new LSConfigurationPiece(entries, Collections.emptyList(), Collections.emptyList())`。
-   - `entries` 包含 XML 大纲、definition/references Provider（阶段 A–C）、显式字段命令、`WorkspaceComponentEntry`（阶段 D）与 `OmpLintDiagnosticProvider`（阶段 H）。
+   - `entries` 包含 XML 大纲、definition/references Provider（阶段 A–C）、显式字段命令、`WorkspaceComponentEntry`（阶段 D）与 `AndroidLintProvider`（阶段 H）。
    - `LSConfigurationPiece` 第三个参数 `languages` 传空列表，避免与内置 XML、Java/Kotlin 插件重复注册语言描述。
-   - `OmpLintDiagnosticProvider.getSupportedLanguages()` 返回 `new LSLanguage("java", Language.ANY, Set.of("java"))` 与 `new LSLanguage("kotlin", Language.ANY, Set.of("kt"))`（`LSLanguage.equals/hashCode` 仅比对 `lspName`）。
+   - `AndroidLintProvider.getSupportedLanguages()` 返回 `new LSLanguage("java", Language.ANY, Set.of("java"))` 与 `new LSLanguage("kotlin", Language.ANY, Set.of("kt"))`（`LSLanguage.equals/hashCode` 仅比对 `lspName`）。
 2. **并发执行与 `Diagnostic` 字段映射**：
-   - 客户端请求 `textDocument/diagnostic` 时，ILS 的 `LSDiagnostic.getDiagnostics` 并发调用内置编译器诊断提供器与 `OmpLintDiagnosticProvider.getDiagnostics(server, handlerContext, params)`，合并为 `Flow<Diagnostic>`。
+   - 客户端请求 `textDocument/diagnostic` 时，ILS 的 `LSDiagnostic.getDiagnostics` 并发调用内置编译器诊断提供器与 `AndroidLintProvider.getDiagnostics(server, handlerContext, params)`，合并为 `Flow<Diagnostic>`。
    - 当前文件不属于 Android 模块（所在模块依赖中无 `android.jar`）时，直接返回空 `Flow`。
    - `Incident` 到 `com.jetbrains.lsp.protocol.Diagnostic` 的字段映射：
      - `range`：由当前已同步 `Document` 将 `incident.getStartOffset()` / `incident.getEndOffset()` 换算为零基 UTF-16 行列；
@@ -751,10 +757,10 @@ npm pack --dry-run --json --ignore-scripts
    - `Configuration` 通过 `LintClient.getConfiguration(project, driver)` 获取，支持项目 `lint.xml` 的 enable/disable、severity 覆盖与 `Severity.IGNORE` 过滤。
    - `getGradleVisitor()` 与 `getResources(project, scope)` 在仅启用 `Scope.JAVA_FILE` 时抛出 `UnsupportedOperationException`，并由 `Scope` 过滤确保不实例化 Gradle 或资源作用域规则。
 5. **结果缓存、容量上限与多根隔离**：
-   - ILS `LSDiagnostic.getDiagnostics` 将多路 provider 输出合并为单个 `DocumentDiagnosticReport(kind="full")`，不透传单 provider 的 `resultId` / `unchanged`；`OmpLintDiagnosticProvider` 始终返回完整 `Diagnostic` 流。
+   - ILS `LSDiagnostic.getDiagnostics` 将多路 provider 输出合并为单个 `DocumentDiagnosticReport(kind="full")`，不透传单 provider 的 `resultId` / `unchanged`；`AndroidLintProvider` 始终返回完整 `Diagnostic` 流。
    - 内部缓存采用定长 LRU 映射（上限 64 个文档条目），以 `(project.locationHash, uri, LSDocuments.getVersion / document.modificationStamp, 模型指纹[compileSdk/minSdk/namespace/变体], 已启用 Issue 集合, 规则 JAR 集合指纹)` 隔离存储。
    - 失效时机：`didChange` 失效当前条目；`didClose` 立即从缓存中移除并释放内存；`workspace/didChangeWatchedFiles`（`lint.xml` 或构建脚本变更）清空对应项目缓存。
-   - 同一 ILS 进程内共享一个 `OmpLintDiagnosticProvider`，缓存按 `project.locationHash` 分区；多工程隔离须通过验收。
+   - 同一 ILS 进程内共享一个 `AndroidLintProvider`，缓存按 `project.locationHash` 分区；多工程隔离须通过验收。
 6. **拉取模式约束**：
    - ILS `263.7084.0` 仅在 `fleet.lsp.protocol` 中包含 `publishDiagnostics` 协议常量，无主动推送实现；阶段 H 诊断通过 `textDocument/diagnostic` 拉取返回，验收时须确认客户端声明 `textDocument.diagnostic` 能力且服务端广告 `diagnosticProvider`。
    - `271.2085.0` 已记录 initialize 能力：`diagnosticProvider = { interFileDependencies: true, workspaceDiagnostics: false, workDoneProgress: false }`、`documentSymbolProvider = true`；历史探针的 `textDocument/diagnostic` 返回 `kind: "full"`。`workspaceDiagnostics: false` 表示不支持该 Provider 的 `workspace/diagnostic`，不禁止逐文件拉取或 MCP `lint_files`。是否包含 Android/Compose 规则以目标工程的规则正反例为准，不能仅靠 schema 或能力广告替代验收。
@@ -822,15 +828,15 @@ npm pack --dry-run --json --ignore-scripts
 
 对照 `JetBrains/android`（提交 `544c9ef8`），官方桌面插件采用「`LintExternalAnnotator` 单次分析并缓存 `LintProblemData` → 100+ 个 `AndroidLint<IssueId> extends AndroidLintInspectionBase` 读取缓存生成 `ProblemDescriptor` → `InspectionProfileImpl` 动态注册」的三段式架构，强依赖 `AndroidFacet`、`AndroidModel`/`LintModel` 与 `StudioResourceRepository`。ILS 发行包不含 `org.jetbrains.android` 且诊断出口为 `textDocument/diagnostic`，故按 LSP 承载点分层映射如下：
 
-| 官方能力             | 官方实现                                                      | ILS 承载点                                                                               | 实施方案                                                                                                                                                                                        | 状态                                                             |
-| -------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| 单文件 Lint 诊断     | `LintExternalAnnotator` + `LintProblemData`                   | `LSDiagnosticProvider`（`Flow<Diagnostic>`）                                             | `OmpLintClient` + `LintDriver` 单次执行 + 内部结果缓存                                                                                                                                          | 阶段 H 计划；263 探针通过                                        |
-| Lint 快速修复        | `LintIdeQuickFix`                                             | `LSCodeActionProvider` / `LSSimpleCodeActionProvider`                                    | 阶段 H 预填 `Diagnostic.data`，修复转换留作独立后续扩展                                                                                                                                         | 未纳入本次交付                                                   |
-| 抑制与配置           | `SuppressLintQuickFix`、`lint.xml`、`InspectionProfile`       | `LanguageInspectionSuppressors` + `LintXmlConfiguration`                                 | 阶段 D 抑制器 + `PositionXmlParser` 支撑 `lint.xml`                                                                                                                                             | 阶段 D/H 计划                                                    |
-| 第三方规则装载       | `ensureInspectionsRegistered` + `LintModel`                   | `JarFileIssueRegistry` + `CompositeIssueRegistry`                                        | 从库表中 classes.jar 的同级目录发现 jars/lint.jar                                                                                                                                               | 阶段 H 计划；263 探针通过                                        |
-| 模型属性解析         | `GradleAndroidModel` / `AndroidModuleSystem`                  | 共享 Android 工程上下文、库表、KtFile 与 Manifest PSI                                    | 导入模型优先，源码字面量与已构建产物补充；记录动态 DSL 限制                                                                                                                                     | 阶段 H 计划                                                      |
-| 资源与 Manifest 导航 | `StudioResourceRepository`、`PackageClassConverter`           | XML PSI、原生 definition/references/documentSymbol Provider + `DirectNavigationProvider` | 阶段 A–C 与既有 definition 共用 JVM 服务；保留 AGP 来源校验，删除 TS XML 业务                                                                                                                   | **阶段 A/B 与 definition 已完成（271 实测通过）**；阶段 C 待实施 |
-| 全工作区单次请求诊断 | `GlobalInspectionTool` / `AndroidLintGlobalInspectionContext` | 无（ILS 未提供 `workspace/diagnostic`；`workspaceDiagnostics: false`）                   | 仅代表不支持单次 `workspace/diagnostic` 请求，不禁止多文件并发/批量拉取 `textDocument/diagnostic` 或 MCP `lint_files`，但通用 MCP 不含 Android 规则，跨文件合并分析交由 Gradle `lintDebug` 执行 | 边界外                                                           |
+| 官方能力             | 官方实现                                                      | ILS 承载点                                                                               | 实施方案                                                                                                                                                                                        | 状态                                           |
+| -------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 单文件 Lint 诊断     | `LintExternalAnnotator` + `LintProblemData`                   | `LSDiagnosticProvider`（`Flow<Diagnostic>`）                                             | `OmpLintClient` + `LintDriver` 单次执行 + 内部结果缓存                                                                                                                                          | 阶段 H 计划；263 探针通过                      |
+| Lint 快速修复        | `LintIdeQuickFix`                                             | `LSCodeActionProvider` / `LSSimpleCodeActionProvider`                                    | 阶段 H 预填 `Diagnostic.data`，修复转换留作独立后续扩展                                                                                                                                         | 未纳入本次交付                                 |
+| 抑制与配置           | `SuppressLintQuickFix`、`lint.xml`、`InspectionProfile`       | `LanguageInspectionSuppressors` + `LintXmlConfiguration`                                 | 阶段 D 抑制器 + `PositionXmlParser` 支撑 `lint.xml`                                                                                                                                             | 阶段 D/H 计划                                  |
+| 第三方规则装载       | `ensureInspectionsRegistered` + `LintModel`                   | `JarFileIssueRegistry` + `CompositeIssueRegistry`                                        | 从库表中 classes.jar 的同级目录发现 jars/lint.jar                                                                                                                                               | 阶段 H 计划；263 探针通过                      |
+| 模型属性解析         | `GradleAndroidModel` / `AndroidModuleSystem`                  | 共享 Android 工程上下文、库表、KtFile 与 Manifest PSI                                    | 导入模型优先，源码字面量与已构建产物补充；记录动态 DSL 限制                                                                                                                                     | 阶段 H 计划                                    |
+| 资源与 Manifest 导航 | `StudioResourceRepository`、`PackageClassConverter`           | XML PSI、原生 definition/references/documentSymbol Provider + `DirectNavigationProvider` | 阶段 A–C 与既有 definition 共用 JVM 服务；保留 AGP 来源校验，删除 TS XML 业务                                                                                                                   | **A/B/C 与 definition 已完成（271 实测通过）** |
+| 全工作区单次请求诊断 | `GlobalInspectionTool` / `AndroidLintGlobalInspectionContext` | 无（ILS 未提供 `workspace/diagnostic`；`workspaceDiagnostics: false`）                   | 仅代表不支持单次 `workspace/diagnostic` 请求，不禁止多文件并发/批量拉取 `textDocument/diagnostic` 或 MCP `lint_files`，但通用 MCP 不含 Android 规则，跨文件合并分析交由 Gradle `lintDebug` 执行 | 边界外                                         |
 
 下表是协议要求与计划条款的对应关系，“已覆盖”指计划已写明，不代表生产验收通过。
 

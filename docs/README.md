@@ -8,12 +8,12 @@
 
 ## 专题文档索引
 
-| 文档名称                                                            | 核心主题                                                                                                                                                                         | 覆盖会话                           |
-| :------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------- |
-| [**1. Android JDWP 调试与运行时排障**](android-jdwp-debugging.md)   | Android ART 运行时 JDWP 调试、adblib proxy 编排、`variables` 10.3s presentation 超时定位与解决、会话级 MuteRenderer、深层对象展开基准、detach 与 PID 存活                        | `01a1b94e`, `01a196d5`             |
-| [**2. Android JVM 扩展与工程化体系**](android-jvm-extension.md)     | ILS JVM 插件 SPI 与 `plugin.xml` 声明、Android XML DocumentSymbols、Manifest 类属性反查引用、K2 Analysis API Compose 命名豁免、Gradle 9.8.0 规范化与资产完整性门禁、反编译器横评 | `01a1b64f`, `01a1b9a9`             |
-| [**3. ILS 私有协议与生命周期治理**](ils-protocol-and-lifecycle.md)  | ILS/VSIX 精确版本绑定、端口与资产校验、Agent 协议边界、虚拟源码、构建配置刷新、worktree 索引分叉实测                                                                             | `01a1a6dd`, `01a1b50a`, `01a1bbcc` |
-| [**4. DAP 代理、工作区隔离与测试体系**](dap-proxy-and-workspace.md) | 共享进程、文件系统大小写身份与安全迁移、构建根和模块上下文、连接记录回收、DAP 状态机及真实工程验收                                                                               | `01a19d14`, `01a19c16`, `01a1bbcc` |
+| 文档名称                                                            | 核心主题                                                                                                                                                  | 覆盖会话                           |
+| :------------------------------------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------- |
+| [**1. Android JDWP 调试与运行时排障**](android-jdwp-debugging.md)   | Android ART 运行时 JDWP 调试、adblib proxy 编排、`variables` 10.3s presentation 超时定位与解决、会话级 MuteRenderer、深层对象展开基准、detach 与 PID 存活 | `01a1b94e`, `01a196d5`             |
+| [**2. Android JVM 扩展与工程化体系**](android-jvm-extension.md)     | ILS JVM SPI、XML 大纲、Manifest 与资源声明代码引用、官方资源作用域依据、K2 Compose 命名抑制、Gradle 构建与版本资产校验                                    | `01a1b64f`, `01a1b9a9`, `01a1bbcc` |
+| [**3. ILS 私有协议与生命周期治理**](ils-protocol-and-lifecycle.md)  | ILS/VSIX 版本绑定、Agent 原生协议边界、虚拟源码、显式重载、worktree 索引分叉、271 原生 Android/Compose 诊断正反例                                         | `01a1a6dd`, `01a1b50a`, `01a1bbcc` |
+| [**4. DAP 代理、工作区隔离与测试体系**](dap-proxy-and-workspace.md) | 共享进程、文件系统大小写身份与安全迁移、构建根和模块上下文、连接记录回收、DAP 状态机及真实工程验收                                                        | `01a19d14`, `01a19c16`, `01a1bbcc` |
 
 ---
 

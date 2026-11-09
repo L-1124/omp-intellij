@@ -302,27 +302,16 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 
 #### ② 架构拓扑与规则聚合
 
-```text
-                             LSP textDocument/diagnostic
-                                         │
-                                         ▼
-                     ILS LSDiagnostic.getDiagnostics (Kotlin Flow)
-                                         │
-                     ┌───────────────────┴───────────────────┐
-                     ▼                                       ▼
-          内置编译器诊断 (Native)              OmpLintDiagnosticProvider (LSDiagnosticProvider)
-                                                             │
-                                                             ▼
-                                                LintDriver (复用内存 PSI/UAST)
-                                                             │
-                                        ┌────────────────────┴────────────────────┐
-                                        ▼                                         ▼
-                        内置系统规则 (tools.lint-checks)           AAR 自带规则 (Gradle 缓存 lint.jar)
-                                        │                                         │
-                               BuiltinIssueRegistry                     JarFileIssueRegistry
-                                        └────────────────────┬────────────────────┘
-                                                             ▼
-                                                   CompositeIssueRegistry
+```mermaid
+flowchart TD
+  request["textDocument/diagnostic"] --> aggregate["ILS LSDiagnostic.getDiagnostics"]
+  aggregate --> native["原生 Java/Kotlin 编译诊断"]
+  aggregate --> lint["AndroidLintProvider（阶段 H 规划）"]
+  lint --> driver["LintDriver：内存 PSI/UAST"]
+  driver --> builtin["BuiltinIssueRegistry：平台规则"]
+  driver --> aar["JarFileIssueRegistry：AAR lint.jar"]
+  builtin --> registry["CompositeIssueRegistry"]
+  aar --> registry
 ```
 
 - **内置规则 vs 随库分发规则**：
@@ -335,6 +324,24 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
     - 首次类加载与 `api-versions.xml` 解析：298 ms；
     - 后续增量触发（`MainActivity.kt` 内存编辑）：**16 ms – 39 ms**；
     - 纯 Java 文件（`JceHead.java`）`NewApi` 校验：**6 ms**。
+
+#### ③ ILS 271 原生诊断正反例（2026-11-08）
+
+独立服务、隔离 MyHook 副本，无自有 Android/Lint 扩展；用户工程和共享服务保持不变。环境为 ILS `271.2085.0`、JBR `25.0.4.1`、AGP `9.4.1`、`compileSdk=37`、`minSdk=21`、Compose BOM `2026.09.00`、Runtime `1.12.1`、Compose 插件 `2.4.20`。
+
+Gradle 导入完成后，标准 definition 将 `NotificationChannel` 定位到 `android.jar`，将 `mutableStateOf`、`remember` 定位到 Runtime 的 `SnapshotStateKt.class`、`ComposablesKt.class`。以下均通过未保存 `didChange` 后拉取标准 `textDocument/diagnostic`，报告为 `kind: "full"`：
+
+| 用例                                                                                                                  | 实际结果                                                                                 | 判定                 |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------- |
+| Java `int badType = "type mismatch error"` → `123`                                                                    | `type.incompatible`，范围 `5:25–47`；修正后清除                                          | 原生编译诊断有效     |
+| Kotlin `val badKotlinType: Int = "type mismatch error"` → `123`                                                       | `INITIALIZER_TYPE_MISMATCH`，范围 `34:27–28`；修正后清除                                 | 原生编译诊断有效     |
+| Java/Kotlin `NotificationChannel`：未保护、正确 `SDK_INT>=26`、错误 `>=25`、`TargetApi`、Suppress、恢复未保护，各六例 | 十二例全部 `items: []`；未保护及错误保护的正例均未检出                                   | `NewApi` 缺口成立    |
+| Composable 内直接 `mutableStateOf(0)`、`remember { mutableStateOf(0) }`、Suppress                                     | 均无 `UnrememberedMutableState`；大写函数仅出现 `FunctionName`，小写未 remember 对照为空 | Compose 规则缺口成立 |
+| 同文件未保护 API 26 调用与未 remember 状态                                                                            | 仅 `FunctionName`，两项 Android/Compose 规则均未检出                                     | 无原生规则合并结果   |
+
+`run-mcp-tool` 的 `get_file_problems` 与 `lint_files` 在本实例返回 `{"isError":true,"content":"com.intellij.codeInsight.daemon.DaemonCodeAnalyzer"}`，不能作为已验证可用的替代入口；该错误本身不证明内部故障机制。
+
+结论限于上述版本、实例和规则：原生通用编译诊断可用，未满足阶段 H 的 Android/Compose 正反例契约。阶段 H 的自有实现仍待开展，命名采用 `AndroidLintProvider`；本轮未分发 Lint 依赖或实现该 Provider。原始报告及代码切片归档于 `local://native271-diagnostic-evidence.json`。
 
 ---
 
