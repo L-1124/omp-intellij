@@ -46,8 +46,10 @@ public final class AndroidSources {
         private final Map<String, Integer> initialOpenVersions = new HashMap<>();
         private final Map<String, Integer> versions = new HashMap<>();
         private final Map<Path, Stamp> stamps = new HashMap<>();
+        private final Map<Path, DirectorySnapshot> directories = new HashMap<>();
         private final Map<Path, PsiFile> files = new HashMap<>();
         private final Map<Path, String> texts = new HashMap<>();
+        private boolean savedModelInputs;
         public final Map<com.intellij.openapi.module.Module, AndroidLayout> layouts = new HashMap<>();
 
         public Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file) {
@@ -72,6 +74,11 @@ public final class AndroidSources {
             return versions;
         }
 
+        public void useSavedModelInputs() {
+            savedModelInputs = true;
+        }
+
+
         public void verify() {
             ProgressManager.checkCanceled();
             for (var entry : versions.entrySet()) {
@@ -80,6 +87,10 @@ public final class AndroidSources {
             }
             for (var entry : stamps.entrySet()) {
                 if (!Objects.equals(entry.getValue(), stamp(entry.getKey())))
+                    throw new AndroidQueryException("content_modified", -32801);
+            }
+            for (var entry : directories.entrySet()) {
+                if (!Objects.equals(entry.getValue(), directorySnapshot(entry.getKey())))
                     throw new AndroidQueryException("content_modified", -32801);
             }
         }
@@ -102,6 +113,16 @@ public final class AndroidSources {
         if (!scope.stamps.containsKey(path)) scope.stamps.put(path, stamp(path));
     }
 
+    public static void trackDirectory(Path directory) {
+        if (directory == null) return;
+        Scope scope = CURRENT.get();
+        if (scope == null) return;
+        Path dir = directory.toAbsolutePath().normalize();
+        if (!scope.directories.containsKey(dir)) {
+            scope.directories.put(dir, directorySnapshot(dir));
+        }
+    }
+
     static boolean modifiedAfter(Path path, java.nio.file.attribute.FileTime time) {
         path = path.toAbsolutePath().normalize();
         track(path);
@@ -110,6 +131,29 @@ public final class AndroidSources {
     }
 
     private record Stamp(long size, java.nio.file.attribute.FileTime modified, Object key) {
+    }
+
+    private record DirectoryEntry(String name, boolean isDirectory, Stamp stamp) {
+    }
+
+    private record DirectorySnapshot(java.util.List<DirectoryEntry> entries) {
+    }
+
+    private static DirectorySnapshot directorySnapshot(Path dir) {
+        try {
+            if (!Files.isDirectory(dir)) return null;
+            try (var stream = Files.list(dir)) {
+                java.util.List<DirectoryEntry> entries = stream.map(p -> {
+                    String name = p.getFileName().toString();
+                    boolean isDir = Files.isDirectory(p);
+                    Stamp st = stamp(p);
+                    return new DirectoryEntry(name, isDir, st);
+                }).sorted(java.util.Comparator.comparing(DirectoryEntry::name)).toList();
+                return new DirectorySnapshot(entries);
+            }
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     private static Stamp stamp(Path path) {
@@ -145,17 +189,13 @@ public final class AndroidSources {
         }
     }
 
-    static PsiFile current(Project project, Path path) {
+    public static PsiFile current(Project project, Path path) {
         track(path);
         VirtualFile file = VirtualFileManager.getInstance().findFileByUrl(VfsUtilCore.pathToUrl(path.toAbsolutePath().normalize().toString()));
         observe(file);
         return file == null ? null : PsiManager.getInstance(project).findFile(file);
     }
 
-    public static String memoryText(Project project, Path path) {
-        PsiFile file = current(project, path);
-        return file == null ? text(path) : file.getText();
-    }
 
     public static Scope open(VirtualFile file) {
         return new Scope(null, file);
@@ -163,10 +203,12 @@ public final class AndroidSources {
 
     public static void observe(VirtualFile file) {
         Scope scope = CURRENT.get();
-        if (file == null || scope == null || scope.server == null) return;
-        String uri = com.jetbrains.ls.api.core.util.PositionKt.getUri(file);
-        if (!scope.versions.containsKey(uri)) {
-            scope.versions.put(uri, scope.initialOpenVersions.get(uri));
+        if (file == null || scope == null) return;
+        if (scope.server != null) {
+            String uri = com.jetbrains.ls.api.core.util.PositionKt.getUri(file);
+            if (!scope.versions.containsKey(uri)) {
+                scope.versions.put(uri, scope.initialOpenVersions.get(uri));
+            }
         }
     }
 
@@ -181,12 +223,13 @@ public final class AndroidSources {
         }
     }
 
-
     public static PsiFile kotlinScript(Project project, VirtualFile root) {
         Path path = Path.of(root.getPath(), "build.gradle.kts").toAbsolutePath().normalize();
-        PsiFile current = current(project, path);
-        if (current != null) return current;
-        Scope scope = CURRENT.get();
+        Scope scope = scope();
+        if (!scope.savedModelInputs) {
+            PsiFile current = current(project, path);
+            if (current != null) return current;
+        }
         if (scope.files.containsKey(path)) return scope.files.get(path);
         // ILS omits Gradle scripts from its source snapshot until didOpen.
         String text = text(path);
@@ -214,6 +257,19 @@ public final class AndroidSources {
         return file;
     }
 
+    public static XmlFile diskXml(Project project, Path path) {
+        path = path.toAbsolutePath().normalize();
+        track(path);
+        String text = text(path);
+        if (text == null) return null;
+        var virtualFile = virtualFile(path, XmlFileType.INSTANCE, com.intellij.openapi.util.text.StringUtil.convertLineSeparators(text));
+        com.intellij.psi.SingleRootFileViewProvider.doNotCheckFileSizeLimit(virtualFile);
+        var provider = new com.intellij.psi.SingleRootFileViewProvider(PsiManager.getInstance(project), virtualFile, false, XmlFileType.INSTANCE);
+        XmlFile file = (XmlFile) provider.getPsi(com.intellij.lang.xml.XMLLanguage.INSTANCE);
+        if (file == null) throw AndroidQueryException.modelUnavailable("Native XML parser unavailable");
+        return file;
+    }
+
     public static PsiFile navigationFile(Project project, Path path) {
         if (path.toString().endsWith(".xml")) return xml(project, path);
         track(path);
@@ -224,7 +280,8 @@ public final class AndroidSources {
         return provider.getPsi(com.intellij.openapi.fileTypes.PlainTextLanguage.INSTANCE);
     }
 
-    private static com.intellij.testFramework.LightVirtualFile virtualFile(Path source, com.intellij.openapi.fileTypes.FileType type, String text) {
+    private static com.intellij.testFramework.LightVirtualFile virtualFile(Path
+                                                                                   source, com.intellij.openapi.fileTypes.FileType type, String text) {
         return new com.intellij.testFramework.LightVirtualFile(source.getFileName().toString(), type, text) {
             @Override
             public String getPath() {

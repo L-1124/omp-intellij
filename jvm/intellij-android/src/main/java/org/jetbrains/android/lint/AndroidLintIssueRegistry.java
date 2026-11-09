@@ -2,9 +2,6 @@ package org.jetbrains.android.lint;
 
 import com.android.tools.lint.checks.ApiDetector;
 import com.android.tools.lint.checks.BuiltinIssueRegistry;
-import com.android.tools.lint.checks.ManifestDetector;
-import com.android.tools.lint.checks.ManifestTypoDetector;
-import com.android.tools.lint.checks.NamespaceDetector;
 import com.android.tools.lint.client.api.IssueRegistry;
 import com.android.tools.lint.detector.api.Implementation;
 import com.android.tools.lint.detector.api.Issue;
@@ -12,28 +9,27 @@ import com.android.tools.lint.detector.api.Platform;
 import com.android.tools.lint.detector.api.Scope;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 
 public class AndroidLintIssueRegistry extends BuiltinIssueRegistry {
-    private static final List<Issue> FILTERED_ISSUES;
-    private static final List<Issue> NO_API_DETECTOR_ISSUES;
+    private static final java.util.Map<Scope, List<Issue>> EDITOR_ISSUES = new java.util.EnumMap<>(Scope.class);
+    private static final java.util.Map<Scope, List<Issue>> NO_API_ISSUES = new java.util.EnumMap<>(Scope.class);
 
     static {
-        List<Issue> filtered = new ArrayList<>();
-        List<Issue> noApi = new ArrayList<>();
         BuiltinIssueRegistry builtin = new BuiltinIssueRegistry();
-        for (Issue issue : builtin.getIssues()) {
-            if (isIssueSupported(issue)) {
-                filtered.add(issue);
-                if (!isApiDetectorIssue(issue)) {
-                    noApi.add(issue);
+        for (Scope scope : List.of(Scope.JAVA_FILE, Scope.RESOURCE_FILE, Scope.MANIFEST)) {
+            List<Issue> filtered = new ArrayList<>();
+            List<Issue> noApi = new ArrayList<>();
+            for (Issue issue : builtin.getIssues()) {
+                if (isIssueSupported(issue, scope)) {
+                    filtered.add(issue);
+                    if (!isApiDetectorIssue(issue)) noApi.add(issue);
                 }
             }
+            EDITOR_ISSUES.put(scope, List.copyOf(filtered));
+            NO_API_ISSUES.put(scope, List.copyOf(noApi));
         }
-        FILTERED_ISSUES = Collections.unmodifiableList(filtered);
-        NO_API_DETECTOR_ISSUES = Collections.unmodifiableList(noApi);
     }
 
     private final List<Issue> issues;
@@ -43,11 +39,15 @@ public class AndroidLintIssueRegistry extends BuiltinIssueRegistry {
     }
 
     public AndroidLintIssueRegistry(boolean minSdkPremiseMissing) {
-        this.issues = minSdkPremiseMissing ? NO_API_DETECTOR_ISSUES : FILTERED_ISSUES;
+        this(minSdkPremiseMissing, Scope.JAVA_FILE);
     }
 
-    public static IssueRegistry create(boolean minSdkPremiseMissing) {
-        return new AndroidLintIssueRegistry(minSdkPremiseMissing);
+    public AndroidLintIssueRegistry(boolean minSdkPremiseMissing, Scope scope) {
+        this.issues = (minSdkPremiseMissing ? NO_API_ISSUES : EDITOR_ISSUES).getOrDefault(scope, List.of());
+    }
+
+    public static IssueRegistry create(boolean minSdkPremiseMissing, Scope scope) {
+        return new AndroidLintIssueRegistry(minSdkPremiseMissing, scope);
     }
 
     @Override
@@ -60,7 +60,7 @@ public class AndroidLintIssueRegistry extends BuiltinIssueRegistry {
         return false;
     }
 
-    static boolean isIssueSupported(Issue issue) {
+    static boolean isIssueSupported(Issue issue, Scope scope) {
         if (issue == null) {
             return false;
         }
@@ -72,48 +72,7 @@ public class AndroidLintIssueRegistry extends BuiltinIssueRegistry {
         if (impl == null) {
             return false;
         }
-        if (impl.getDetectorClass() == ApiDetector.class) {
-            return true;
-        }
-        if (issue.equals(NamespaceDetector.UNUSED)
-                || issue.equals(ManifestTypoDetector.ISSUE)
-                || issue.equals(ManifestDetector.WRONG_PARENT)) {
-            return false;
-        }
-        EnumSet<Scope> mainScope = impl.getScope();
-        EnumSet<Scope>[] analysisScopes = impl.getAnalysisScopes();
-        boolean hasJavaFile = mainScope.contains(Scope.JAVA_FILE);
-        if (!hasJavaFile && analysisScopes != null) {
-            for (EnumSet<Scope> as : analysisScopes) {
-                if (as != null && as.contains(Scope.JAVA_FILE)) {
-                    hasJavaFile = true;
-                    break;
-                }
-            }
-        }
-        if (!hasJavaFile) {
-            return false;
-        }
-
-        boolean containsClassScope = mainScope.contains(Scope.CLASS_FILE)
-                || mainScope.contains(Scope.ALL_CLASS_FILES)
-                || mainScope.contains(Scope.JAVA_LIBRARIES);
-        if (containsClassScope) {
-            if (analysisScopes == null || analysisScopes.length == 0) {
-                return false;
-            }
-            for (EnumSet<Scope> as : analysisScopes) {
-                if (as != null
-                        && !as.contains(Scope.CLASS_FILE)
-                        && !as.contains(Scope.ALL_CLASS_FILES)
-                        && !as.contains(Scope.JAVA_LIBRARIES)
-                        && as.contains(Scope.JAVA_FILE)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return true;
+        return impl.isAdequate(EnumSet.of(scope));
     }
 
     static boolean isApiDetectorIssue(Issue issue) {

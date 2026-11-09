@@ -50,6 +50,22 @@ public class AndroidLintProject extends Project {
     }
 
     @Override
+    public java.util.List<File> getResourceFolders() {
+        return model == null ? java.util.List.of() : model.resourceFolders();
+    }
+
+    @Override
+    public java.util.List<File> getManifestFiles() {
+        if (model == null) return java.util.List.of();
+        if (getSubset() != null) {
+            for (File file : getSubset()) {
+                if (model.manifestFiles().contains(file)) return java.util.List.of(file);
+            }
+        }
+        return model.manifestFiles();
+    }
+
+    @Override
     public boolean isAndroidProject() {
         return true;
     }

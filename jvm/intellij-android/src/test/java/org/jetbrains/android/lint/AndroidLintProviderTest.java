@@ -94,14 +94,6 @@ public class AndroidLintProviderTest {
     }
 
     @Test
-    public void sourceOnlyAnalysisUsesAnEmptyResourceRepository() {
-        var repository = new AndroidLintClient(null, null, "").getResources(null, ResourceRepositoryScope.ALL_DEPENDENCIES);
-        assertEquals(List.of(), repository.getResources(com.android.ide.common.rendering.api.ResourceNamespace.RES_AUTO,
-                com.android.resources.ResourceType.STRING, "missing"));
-        assertEquals(java.util.Set.of(), repository.getNamespaces());
-    }
-
-    @Test
     public void rangesUseUtf16OffsetsAndClampAtDocumentEnd() {
         var document = new DocumentImpl("a\uD83D\uDE00z\nnext");
         assertEquals(new Range(new Position(0, 1), new Position(0, 3)),
@@ -133,6 +125,25 @@ public class AndroidLintProviderTest {
             assertTrue(issue.getId(), java.util.Arrays.stream(implementation.getAnalysisScopes())
                     .anyMatch(scope -> scope.contains(Scope.JAVA_FILE) && scope.stream().noneMatch(bytecode::contains)));
         }
+    }
+
+    @Test
+    public void editorScopesRequireAllPrerequisitesOrACompleteAnalysisAlternative() {
+        var mixed = new Implementation(TestDetector.class,
+                EnumSet.of(Scope.RESOURCE_FILE, Scope.JAVA_FILE));
+        var issue = Issue.create("MixedInputs", "Mixed inputs", "Needs both inputs.",
+                Category.CORRECTNESS, 5, Severity.WARNING, mixed);
+        assertFalse(AndroidLintIssueRegistry.isIssueSupported(issue, Scope.RESOURCE_FILE));
+        assertFalse(AndroidLintIssueRegistry.isIssueSupported(issue, Scope.JAVA_FILE));
+        var incremental = new Implementation(TestDetector.class,
+                EnumSet.of(Scope.RESOURCE_FILE, Scope.JAVA_FILE), EnumSet.of(Scope.RESOURCE_FILE));
+        var partial = Issue.create("IncrementalInputs", "Incremental inputs", "Supports a single XML file.",
+                Category.CORRECTNESS, 5, Severity.WARNING, incremental);
+        assertTrue(AndroidLintIssueRegistry.isIssueSupported(partial, Scope.RESOURCE_FILE));
+        assertFalse(AndroidLintIssueRegistry.isIssueSupported(partial, Scope.MANIFEST));
+    }
+
+    public static final class TestDetector extends Detector implements XmlScanner {
     }
 
     @Test

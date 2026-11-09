@@ -1,5 +1,6 @@
 package org.jetbrains.android.lint;
 
+import com.android.tools.lint.model.LintModelAndroidLibrary;
 import com.android.tools.lint.model.LintModelLibrary;
 import com.android.tools.lint.model.LintModelModule;
 import com.android.tools.lint.model.LintModelModuleType;
@@ -14,6 +15,7 @@ import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.roots.LibraryOrderEntry;
 import com.intellij.openapi.roots.ModuleRootManager;
+import com.intellij.openapi.roots.ModuleOrderEntry;
 import com.intellij.openapi.roots.OrderEntry;
 import com.intellij.openapi.roots.OrderRootType;
 import com.intellij.openapi.vfs.VfsUtilCore;
@@ -24,6 +26,8 @@ import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.psi.xml.XmlFile;
 import com.intellij.psi.xml.XmlTag;
 import org.jetbrains.android.context.AndroidContext;
+import org.jetbrains.android.context.AndroidQueryException;
+import org.jetbrains.android.resource.AndroidLayout;
 import org.jetbrains.android.resource.AndroidSources;
 import org.jetbrains.kotlin.psi.KtAnonymousInitializer;
 import org.jetbrains.kotlin.psi.KtBinaryExpression;
@@ -49,10 +53,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.regex.Matcher;
@@ -77,34 +84,174 @@ public final class AndroidLintModelResolver {
     }
 
     public static AndroidLintModel resolve(Project project, VirtualFile mainFile) {
+        return resolve(project, mainFile, null);
+    }
+
+    static AndroidLintModel resolve(Project project, VirtualFile mainFile, Module importedModule) {
         if (project == null || project.isDisposed() || mainFile == null) return null;
         ProgressManager.checkCanceled();
 
-        Module module = AndroidContext.findModule(project, mainFile);
+        Module module = importedModule != null ? importedModule : AndroidContext.findModule(project, mainFile);
+        if (module == null) {
+            String pathStr = mainFile.getPath();
+            Path filePath = null;
+            try {
+                filePath = Path.of(pathStr).toAbsolutePath().normalize();
+            } catch (Exception ignored) {
+            }
+            if (filePath != null) {
+                Module best = null;
+                int bestLen = -1;
+                for (Module candidate : ModuleManager.getInstance(project).getModules()) {
+                    if (candidate.isDisposed()) continue;
+                    VirtualFile rootVf = AndroidContext.findModuleRoot(candidate);
+                    if (rootVf != null) {
+                        try {
+                            Path rootPath = Path.of(rootVf.getPath()).toAbsolutePath().normalize();
+                            if (filePath.startsWith(rootPath)) {
+                                int len = rootPath.getNameCount();
+                                if (len > bestLen) {
+                                    bestLen = len;
+                                    best = candidate;
+                                }
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    for (VirtualFile contentRoot : ModuleRootManager.getInstance(candidate).getContentRoots()) {
+                        try {
+                            Path rootPath = Path.of(contentRoot.getPath()).toAbsolutePath().normalize();
+                            if (filePath.startsWith(rootPath)) {
+                                int len = rootPath.getNameCount();
+                                if (len > bestLen) {
+                                    bestLen = len;
+                                    best = candidate;
+                                }
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                module = best;
+            }
+        }
         if (module == null || module.isDisposed()) return null;
 
+        boolean isXml = mainFile.getName().endsWith(".xml");
         Module androidModule = null;
-        if (isAndroidModule(module)) {
-            androidModule = module;
-        } else {
-            List<Module> candidates = new ArrayList<>();
-            for (Module candidate : ModuleManager.getInstance(project).getModules()) {
-                if (candidate.equals(module) || candidate.isDisposed()) continue;
-                if (!isAndroidModule(candidate)) continue;
-                if (candidate.getModuleWithDependenciesScope().isSearchInModuleContent(module)) {
-                    candidates.add(candidate);
+        if (isXml) {
+            Path mainPathCandidate = null;
+            try {
+                mainPathCandidate = Path.of(mainFile.getPath()).toAbsolutePath().normalize();
+            } catch (Exception ignored) {
+            }
+            final Path mainPath = mainPathCandidate;
+            if (mainPath != null) {
+                VirtualFile rawModuleRootVf = AndroidContext.findModuleRoot(module);
+                if (rawModuleRootVf != null) {
+                    Path rawModuleRoot = Path.of(rawModuleRootVf.getPath()).toAbsolutePath().normalize();
+                    Path parent = mainPath.getParent();
+                    Path grandParent = parent != null ? parent.getParent() : null;
+                    Path normGrandParent = grandParent != null ? grandParent.toAbsolutePath().normalize() : null;
+
+                    List<Module> matchingModules = new ArrayList<>();
+                    for (Module candidate : ModuleManager.getInstance(project).getModules()) {
+                        if (candidate.isDisposed()) continue;
+                        VirtualFile candRootVf = AndroidContext.findModuleRoot(candidate);
+                        if (candRootVf == null) continue;
+                        Path candRoot = Path.of(candRootVf.getPath()).toAbsolutePath().normalize();
+                        if (!rawModuleRoot.equals(candRoot)) continue;
+
+                        AndroidLayout layout = getLayout(candidate);
+                        if (layout == null) continue;
+
+                        boolean matchesManifest = layout.manifests != null && layout.manifests.stream()
+                                .anyMatch(m -> m.toAbsolutePath().normalize().equals(mainPath));
+                        boolean matchesResource = false;
+                        if (normGrandParent != null && layout.resources != null) {
+                            matchesResource = layout.resources.stream()
+                                    .anyMatch(r -> r.toAbsolutePath().normalize().equals(normGrandParent));
+                        }
+
+                        if (matchesManifest || matchesResource) {
+                            matchingModules.add(candidate);
+                        }
+                    }
+
+                    if (matchingModules.size() == 1) {
+                        androidModule = matchingModules.get(0);
+                    } else if (matchingModules.size() > 1) {
+                        List<Module> withRClasspath = new ArrayList<>();
+                        for (Module m : matchingModules) {
+                            if (hasRClasspath(m, rawModuleRoot)) {
+                                withRClasspath.add(m);
+                            }
+                        }
+                        if (withRClasspath.size() == 1) {
+                            androidModule = withRClasspath.get(0);
+                        } else {
+                            List<Module> pool = !withRClasspath.isEmpty() ? withRClasspath : matchingModules;
+                            List<Module> withVariant = new ArrayList<>();
+                            for (Module m : pool) {
+                                VirtualFile mRoot = AndroidContext.findModuleRoot(m);
+                                if (mRoot != null && AndroidContext.resolveVariant(m, mRoot) != null) {
+                                    withVariant.add(m);
+                                }
+                            }
+                            if (withVariant.size() == 1) {
+                                androidModule = withVariant.get(0);
+                            } else {
+                                List<Module> androidPool = pool.stream()
+                                        .filter(AndroidLintModelResolver::isAndroidModule)
+                                        .toList();
+                                if (androidPool.size() == 1) {
+                                    androidModule = androidPool.get(0);
+                                } else {
+                                    List<Module> mainSources = androidPool.stream()
+                                            .filter(m -> m.getName().endsWith(".main")).toList();
+                                    if (mainSources.size() == 1) androidModule = mainSources.getFirst();
+                                    else throw AndroidQueryException.modelUnavailable(
+                                            "Ambiguous Android XML source-set owner: " + mainPath);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            if (candidates.isEmpty()) return null;
-
-            candidates.sort((a, b) -> {
-                boolean aApp = isAppModule(project, a);
-                boolean bApp = isAppModule(project, b);
-                if (aApp != bApp) return aApp ? -1 : 1;
-                return a.getName().compareTo(b.getName());
-            });
-            androidModule = candidates.get(0);
         }
+
+        if (androidModule == null) {
+            if (isAndroidModule(module)) {
+                androidModule = module;
+            } else if (isXml) {
+                AndroidLayout layout = getLayout(module);
+                if (layout != null && (layout.android || !layout.manifests.isEmpty() || !layout.resources.isEmpty())) {
+                    androidModule = module;
+                } else {
+                    return null;
+                }
+            } else {
+                List<Module> candidates = new ArrayList<>();
+                for (Module candidate : ModuleManager.getInstance(project).getModules()) {
+                    if (candidate.equals(module) || candidate.isDisposed()) continue;
+                    if (!isAndroidModule(candidate)) continue;
+                    if (candidate.getModuleWithDependenciesScope().isSearchInModuleContent(module)) {
+                        candidates.add(candidate);
+                    }
+                }
+                if (candidates.isEmpty()) return null;
+
+                candidates.sort((a, b) -> {
+                    boolean aApp = isAppModule(project, a);
+                    boolean bApp = isAppModule(project, b);
+                    if (aApp != bApp) return aApp ? -1 : 1;
+                    return a.getName().compareTo(b.getName());
+                });
+                androidModule = candidates.get(0);
+            }
+        }
+        if (isXml) module = androidModule;
+
 
         VirtualFile moduleRootVf = AndroidContext.findModuleRoot(androidModule);
         if (moduleRootVf == null) return null;
@@ -187,16 +334,6 @@ public final class AndroidLintModelResolver {
         }
 
         String variant = AndroidContext.resolveVariant(androidModule, moduleRootVf);
-        if (variant == null) {
-            String name = androidModule.getName();
-            int dot = name.lastIndexOf('.');
-            if (dot >= 0 && dot + 1 < name.length()) {
-                String suffix = name.substring(dot + 1);
-                if (!Set.of("main", "unitTest", "androidTest", "test").contains(suffix)) {
-                    variant = suffix;
-                }
-            }
-        }
 
         LintModelModule lintModelModule = null;
         LintModelVariant lintModelVariant = null;
@@ -362,10 +499,9 @@ public final class AndroidLintModelResolver {
                 minSdkPremiseMissing = false;
             }
         }
-
+        CleanAstResult ast = null;
         if (lintModelModule == null) {
             PsiFile script = AndroidSources.kotlinScript(project, moduleRootVf);
-            CleanAstResult ast = null;
             if (script instanceof KtFile ktFile) {
                 ast = parseCleanAst(ktFile);
                 if (compileSdk == null && ast.compileSdk() != null) {
@@ -385,41 +521,68 @@ public final class AndroidLintModelResolver {
             }
 
             boolean allowManifestFallback = (ast == null || !ast.minSdkUnsafe());
-            Path manifestPath = moduleRoot.resolve("src/main/AndroidManifest.xml");
-            if ((minSdk == null && allowManifestFallback) || targetSdk == null || namespace == null) {
-                XmlFile xmlFile = AndroidSources.xml(project, manifestPath);
-                if (xmlFile != null && xmlFile.getRootTag() != null) {
-                    XmlTag rootTag = xmlFile.getRootTag();
-                    XmlTag usesSdk = rootTag.findFirstSubTag("uses-sdk");
-                    if (usesSdk != null) {
-                        if (minSdk == null && allowManifestFallback) {
-                            String minAttr = usesSdk.getAttributeValue("minSdkVersion", AndroidContext.ANDROID_NS);
-                            if (minAttr == null) minAttr = usesSdk.getAttributeValue("android:minSdkVersion");
-                            if (minAttr != null && minAttr.matches("^\\d+$")) {
-                                try {
-                                    minSdk = Integer.parseInt(minAttr);
-                                    minSdkPremiseMissing = false;
-                                } catch (NumberFormatException overflow) {
-                                    minSdk = null;
-                                    minSdkPremiseMissing = true;
-                                }
-                            }
-                        }
-                        if (targetSdk == null) {
-                            String targetAttr = usesSdk.getAttributeValue("targetSdkVersion", AndroidContext.ANDROID_NS);
-                            if (targetAttr == null) targetAttr = usesSdk.getAttributeValue("android:targetSdkVersion");
-                            if (targetAttr != null && targetAttr.matches("^\\d+$")) {
-                                try {
-                                    targetSdk = Integer.parseInt(targetAttr);
-                                } catch (NumberFormatException overflow) {
-                                    targetSdk = null;
-                                }
-                            }
-                        }
+            List<Path> confirmedManifests = new ArrayList<>();
+            AndroidLayout layout = getLayout(androidModule);
+            if (layout != null && layout.manifests != null) {
+                for (Path mf : layout.manifests) {
+                    Path norm = mf.toAbsolutePath().normalize();
+                    AndroidSources.observeCompiledArchive(norm);
+                    if (Files.isRegularFile(norm) && !confirmedManifests.contains(norm)) {
+                        confirmedManifests.add(norm);
                     }
-                    if (namespace == null) {
-                        String pkg = rootTag.getAttributeValue("package");
-                        if (pkg != null && !pkg.isBlank()) namespace = pkg;
+                }
+            }
+            if (variant != null) {
+                Path varMf = moduleRoot.resolve("src").resolve(variant).resolve("AndroidManifest.xml").normalize();
+                if ((layout == null || layout.manifests.contains(varMf))
+                        && Files.isRegularFile(varMf) && !confirmedManifests.contains(varMf)) {
+                    confirmedManifests.add(varMf);
+                }
+            }
+            Path mainMf = moduleRoot.resolve("src/main/AndroidManifest.xml").normalize();
+            if ((layout == null || layout.manifests.contains(mainMf))
+                    && Files.isRegularFile(mainMf) && !confirmedManifests.contains(mainMf)) {
+                confirmedManifests.add(mainMf);
+            }
+
+            for (Path manifestPath : confirmedManifests) {
+                if ((minSdk == null && allowManifestFallback) || targetSdk == null || namespace == null) {
+                    XmlFile xmlFile = isXml && manifestPath.equals(mainFile.toNioPath().toAbsolutePath().normalize())
+                            ? AndroidSources.xml(project, manifestPath) : AndroidSources.diskXml(project, manifestPath);
+                    if (xmlFile != null && xmlFile.getRootTag() != null) {
+                        XmlTag rootTag = xmlFile.getRootTag();
+                        XmlTag usesSdk = rootTag.findFirstSubTag("uses-sdk");
+                        if (usesSdk != null) {
+                            if (minSdk == null && allowManifestFallback) {
+                                String minAttr = usesSdk.getAttributeValue("minSdkVersion", AndroidContext.ANDROID_NS);
+                                if (minAttr == null) minAttr = usesSdk.getAttributeValue("android:minSdkVersion");
+                                if (minAttr != null && minAttr.matches("^\\d+$")) {
+                                    try {
+                                        minSdk = Integer.parseInt(minAttr);
+                                        minSdkPremiseMissing = false;
+                                    } catch (NumberFormatException overflow) {
+                                        minSdk = null;
+                                        minSdkPremiseMissing = true;
+                                    }
+                                }
+                            }
+                            if (targetSdk == null) {
+                                String targetAttr = usesSdk.getAttributeValue("targetSdkVersion", AndroidContext.ANDROID_NS);
+                                if (targetAttr == null)
+                                    targetAttr = usesSdk.getAttributeValue("android:targetSdkVersion");
+                                if (targetAttr != null && targetAttr.matches("^\\d+$")) {
+                                    try {
+                                        targetSdk = Integer.parseInt(targetAttr);
+                                    } catch (NumberFormatException overflow) {
+                                        targetSdk = null;
+                                    }
+                                }
+                            }
+                        }
+                        if (namespace == null) {
+                            String pkg = rootTag.getAttributeValue("package");
+                            if (pkg != null && !pkg.isBlank()) namespace = pkg;
+                        }
                     }
                 }
             }
@@ -436,11 +599,8 @@ public final class AndroidLintModelResolver {
             compileTarget = "android-" + compileSdk;
         }
 
-        Path projectLintXml = projectRoot.resolve("lint.xml");
-        Path moduleLintXml = moduleRoot.resolve("lint.xml");
-        String rootLintXmlText = AndroidSources.memoryText(project, projectLintXml);
-        String moduleLintXmlText = projectLintXml.equals(moduleLintXml) ? null : AndroidSources.memoryText(project, moduleLintXml);
-        String lintXmlFingerprint = computeLintXmlFingerprint(rootLintXmlText, moduleLintXmlText);
+        List<Path> configFiles = AndroidLintClient.configurationFiles(projectRoot, moduleRoot);
+        String lintXmlFingerprint = computeLintXmlFingerprint(configFiles);
 
         List<Path> trackedXmls = new ArrayList<>(candidateXmls);
         for (Path f : modelXmlFiles) {
@@ -464,6 +624,20 @@ public final class AndroidLintModelResolver {
                 trackedXmls
         );
 
+        AndroidLintResources.Inputs xmlInputs = resolveXmlInputs(
+                project,
+                androidModule,
+                moduleRoot,
+                variant,
+                lintModelVariant,
+                minSdk,
+                namespace,
+                minSdkPremiseMissing,
+                ast != null && ast.minSdkUnsafe()
+        );
+
+        String combinedFingerprint = fingerprint + ":" + xmlInputs.fingerprint();
+
         return new AndroidLintModel(
                 module,
                 androidModule,
@@ -482,8 +656,9 @@ public final class AndroidLintModelResolver {
                 lintModelVariant,
                 ruleJars,
                 ruleJarFingerprints,
-                fingerprint,
-                lintXmlFingerprint
+                combinedFingerprint,
+                lintXmlFingerprint,
+                xmlInputs
         );
     }
 
@@ -714,7 +889,7 @@ public final class AndroidLintModelResolver {
                                 if ("com.android.application".equals(id)) return Boolean.TRUE;
                                 if ("com.android.library".equals(id)) return Boolean.FALSE;
                             } else if (pName.equals("alias") && pCall.getValueArguments().size() == 1) {
-                                KtExpression arg = pCall.getValueArguments().get(0).getArgumentExpression();
+                                KtExpression arg = pCall.getValueArguments().getFirst().getArgumentExpression();
                                 if (arg != null) {
                                     String text = arg.getText();
                                     if (text.equals("libs.plugins.android.application") || text.endsWith(".android.application")) {
@@ -813,13 +988,23 @@ public final class AndroidLintModelResolver {
         return value.toString();
     }
 
-    private static String computeLintXmlFingerprint(String rootText, String moduleText) {
-        if (rootText == null && moduleText == null) return "absent";
+    private static String computeLintXmlFingerprint(List<Path> configFiles) {
+        if (configFiles == null || configFiles.isEmpty()) return "absent";
+        boolean anyPresent = false;
         StringBuilder sb = new StringBuilder();
-        sb.append("root:").append(rootText != null ? sha256(rootText) : "none");
-        if (moduleText != null) {
-            sb.append(";module:").append(sha256(moduleText));
+        for (Path p : configFiles) {
+            Path norm = p.toAbsolutePath().normalize();
+            String text = AndroidSources.text(norm);
+            sb.append(norm).append(':');
+            if (text != null) {
+                anyPresent = true;
+                sb.append(sha256(text));
+            } else {
+                sb.append("absent");
+            }
+            sb.append(';');
         }
+        if (!anyPresent) return "absent";
         return sha256(sb.toString());
     }
 
@@ -882,5 +1067,397 @@ public final class AndroidLintModelResolver {
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static AndroidLintResources.Inputs resolveXmlInputs(
+            Project project,
+            Module androidModule,
+            Path moduleRoot,
+            String variant,
+            LintModelVariant lintModelVariant,
+            Integer minSdk,
+            String namespace,
+            boolean minSdkPremiseMissing,
+            boolean minSdkUnsafe
+    ) {
+        List<Path> resourceRoots = new ArrayList<>();
+        List<Path> manifests = new ArrayList<>();
+        Path reliableMerged = null;
+        Path reliableBlame = null;
+
+        if (lintModelVariant != null) {
+            for (var provider : lintModelVariant.getSourceProviders()) {
+                for (File res : provider.getResDirectories()) {
+                    Path resPath = res.toPath().toAbsolutePath().normalize();
+                    if (!resourceRoots.contains(resPath)) {
+                        resourceRoots.add(resPath);
+                    }
+                }
+                for (File mf : provider.getManifestFiles()) {
+                    Path mfPath = mf.toPath().toAbsolutePath().normalize();
+                    if (!manifests.contains(mfPath)) {
+                        manifests.add(mfPath);
+                    }
+                }
+            }
+
+            File merged = lintModelVariant.getMergedManifest();
+            File blame = lintModelVariant.getManifestMergeReport();
+            if (merged != null && merged.isFile()) {
+                Path mergedPath = merged.toPath().toAbsolutePath().normalize();
+                boolean reliable = true;
+                try {
+                    var mergedTime = Files.getLastModifiedTime(mergedPath);
+                    for (Path mf : manifests) {
+                        if (Files.isRegularFile(mf)) {
+                            if (Files.getLastModifiedTime(mf).compareTo(mergedTime) > 0) {
+                                reliable = false;
+                                break;
+                            }
+                        }
+                    }
+                } catch (CancellationException e) {
+                    throw e;
+                } catch (Exception e) {
+                    reliable = false;
+                }
+                if (reliable) {
+                    reliableMerged = mergedPath;
+                    if (blame != null && blame.isFile()) {
+                        reliableBlame = blame.toPath().toAbsolutePath().normalize();
+                    }
+                }
+            }
+        } else {
+            AndroidLayout layout = null;
+            try {
+                layout = getLayout(androidModule);
+            } catch (CancellationException e) {
+                throw e;
+            } catch (Exception ignored) {
+            }
+
+            if (layout != null) {
+                for (Path res : layout.resources) {
+                    Path norm = res.toAbsolutePath().normalize();
+                    if (Files.isDirectory(norm) && !resourceRoots.contains(norm)) {
+                        resourceRoots.add(norm);
+                    }
+                }
+                for (Path mf : layout.manifests) {
+                    Path norm = mf.toAbsolutePath().normalize();
+                    AndroidSources.observeCompiledArchive(norm);
+                    if (Files.isRegularFile(norm) && !manifests.contains(norm)) {
+                        manifests.add(norm);
+                    }
+                }
+            }
+
+            if (variant != null) {
+                Path varRes = moduleRoot.resolve("src").resolve(variant).resolve("res").normalize();
+                if ((layout == null || layout.resources.contains(varRes))
+                        && Files.isDirectory(varRes) && !resourceRoots.contains(varRes)) {
+                    resourceRoots.add(varRes);
+                }
+                Path varMf = moduleRoot.resolve("src").resolve(variant).resolve("AndroidManifest.xml").normalize();
+                if ((layout == null || layout.manifests.contains(varMf))
+                        && Files.isRegularFile(varMf) && !manifests.contains(varMf)) {
+                    manifests.add(varMf);
+                }
+            }
+            Path mainRes = moduleRoot.resolve("src/main/res").normalize();
+            if ((layout == null || layout.resources.contains(mainRes))
+                    && Files.isDirectory(mainRes) && !resourceRoots.contains(mainRes)) {
+                resourceRoots.add(mainRes);
+            }
+            Path mainMf = moduleRoot.resolve("src/main/AndroidManifest.xml").normalize();
+            if ((layout == null || layout.manifests.contains(mainMf))
+                    && Files.isRegularFile(mainMf) && !manifests.contains(mainMf)) {
+                manifests.add(mainMf);
+            }
+        }
+
+        boolean complete = (namespace != null && !resourceRoots.isEmpty());
+        String fingerprint = computeXmlInputsFingerprint(
+                moduleRoot,
+                variant,
+                androidModule,
+                lintModelVariant,
+                resourceRoots,
+                manifests,
+                reliableMerged,
+                reliableBlame,
+                complete
+        );
+
+        return new AndroidLintResources.Inputs(
+                resourceRoots,
+                manifests,
+                reliableMerged,
+                reliableBlame,
+                fingerprint,
+                complete
+        );
+    }
+
+    private static void hashResourceDirectory(MessageDigest md, Path resDir) throws IOException {
+        if (resDir == null) return;
+        Path norm = resDir.toAbsolutePath().normalize();
+        md.update(norm.toString().getBytes(StandardCharsets.UTF_8));
+        if (Files.isDirectory(norm)) {
+            AndroidSources.trackDirectory(norm);
+            try (var stream = Files.list(norm)) {
+                List<Path> subfolders = stream.filter(Files::isDirectory).sorted().toList();
+                for (Path subfolder : subfolders) {
+                    ProgressManager.checkCanceled();
+                    AndroidSources.trackDirectory(subfolder);
+                    md.update(subfolder.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+                    try (var fileStream = Files.list(subfolder)) {
+                        List<Path> files = fileStream.filter(Files::isRegularFile).sorted().toList();
+                        for (Path file : files) {
+                            ProgressManager.checkCanceled();
+                            AndroidSources.observeCompiledArchive(file);
+                            md.update(file.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+                            if (file.toString().endsWith(".xml")) {
+                                String text = AndroidSources.text(file);
+                                if (text != null) {
+                                    md.update(text.getBytes(StandardCharsets.UTF_8));
+                                } else {
+                                    md.update(Long.toString(Files.size(file)).getBytes(StandardCharsets.UTF_8));
+                                    md.update(Long.toString(Files.getLastModifiedTime(file).toMillis()).getBytes(StandardCharsets.UTF_8));
+                                }
+                            } else {
+                                md.update(Long.toString(Files.size(file)).getBytes(StandardCharsets.UTF_8));
+                                md.update(Long.toString(Files.getLastModifiedTime(file).toMillis()).getBytes(StandardCharsets.UTF_8));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            AndroidSources.observeCompiledArchive(norm);
+        }
+    }
+
+    private static void hashManifestArtifact(MessageDigest digest, Path path) throws IOException {
+        ProgressManager.checkCanceled();
+        digest.update(path.toString().getBytes(StandardCharsets.UTF_8));
+        String text = AndroidSources.text(path);
+        digest.update((byte) (text == null ? 0 : 1));
+        if (text != null) {
+            digest.update(text.getBytes(StandardCharsets.UTF_8));
+            digest.update(Files.getLastModifiedTime(path).toString().getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private static String computeXmlInputsFingerprint(
+            Path moduleRoot,
+            String variant,
+            Module androidModule,
+            LintModelVariant lintModelVariant,
+            List<Path> resourceRoots,
+            List<Path> manifests,
+            Path mergedManifest,
+            Path manifestMergeReport,
+            boolean complete
+    ) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            md.update(Boolean.toString(complete).getBytes(StandardCharsets.UTF_8));
+
+            for (Path root : resourceRoots) {
+                ProgressManager.checkCanceled();
+                hashResourceDirectory(md, root);
+            }
+
+            for (Path manifest : manifests) {
+                ProgressManager.checkCanceled();
+                md.update(manifest.toString().getBytes(StandardCharsets.UTF_8));
+                AndroidSources.observeCompiledArchive(manifest);
+                String text = AndroidSources.text(manifest);
+                if (text != null) {
+                    md.update(text.getBytes(StandardCharsets.UTF_8));
+                } else if (Files.isRegularFile(manifest)) {
+                    md.update(Long.toString(Files.size(manifest)).getBytes(StandardCharsets.UTF_8));
+                    md.update(Long.toString(Files.getLastModifiedTime(manifest).toMillis()).getBytes(StandardCharsets.UTF_8));
+                }
+            }
+
+            if (mergedManifest != null) hashManifestArtifact(md, mergedManifest);
+            if (manifestMergeReport != null) hashManifestArtifact(md, manifestMergeReport);
+            for (Path path : AndroidLintManifest.mergedManifestCandidates(moduleRoot, variant)) {
+                if (!path.equals(mergedManifest)) hashManifestArtifact(md, path);
+            }
+            for (Path path : AndroidLintManifest.mergerReportCandidates(moduleRoot, variant)) {
+                if (!path.equals(manifestMergeReport)) hashManifestArtifact(md, path);
+            }
+
+            // Hash dependency inputs (subproject resources and AARs)
+            if (lintModelVariant != null && lintModelVariant.getArtifact() != null && lintModelVariant.getArtifact().getDependencies() != null) {
+                for (LintModelLibrary lib : lintModelVariant.getArtifact().getDependencies().getAll()) {
+                    ProgressManager.checkCanceled();
+                    md.update(lib.getIdentifier().getBytes(StandardCharsets.UTF_8));
+                    if (lib instanceof LintModelAndroidLibrary androidLib) {
+                        File res = androidLib.getResFolder();
+                        if (res != null && res.isDirectory()) {
+                            hashResourceDirectory(md, res.toPath());
+                        }
+                        File sym = androidLib.getSymbolFile();
+                        if (sym != null && sym.isFile()) {
+                            Path symP = sym.toPath().toAbsolutePath().normalize();
+                            AndroidSources.observeCompiledArchive(symP);
+                            md.update(symP.toString().getBytes(StandardCharsets.UTF_8));
+                            md.update(Long.toString(Files.size(symP)).getBytes(StandardCharsets.UTF_8));
+                            md.update(Long.toString(Files.getLastModifiedTime(symP).toMillis()).getBytes(StandardCharsets.UTF_8));
+                        }
+                        File pub = androidLib.getPublicResources();
+                        if (pub != null && pub.isFile()) {
+                            Path pubP = pub.toPath().toAbsolutePath().normalize();
+                            AndroidSources.observeCompiledArchive(pubP);
+                            md.update(pubP.toString().getBytes(StandardCharsets.UTF_8));
+                            md.update(Long.toString(Files.size(pubP)).getBytes(StandardCharsets.UTF_8));
+                            md.update(Long.toString(Files.getLastModifiedTime(pubP).toMillis()).getBytes(StandardCharsets.UTF_8));
+                        }
+                    }
+                }
+            } else if (androidModule != null && !androidModule.isDisposed()) {
+                Set<Module> visited = new LinkedHashSet<>();
+                Queue<Module> queue = new ArrayDeque<>();
+                queue.add(androidModule);
+                visited.add(androidModule);
+
+                while (!queue.isEmpty()) {
+                    Module current = queue.poll();
+                    for (OrderEntry entry : ModuleRootManager.getInstance(current).getOrderEntries()) {
+                        ProgressManager.checkCanceled();
+                        if (entry instanceof ModuleOrderEntry moduleEntry) {
+                            Module depMod = moduleEntry.getModule();
+                            if (depMod == null || depMod.isDisposed() || !visited.add(depMod)) continue;
+                            queue.add(depMod);
+
+                            VirtualFile depRootVf = AndroidContext.findModuleRoot(depMod);
+                            if (depRootVf == null) continue;
+                            Path depRoot = Path.of(depRootVf.getPath()).toAbsolutePath().normalize();
+                            md.update(depMod.getName().getBytes(StandardCharsets.UTF_8));
+                            md.update(depRoot.toString().getBytes(StandardCharsets.UTF_8));
+
+                            List<Path> depRoots = new ArrayList<>();
+                            AndroidLayout depLayout = getLayout(depMod);
+                            if (depLayout != null && depLayout.resources != null) {
+                                for (Path r : depLayout.resources) {
+                                    Path norm = r.toAbsolutePath().normalize();
+                                    if (Files.isDirectory(norm) && !depRoots.contains(norm)) {
+                                        depRoots.add(norm);
+                                    }
+                                }
+                            }
+                            String depVariant = AndroidContext.resolveVariant(depMod, depRootVf);
+                            if (depVariant != null) {
+                                Path varRes = depRoot.resolve("src").resolve(depVariant).resolve("res").normalize();
+                                if (Files.isDirectory(varRes) && !depRoots.contains(varRes)) {
+                                    depRoots.add(varRes);
+                                }
+                            }
+                            Path mainRes = depRoot.resolve("src/main/res").normalize();
+                            if (Files.isDirectory(mainRes) && !depRoots.contains(mainRes)) {
+                                depRoots.add(mainRes);
+                            }
+
+                            for (Path depRes : depRoots) {
+                                hashResourceDirectory(md, depRes);
+                            }
+                        } else if (entry instanceof LibraryOrderEntry libEntry && libEntry.getLibrary() != null) {
+                            String libName = libEntry.getLibraryName();
+                            if (libName != null) md.update(libName.getBytes(StandardCharsets.UTF_8));
+                            for (String url : libEntry.getLibrary().getUrls(OrderRootType.CLASSES)) {
+                                String pathStr = VfsUtilCore.urlToPath(url);
+                                int sep = pathStr.indexOf("!/");
+                                if (sep >= 0) pathStr = pathStr.substring(0, sep);
+                                try {
+                                    Path classesJar = Path.of(pathStr).toAbsolutePath().normalize();
+                                    Path parent = classesJar.getParent();
+                                    if (parent == null) continue;
+                                    Path resDir = parent.resolve("res");
+                                    Path rTxt = parent.resolve("R.txt");
+                                    Path pubTxt = parent.resolve("public.txt");
+                                    if (!Files.isDirectory(resDir) && parent.getParent() != null) {
+                                        resDir = parent.getParent().resolve("res");
+                                        rTxt = parent.getParent().resolve("R.txt");
+                                        pubTxt = parent.getParent().resolve("public.txt");
+                                    }
+                                    if (Files.isDirectory(resDir)) {
+                                        hashResourceDirectory(md, resDir);
+                                    }
+                                    if (Files.isRegularFile(rTxt)) {
+                                        AndroidSources.observeCompiledArchive(rTxt);
+                                        md.update(rTxt.toString().getBytes(StandardCharsets.UTF_8));
+                                        md.update(Long.toString(Files.size(rTxt)).getBytes(StandardCharsets.UTF_8));
+                                        md.update(Long.toString(Files.getLastModifiedTime(rTxt).toMillis()).getBytes(StandardCharsets.UTF_8));
+                                    }
+                                    if (Files.isRegularFile(pubTxt)) {
+                                        AndroidSources.observeCompiledArchive(pubTxt);
+                                        md.update(pubTxt.toString().getBytes(StandardCharsets.UTF_8));
+                                        md.update(Long.toString(Files.size(pubTxt)).getBytes(StandardCharsets.UTF_8));
+                                        md.update(Long.toString(Files.getLastModifiedTime(pubTxt).toMillis()).getBytes(StandardCharsets.UTF_8));
+                                    }
+                                } catch (java.nio.file.InvalidPathException ignored) {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (CancellationException e) {
+            throw e;
+        } catch (NoSuchAlgorithmException | IOException e) {
+            throw AndroidQueryException.modelUnavailable("Cannot fingerprint XML inputs: " + e.getMessage());
+        }
+    }
+
+    private static boolean hasRClasspath(Module module, Path moduleRoot) {
+        if (module == null || module.isDisposed() || moduleRoot == null) return false;
+        Path directory = moduleRoot.resolve("build/intermediates");
+        for (var entry : ModuleRootManager.getInstance(module).getOrderEntries()) {
+            if (!(entry instanceof LibraryOrderEntry library) || library.getLibrary() == null) continue;
+            for (String url : library.getLibrary().getUrls(OrderRootType.CLASSES)) {
+                String path = VfsUtilCore.urlToPath(url);
+                int sep = path.indexOf("!/");
+                if (sep >= 0) path = path.substring(0, sep);
+                try {
+                    Path file = Path.of(path).toAbsolutePath().normalize();
+                    if (!file.startsWith(directory)) continue;
+                    Path relative = directory.relativize(file);
+                    if (relative.getNameCount() >= 3 && Set.of("compile_and_runtime_r_class_jar", "compile_r_class_jar", "compile_and_runtime_not_namespaced_r_class_jar").contains(relative.getName(0).toString())) {
+                        return true;
+                    }
+                } catch (java.nio.file.InvalidPathException ignored) {
+                }
+            }
+        }
+        return false;
+    }
+
+    private static AndroidLayout getLayout(Module module) {
+        if (module == null || module.isDisposed()) return null;
+        return AndroidSources.scope().layouts.computeIfAbsent(module, m -> {
+            VirtualFile root = AndroidContext.findModuleRoot(m);
+            if (root == null) return null;
+            Set<String> sources = new LinkedHashSet<>();
+            Path sourceRoot = Path.of(root.getPath()).toAbsolutePath().normalize().resolve("src");
+            for (String url : ModuleRootManager.getInstance(m).getSourceRootUrls()) {
+                Path path = Path.of(VfsUtilCore.urlToPath(url)).toAbsolutePath().normalize();
+                if (path.startsWith(sourceRoot) && path.getNameCount() > sourceRoot.getNameCount()) {
+                    sources.add(sourceRoot.relativize(path).getName(0).toString());
+                }
+            }
+            return new AndroidLayout(m.getProject(), root, AndroidContext.resolveVariant(m, root), sources);
+        });
     }
 }

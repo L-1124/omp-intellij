@@ -60,6 +60,20 @@
             <sha256 value="66a8f669bcef45c523b85d583d3390bba21849f2eb9120dee3c801ed285bd93e" origin="Official Google Maven"/>
          </artifact>
       </component>
+      <component group="com.android.tools.build" name="manifest-merger" version="32.4.1">
+         <artifact name="manifest-merger-32.4.1-sources.jar">
+            <sha256 value="655b5ee5fe2b1c47abb4489e752565271391fd02d682488e6ba84e0a2fe4ac71" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="manifest-merger-32.4.1.jar">
+            <sha256 value="a8ade13523ccf3289fdb4946fcf23831d2eac8ad8b216f63a74850d46cdc8dd4" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="manifest-merger-32.4.1.module">
+            <sha256 value="838285d89b25db6529d894b03112f114417d1f8ab0108482b1f9d88f2f8a16a0" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="manifest-merger-32.4.1.pom">
+            <sha256 value="0c354fdd8e54d21dfb4eba3e90336071448f55af2c7e8701a76a9e2b99ba2f3e" origin="Official Google Maven"/>
+         </artifact>
+      </component>
       <component group="com.android.tools.layoutlib" name="layoutlib-api" version="32.4.1">
          <artifact name="layoutlib-api-32.4.1-sources.jar">
             <sha256 value="c2dbddbb3b1a82e95aa6e591a5f19b3dd06853b6b7d2fa7904a4486484c7d4c2" origin="Official Google Maven"/>

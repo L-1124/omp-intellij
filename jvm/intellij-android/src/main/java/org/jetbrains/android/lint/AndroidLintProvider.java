@@ -29,6 +29,7 @@ import java.util.*;
 
 public final class AndroidLintProvider implements LSDiagnosticProvider {
     private static final MethodHandle DIAGNOSTIC;
+
     static {
         try {
             DIAGNOSTIC = MethodHandles.publicLookup().findConstructor(Diagnostic.class,
@@ -41,8 +42,10 @@ public final class AndroidLintProvider implements LSDiagnosticProvider {
     }
 
     private record CacheKey(String projectLocationHash, String fileUri, Integer lspDocVersion,
-                            long documentModificationStamp, String modelFingerprint,
-                            List<String> ruleJarFingerprints, String lintXmlFingerprint, String contentFingerprint) {}
+                            long documentModificationStamp, com.android.tools.lint.detector.api.Scope scope,
+                            String modelFingerprint,
+                            List<String> ruleJarFingerprints, String lintXmlFingerprint, String contentFingerprint) {
+    }
 
     private final Map<CacheKey, List<Diagnostic>> cache = Collections.synchronizedMap(
             new LinkedHashMap<>(64, 0.75f, true) {
@@ -55,32 +58,43 @@ public final class AndroidLintProvider implements LSDiagnosticProvider {
     @Override
     public Set<LSLanguage> getSupportedLanguages() {
         return Set.of(new LSLanguage("java", JavaLanguage.INSTANCE, List.of("java")),
-                new LSLanguage("kotlin", KotlinLanguage.INSTANCE, List.of("kt", "kts")));
+                new LSLanguage("kotlin", KotlinLanguage.INSTANCE, List.of("kt", "kts")),
+                org.jetbrains.android.AndroidExtension.XML);
     }
 
     @Override
     public Flow<Diagnostic> getDiagnostics(LSServer server, LspHandlerContext context, DocumentDiagnosticParams params) {
         return AndroidRequests.diagnosticQuery(server, params.getTextDocument(), (project, file, document) -> {
-            if (!file.getName().endsWith(".java") && !file.getName().endsWith(".kt"))
+            boolean xml = file instanceof com.intellij.psi.xml.XmlFile;
+            if (!xml && !file.getName().endsWith(".java") && !file.getName().endsWith(".kt"))
+                return new AndroidRequests.DiagnosticResult<>(List.of());
+            if (xml && !java.nio.file.Files.isRegularFile(file.getVirtualFile().toNioPath()))
                 return new AndroidRequests.DiagnosticResult<>(List.of());
             AndroidLintModel model = AndroidLintModelResolver.resolve(project, file.getVirtualFile());
             if (model == null) return new AndroidRequests.DiagnosticResult<>(List.of());
+            var scope = xml ? AndroidLintResources.scope(model, file.getVirtualFile().toNioPath())
+                    : com.android.tools.lint.detector.api.Scope.JAVA_FILE;
+            if (scope == null) return new AndroidRequests.DiagnosticResult<>(List.of());
             String uri = PositionKt.getUri(file.getVirtualFile());
             CacheKey key = new CacheKey(project.getLocationHash(), uri, AndroidSources.version(server, uri),
-                    document.getModificationStamp(), model.fingerprint(), model.ruleJarFingerprints(), model.lintXmlFingerprint(),
+                    document.getModificationStamp(), scope, model.fingerprint(), model.ruleJarFingerprints(), model.lintXmlFingerprint(),
                     com.google.common.hash.Hashing.sha256().hashUnencodedChars(document.getImmutableCharSequence()).toString());
             List<Diagnostic> existing = cache.get(key);
             if (existing != null) {
                 com.intellij.openapi.diagnostic.Logger.getInstance(AndroidLintProvider.class).debug("Android lint cache hit: " + uri);
                 return new AndroidRequests.DiagnosticResult<>(List.copyOf(existing));
             }
-            List<Incident> incidents = new AndroidLintClient(model, file, document.getText()).analyze();
+            var client = new AndroidLintClient(model, file, document.getText(), scope);
+            List<Incident> incidents = client.analyze();
             List<Diagnostic> values = diagnostics(incidents, document);
-            return new AndroidRequests.DiagnosticResult<>(values, () -> cache.put(key, values));
+            return new AndroidRequests.DiagnosticResult<>(values, () -> {
+                if (client.isAnalysisComplete()) cache.put(key, values);
+            });
         });
     }
 
-    private record Mapped(Diagnostic diagnostic, String code) {}
+    private record Mapped(Diagnostic diagnostic, String code) {
+    }
 
     static List<Diagnostic> diagnostics(List<Incident> incidents, Document document) {
         List<Mapped> values = new ArrayList<>();
@@ -137,7 +151,8 @@ public final class AndroidLintProvider implements LSDiagnosticProvider {
         for (Mapped value : values) {
             if (previous == null || !previous.code().equals(value.code()) ||
                     !previous.diagnostic().getRange().equals(value.diagnostic().getRange()) ||
-                    !previous.diagnostic().getMessage().equals(value.diagnostic().getMessage())) result.add(value.diagnostic());
+                    !previous.diagnostic().getMessage().equals(value.diagnostic().getMessage()))
+                result.add(value.diagnostic());
             previous = value;
         }
         return List.copyOf(result);

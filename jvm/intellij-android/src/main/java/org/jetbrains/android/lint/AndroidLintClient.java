@@ -1,36 +1,10 @@
 package org.jetbrains.android.lint;
 
-import com.android.ide.common.rendering.api.ResourceNamespace;
-import com.android.ide.common.resources.AbstractResourceRepository;
-import com.android.ide.common.resources.ResourceItem;
 import com.android.ide.common.resources.ResourceRepository;
-import com.android.ide.common.resources.ResourceVisitor;
-import com.android.ide.common.resources.SingleNamespaceResourceRepository;
-import com.android.resources.ResourceType;
-import com.android.tools.lint.client.api.CompositeIssueRegistry;
-import com.android.tools.lint.client.api.Configuration;
-import com.android.tools.lint.client.api.GradleVisitor;
-import com.android.tools.lint.client.api.IssueRegistry;
-import com.android.tools.lint.client.api.JarFileIssueRegistry;
-import com.android.tools.lint.client.api.LintClient;
-import com.android.tools.lint.client.api.LintDriver;
-import com.android.tools.lint.client.api.LintRequest;
-import com.android.tools.lint.client.api.LintXmlConfiguration;
-import com.android.tools.lint.client.api.ResourceRepositoryScope;
-import com.android.tools.lint.client.api.UastParser;
-import com.android.tools.lint.client.api.XmlParser;
-import com.android.tools.lint.detector.api.Context;
-import com.android.tools.lint.detector.api.Incident;
-import com.android.tools.lint.detector.api.Location;
-import com.android.tools.lint.detector.api.Platform;
-import com.android.tools.lint.detector.api.Position;
-import com.android.tools.lint.detector.api.Scope;
-import com.android.tools.lint.detector.api.Severity;
-import com.android.tools.lint.detector.api.TextFormat;
+import com.android.tools.lint.client.api.*;
+import com.android.tools.lint.detector.api.*;
 import com.android.tools.lint.helpers.DefaultJavaEvaluator;
 import com.android.tools.lint.helpers.DefaultUastParser;
-import com.google.common.collect.ImmutableListMultimap;
-import com.google.common.collect.ListMultimap;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.progress.ProgressManager;
@@ -39,22 +13,12 @@ import com.intellij.openapi.roots.LanguageLevelModuleExtension;
 import com.intellij.openapi.roots.LanguageLevelProjectExtension;
 import com.intellij.openapi.roots.ModuleRootManager;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.psi.JavaDirectoryService;
-import com.intellij.psi.JavaPsiFacade;
-import com.intellij.psi.PsiClass;
-import com.intellij.psi.PsiDirectory;
-import com.intellij.psi.PsiElement;
-import com.intellij.psi.PsiFile;
-import com.intellij.psi.PsiPackage;
-import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.pom.java.LanguageLevel;
+import com.intellij.psi.*;
+import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.util.lang.UrlClassLoader;
 import org.jetbrains.android.resource.AndroidSources;
-import org.jetbrains.kotlin.config.ApiVersion;
-import org.jetbrains.kotlin.config.IKotlinFacetSettings;
-import org.jetbrains.kotlin.config.KotlinFacetSettingsProvider;
-import org.jetbrains.kotlin.config.LanguageVersionSettings;
-import org.jetbrains.kotlin.config.LanguageVersionSettingsImpl;
+import org.jetbrains.kotlin.config.*;
 
 import java.io.File;
 import java.io.IOException;
@@ -65,17 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.HexFormat;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.WeakHashMap;
+import java.util.*;
 import java.util.concurrent.CancellationException;
 import java.util.function.Function;
 
@@ -90,16 +44,23 @@ public class AndroidLintClient extends LintClient {
     private final Project ideaProject;
     private final Module ideaModule;
     private final Path mainFilePath;
+    private final Scope scope;
+    private final XmlParser xmlParser;
+    private AndroidLintManifest manifest;
+    private boolean analysisComplete;
+    private boolean xmlParsingFailed;
     private final List<Incident> collectedIncidents = new ArrayList<>();
     private final Map<com.android.tools.lint.detector.api.Issue, com.android.tools.lint.detector.api.PartialResult> partialResults =
             new LinkedHashMap<>();
     private volatile Throwable lastDetectorFailure;
 
-    public AndroidLintClient(AndroidLintModel model, PsiFile mainFile, String contents) {
+    public AndroidLintClient(AndroidLintModel model, PsiFile mainFile, String contents, Scope scope) {
         super(CLIENT_STUDIO);
         this.model = model;
         this.mainFile = mainFile;
         this.contents = contents;
+        this.scope = scope;
+        this.xmlParser = new AndroidLintXmlParser(this);
         this.ideaProject = mainFile != null ? mainFile.getProject() : null;
         this.ideaModule = model != null ? model.module() : null;
         VirtualFile vf = mainFile != null ? mainFile.getVirtualFile() : null;
@@ -120,13 +81,8 @@ public class AndroidLintClient extends LintClient {
         if (mainFilePath != null && filePath.equals(mainFilePath)) {
             return contents != null ? contents : "";
         }
-        if (ideaProject != null) {
-            String text = AndroidSources.memoryText(ideaProject, filePath);
-            if (text != null) {
-                return text;
-            }
-        }
-        return "";
+        String text = AndroidSources.text(filePath);
+        return text == null ? "" : text;
     }
 
     @Override
@@ -136,7 +92,50 @@ public class AndroidLintClient extends LintClient {
 
     @Override
     public XmlParser getXmlParser() {
-        return new AndroidLintXmlParser(this);
+        return xmlParser;
+    }
+
+    @Override
+    public org.w3c.dom.Document getXmlDocument(File file, CharSequence text) {
+        ProgressManager.checkCanceled();
+        return getXmlParser().parseXml(text == null ? readFile(file) : text, file);
+    }
+
+    private AndroidLintManifest manifest() {
+        if (manifest == null) manifest = new AndroidLintManifest(model, ideaProject, this);
+        return manifest;
+    }
+
+    @Override
+    public org.w3c.dom.Document getMergedManifest(com.android.tools.lint.detector.api.Project project) {
+        File target = scope == Scope.MANIFEST && mainFilePath != null ? mainFilePath.toFile() : null;
+        return manifest().getMergedManifest(project, target,
+                target == null ? null : getXmlDocument(target, contents));
+    }
+
+    @Override
+    public void resolveMergeManifestSources(org.w3c.dom.Document document, Object reportFile) {
+        manifest().resolveMergeManifestSources(document, reportFile);
+    }
+
+    @Override
+    public com.android.utils.Pair<File, ? extends org.w3c.dom.Node> findManifestSourceNode(org.w3c.dom.Node node) {
+        return manifest().findManifestSourceNode(node);
+    }
+
+    @Override
+    public Location findManifestSourceLocation(org.w3c.dom.Node node) {
+        return manifest().findManifestSourceLocation(node);
+    }
+
+    PsiFile xmlSource(File file) {
+        Path path = file.toPath().toAbsolutePath().normalize();
+        if (path.equals(mainFilePath)) return mainFile;
+        return ideaProject == null ? null : AndroidSources.diskXml(ideaProject, path);
+    }
+
+    void xmlParsingFailed() {
+        xmlParsingFailed = true;
     }
 
     @Override
@@ -146,7 +145,8 @@ public class AndroidLintClient extends LintClient {
 
     @Override
     public ResourceRepository getResources(com.android.tools.lint.detector.api.Project project, ResourceRepositoryScope scope) {
-        return EmptyResourceRepository.INSTANCE;
+        return AndroidLintResources.getRepository(model, scope, mainFilePath,
+                mainFile instanceof com.intellij.psi.xml.XmlFile xml ? xml : null);
     }
 
     @Override
@@ -223,36 +223,62 @@ public class AndroidLintClient extends LintClient {
         return Collections.emptyList();
     }
 
-    @Override
-    public Configuration getConfiguration(com.android.tools.lint.detector.api.Project project, LintDriver driver) {
-        Configuration moduleXmlConfig = null;
-        Configuration projectXmlConfig = null;
-
-        if (model != null && ideaProject != null) {
-            Path projLintXml = model.projectRoot() != null ? model.projectRoot().resolve("lint.xml") : null;
-            if (projLintXml != null && AndroidSources.memoryText(ideaProject, projLintXml) != null) {
-                CharSequence text = readFile(projLintXml.toFile());
-                if (text != null && text.length() > 0) {
-                    projectXmlConfig = LintXmlConfiguration.Companion.create(getConfigurations(), projLintXml.toFile(), text);
-                }
-            }
-
-            Path modLintXml = model.moduleRoot() != null ? model.moduleRoot().resolve("lint.xml") : null;
-            if (modLintXml != null && !modLintXml.equals(projLintXml) && AndroidSources.memoryText(ideaProject, modLintXml) != null) {
-                CharSequence text = readFile(modLintXml.toFile());
-                if (text != null && text.length() > 0) {
-                    moduleXmlConfig = LintXmlConfiguration.Companion.create(getConfigurations(), modLintXml.toFile(), text);
-                }
-            }
-
-            if (moduleXmlConfig != null && projectXmlConfig != null) {
-                getConfigurations().setParent(moduleXmlConfig, projectXmlConfig);
-            }
+    static List<Path> configurationFiles(Path projectRoot, Path moduleRoot) {
+        if (projectRoot == null && moduleRoot == null) {
+            return Collections.emptyList();
+        }
+        if (projectRoot == null) {
+            return List.of(moduleRoot.toAbsolutePath().normalize().resolve("lint.xml"));
+        }
+        if (moduleRoot == null) {
+            return List.of(projectRoot.toAbsolutePath().normalize().resolve("lint.xml"));
         }
 
-        Configuration effectiveXmlConfig = moduleXmlConfig != null ? moduleXmlConfig : projectXmlConfig;
+        Path normProject = projectRoot.toAbsolutePath().normalize();
+        Path normModule = moduleRoot.toAbsolutePath().normalize();
 
-        if (project.getBuildModule() != null && project.getBuildModule().getLintOptions() != null) {
+        if (normProject.equals(normModule)) {
+            return List.of(normProject.resolve("lint.xml"));
+        }
+
+        if (!normModule.startsWith(normProject)) {
+            return List.of(normProject.resolve("lint.xml"), normModule.resolve("lint.xml"));
+        }
+
+        Path rel = normProject.relativize(normModule);
+        List<Path> result = new ArrayList<>(rel.getNameCount() + 1);
+        result.add(normProject.resolve("lint.xml"));
+        Path current = normProject;
+        for (int i = 0; i < rel.getNameCount(); i++) {
+            current = current.resolve(rel.getName(i));
+            result.add(current.resolve("lint.xml"));
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    @Override
+    public Configuration getConfiguration(com.android.tools.lint.detector.api.Project project, LintDriver driver) {
+        Configuration effectiveXmlConfig = null;
+
+        if (model != null) {
+            Path projectRoot = model.projectRoot();
+            Path moduleRoot = model.moduleRoot();
+            List<Path> configFiles = configurationFiles(projectRoot, moduleRoot);
+            Configuration previous = null;
+            for (Path configPath : configFiles) {
+                String text = AndroidSources.text(configPath);
+                if (text != null && !text.isEmpty()) {
+                    Configuration config = LintXmlConfiguration.Companion.create(getConfigurations(), configPath.toFile(), text);
+                    if (previous != null) {
+                        getConfigurations().setParent(config, previous);
+                    }
+                    previous = config;
+                }
+            }
+            effectiveXmlConfig = previous;
+        }
+
+        if (project != null && project.getBuildModule() != null && project.getBuildModule().getLintOptions() != null) {
             return getConfigurations().createLintOptionsConfiguration(
                     project,
                     project.getBuildModule().getLintOptions(),
@@ -392,9 +418,10 @@ public class AndroidLintClient extends LintClient {
         }
         File moduleDir = model.moduleRoot().toFile();
         File mainIoFile = mainFilePath.toFile();
+        if (scope != Scope.JAVA_FILE && !mainIoFile.isFile()) return List.of();
 
         List<IssueRegistry> registries = new ArrayList<>();
-        IssueRegistry builtin = AndroidLintIssueRegistry.create(model.minSdkPremiseMissing());
+        IssueRegistry builtin = AndroidLintIssueRegistry.create(model.minSdkPremiseMissing(), scope);
         if (model.minSdkPremiseMissing()) {
             LOG.debug("Skipping ApiDetector checks: minSdk premise missing for module " + (ideaModule != null ? ideaModule.getName() : ""));
         }
@@ -412,7 +439,7 @@ public class AndroidLintClient extends LintClient {
 
         LintRequest request = new LintRequest(this, List.of(mainIoFile));
         request.setProjects(List.of(preProject));
-        request.setScope(EnumSet.of(Scope.JAVA_FILE));
+        request.setScope(EnumSet.of(scope));
         request.setPlatform(Platform.ANDROID_SET);
 
         LintDriver preDriver = new LintDriver(builtin, this, request);
@@ -455,7 +482,7 @@ public class AndroidLintClient extends LintClient {
 
             LintRequest req = new LintRequest(this, List.of(mainIoFile));
             req.setProjects(List.of(runProject));
-            req.setScope(EnumSet.of(Scope.JAVA_FILE));
+            req.setScope(EnumSet.of(scope));
             req.setPlatform(Platform.ANDROID_SET);
 
             LintDriver driver = new LintDriver(reg, this, req);
@@ -470,8 +497,13 @@ public class AndroidLintClient extends LintClient {
                 throw (RuntimeException) failure;
             }
 
+            analysisComplete = true;
             return List.copyOf(collectedIncidents);
         });
+    }
+
+    boolean isAnalysisComplete() {
+        return analysisComplete && !xmlParsingFailed;
     }
 
     static List<Incident> runWithIsolation(
@@ -485,7 +517,7 @@ public class AndroidLintClient extends LintClient {
             try {
                 List<Incident> result = runner.apply(registries.get(0));
                 return result != null ? result : Collections.emptyList();
-            } catch (CancellationException e) {
+            } catch (CancellationException | org.jetbrains.android.context.AndroidQueryException e) {
                 throw e;
             } catch (Throwable t) {
                 LOG.warn("Failed lint registry execution: " + registries.get(0), t);
@@ -497,7 +529,7 @@ public class AndroidLintClient extends LintClient {
             CompositeIssueRegistry composite = new CompositeIssueRegistry(new ArrayList<>(registries));
             List<Incident> result = runner.apply(composite);
             return result != null ? result : Collections.emptyList();
-        } catch (CancellationException e) {
+        } catch (CancellationException | org.jetbrains.android.context.AndroidQueryException e) {
             throw e;
         } catch (Throwable t) {
             LOG.warn("Composite lint registry execution failed, retrying with per-registry isolation", t);
@@ -508,7 +540,7 @@ public class AndroidLintClient extends LintClient {
                     if (batch != null && !batch.isEmpty()) {
                         combined.addAll(batch);
                     }
-                } catch (CancellationException e) {
+                } catch (CancellationException | org.jetbrains.android.context.AndroidQueryException e) {
                     throw e;
                 } catch (Throwable regError) {
                     LOG.warn("Skipping failing lint issue registry: " + registry, regError);
@@ -683,32 +715,4 @@ public class AndroidLintClient extends LintClient {
         }
     }
 
-    private static final class EmptyResourceRepository extends AbstractResourceRepository {
-        static final EmptyResourceRepository INSTANCE = new EmptyResourceRepository();
-
-        @Override
-        protected ListMultimap<String, ResourceItem> getResourcesInternal(ResourceNamespace namespace, ResourceType type) {
-            return ImmutableListMultimap.of();
-        }
-
-        @Override
-        public ResourceVisitor.VisitResult accept(ResourceVisitor visitor) {
-            return ResourceVisitor.VisitResult.ABORT;
-        }
-
-        @Override
-        public Collection<ResourceItem> getPublicResources(ResourceNamespace namespace, ResourceType type) {
-            return Collections.emptyList();
-        }
-
-        @Override
-        public Set<ResourceNamespace> getNamespaces() {
-            return Collections.emptySet();
-        }
-
-        @Override
-        public Collection<SingleNamespaceResourceRepository> getLeafResourceRepositories() {
-            return Collections.emptyList();
-        }
-    }
 }

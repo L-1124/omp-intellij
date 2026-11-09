@@ -155,6 +155,9 @@ dependencies {
     implementation("com.android.tools.layoutlib:layoutlib-api:$lintVersion") {
         isTransitive = false
     }
+    implementation("com.android.tools.build:manifest-merger:$lintVersion") {
+        isTransitive = false
+    }
 
     testImplementation("junit:junit:4.13.2")
 }
@@ -345,6 +348,7 @@ tasks.register<StageExtensionTask>("stageExtension") {
             "lint-api-$lintVersion.jar",
             "lint-checks-$lintVersion.jar",
             "lint-model-$lintVersion.jar",
+            "manifest-merger-$lintVersion.jar",
             "common-$lintVersion.jar",
             "sdklib-$lintVersion.jar",
             "kxml2-$kxml2Version.jar",

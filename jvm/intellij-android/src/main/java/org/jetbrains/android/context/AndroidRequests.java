@@ -76,37 +76,51 @@ public final class AndroidRequests {
         Flow<List<T>> batches = FlowKt.flow((collector, continuation) -> {
             var openVersions = AndroidSources.Scope.openVersions(server);
             return AndroidRequests.<DiagnosticResult<T>>chain(next -> server.withAnalysisContext((context, scope, result) ->
-                                CoroutinesKt.readAction(() -> {
+                            CoroutinesKt.readAction(() -> {
+                                ProgressManager.checkCanceled();
+                                Project project = context.getProject();
+                                VirtualFile virtualFile = PositionKt.findVirtualFile(identifier);
+                                PsiFile file = virtualFile == null ? null : PsiManager.getInstance(project).findFile(virtualFile);
+                                if (file == null) return new DiagnosticResult<T>(List.of());
+                                Document document = PsiDocumentManager.getInstance(project).getDocument(file);
+                                if (document == null) return new DiagnosticResult<T>(List.of());
+                                long stamp = document.getModificationStamp();
+                                CharSequence contents = document.getImmutableCharSequence();
+                                try (var sources = new AndroidSources.Scope(server, virtualFile, openVersions)) {
+                                    sources.useSavedModelInputs();
+                                    AndroidSources.observeCompiledArchive(java.nio.file.Path.of(virtualFile.getPath()));
+                                    DiagnosticResult<T> values = query.run(project, file, document);
                                     ProgressManager.checkCanceled();
-                                    Project project = context.getProject();
-                                    VirtualFile virtualFile = PositionKt.findVirtualFile(identifier);
-                                    PsiFile file = virtualFile == null ? null : PsiManager.getInstance(project).findFile(virtualFile);
-                                    if (file == null) return new DiagnosticResult<T>(List.of());
-                                    Document document = PsiDocumentManager.getInstance(project).getDocument(file);
-                                    if (document == null) return new DiagnosticResult<T>(List.of());
-                                    long stamp = document.getModificationStamp();
-                                    try (var sources = new AndroidSources.Scope(server, virtualFile, openVersions)) {
-                                        AndroidSources.observeCompiledArchive(java.nio.file.Path.of(virtualFile.getPath()));
-                                        DiagnosticResult<T> values = query.run(project, file, document);
-                                        ProgressManager.checkCanceled();
-                                        if (stamp != document.getModificationStamp())
-                                            return AndroidRequests.<RuntimeException, DiagnosticResult<T>>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException("content_modified", -32801, null, null));
-                                        return new DiagnosticResult<>(values.values(), () -> {
-                                            sources.verify();
-                                            values.onVerified().run();
-                                        });
-                                    } catch (AndroidQueryException error) {
-                                        return AndroidRequests.<RuntimeException, DiagnosticResult<T>>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException(error.getMessage(), error.getErrorCode(), null, error));
-                                    }
-                                }, result), next),
-                        values -> {
-                            try {
-                                values.onVerified().run();
-                            } catch (AndroidQueryException error) {
-                                return AndroidRequests.<RuntimeException, Object>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException(error.getMessage(), error.getErrorCode(), null, error));
-                            }
-                            return collector.emit(values.values(), continuation);
-                        }, continuation);
+                                    if (stamp != document.getModificationStamp())
+                                        return AndroidRequests.<RuntimeException, DiagnosticResult<T>>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException("content_modified", -32801, null, null));
+                                    return new DiagnosticResult<>(values.values(), () -> {
+                                        sources.verify();
+                                        VirtualFile latestVirtualFile = PositionKt.findVirtualFile(identifier);
+                                        PsiFile latestFile = latestVirtualFile == null ? null
+                                                : PsiManager.getInstance(project).findFile(latestVirtualFile);
+                                        Document latest = latestFile == null ? null
+                                                : PsiDocumentManager.getInstance(project).getDocument(latestFile);
+                                        if (latest == null || CharSequence.compare(contents, latest.getImmutableCharSequence()) != 0)
+                                            throw new AndroidQueryException("content_modified", -32801);
+                                        values.onVerified().run();
+                                    });
+                                } catch (AndroidQueryException error) {
+                                    return AndroidRequests.<RuntimeException, DiagnosticResult<T>>raise(new com.jetbrains.lsp.implementation.LspResponseErrorException(error.getMessage(), error.getErrorCode(), null, error));
+                                }
+                            }, result), next),
+                    values -> AndroidRequests.<List<T>>chain(next ->
+                                    server.withAnalysisContext((context, scope, result) ->
+                                            CoroutinesKt.readAction(() -> {
+                                                try {
+                                                    values.onVerified().run();
+                                                } catch (AndroidQueryException error) {
+                                                    return AndroidRequests.<RuntimeException, List<T>>raise(
+                                                            new com.jetbrains.lsp.implementation.LspResponseErrorException(
+                                                                    error.getMessage(), error.getErrorCode(), null, error));
+                                                }
+                                                return values.values();
+                                            }, result), next),
+                            verified -> collector.emit(verified, continuation), continuation), continuation);
         });
         return FlowKt.flatMapConcat(batches, (values, continuation) -> FlowKt.asFlow(values));
     }
