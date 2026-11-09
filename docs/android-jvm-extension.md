@@ -334,6 +334,8 @@ cd jvm/intellij-android
 2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
 3. 生成 STORED（零压缩）的 `intellij-android.jar` 及伴随的 `.sha256` 旁挂文件。
 
+SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅加入 `java/`、`kotlin/`、`xml/`、`dap-jvm/` 下的 JAR，供 `compileOnly` 与 `testCompileOnly` 共用；`testRuntimeOnly` 仍保留完整 ILS SDK，以满足平台测试的运行时依赖。新增插件 API 依赖须显式扩展该范围并验证构建。此限制用于防止意外引用无关插件，不保证所用内部 API 稳定，也不改变 `plugin.xml` 依赖或发布包；兼容性仍由锁定 ILS 版本与真实集成验收保证。配置职责参见 [Gradle Java Plugin](https://docs.gradle.org/current/userguide/java_plugin.html)。
+
 ### 2. 构建产物验证
 
 构建产物规范由 Gradle 原生保证：

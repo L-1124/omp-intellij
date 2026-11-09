@@ -91,7 +91,9 @@ val ilsLibJars = fileTree(ilsHomeDir.resolve("lib")) {
 val ilsPluginJars = fileTree(ilsHomeDir.resolve("plugins")) {
     include("**/*.jar")
 }
-val sdkJars = ilsLibJars + ilsPluginJars
+val compileSdkJars = ilsLibJars + fileTree(ilsHomeDir.resolve("plugins")) {
+    include("java/**/*.jar", "kotlin/**/*.jar", "xml/**/*.jar", "dap-jvm/**/*.jar")
+}
 
 java {
     toolchain {
@@ -116,9 +118,9 @@ dependencyLocking {
 val adblibVersion = "9.4.1"
 
 dependencies {
-    compileOnly(sdkJars)
-    testCompileOnly(sdkJars)
-    testRuntimeOnly(sdkJars)
+    compileOnly(compileSdkJars)
+    testCompileOnly(compileSdkJars)
+    testRuntimeOnly(ilsLibJars + ilsPluginJars)
 
     implementation("com.android.tools.adblib:adblib:$adblibVersion") {
         isTransitive = false
