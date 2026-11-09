@@ -88,7 +88,7 @@ public final class AndroidRequests {
     }
 
     @SuppressWarnings("unchecked")
-    private static <E extends Throwable, T> T raise(Throwable error) throws E {
+    public static <E extends Throwable, T> T raise(Throwable error) throws E {
         throw (E) error;
     }
 

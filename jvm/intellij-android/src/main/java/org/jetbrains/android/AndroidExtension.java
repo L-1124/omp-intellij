@@ -8,6 +8,7 @@ import org.jetbrains.android.compose.ComposeSuppressor;
 import org.jetbrains.android.debug.AndroidDebugCommands;
 import org.jetbrains.android.navigation.AndroidDefinitionProvider;
 import org.jetbrains.android.navigation.AndroidReferencesProvider;
+import org.jetbrains.android.navigation.AndroidResourceCommands;
 import org.jetbrains.android.xml.AndroidDocumentSymbols;
 import java.util.List;
 
@@ -43,7 +44,7 @@ public final class AndroidExtension implements LanguageServerExtension {
         if (!(plugin instanceof com.intellij.ide.plugins.PluginMainDescriptor descriptor))
             throw new IllegalStateException("Android extension plugin descriptor unavailable");
         return new LSConfigurationPiece(
-                List.of(new AndroidDocumentSymbols(XML), new AndroidReferencesProvider(), new AndroidDefinitionProvider(), new ComposeSuppressor.Entry(), new AndroidDebugCommands()),
+                List.of(new AndroidDocumentSymbols(XML), new AndroidReferencesProvider(), new AndroidDefinitionProvider(), new ComposeSuppressor.Entry(), new AndroidDebugCommands(), new AndroidResourceCommands(), new org.jetbrains.android.navigation.AndroidCompiledResourceClassFinder.Entry(), new org.jetbrains.android.navigation.AndroidResourceNavigation.Entry()),
                 List.of(descriptor),
                 List.of()
         );

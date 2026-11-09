@@ -53,14 +53,16 @@ public final class ResourceResolver {
         String name = slash < 0 ? body : body.substring(slash + 1);
         if (type == null || !RESOURCE_TYPE.matcher(type).matches() || !RESOURCE_NAME.matcher(name).matches())
             return null;
-        Document document = PsiDocumentManager.getInstance(file.getProject()).getDocument(file);
+        Document document = file == null ? null : file.getFileDocument();
+        if (document == null && file != null) document = PsiDocumentManager.getInstance(file.getProject()).getDocument(file);
         if (document == null) return null;
         return new ResourceReference(type, name, namespace, "android".equals(namespace), PositionKt.toLspRange(value.getValueTextRange(), document), null);
     }
 
     public static ResourceReference findRReferenceAt(Project project, PsiFile file, int offset) {
         PsiElement element = file.findElementAt(offset);
-        Document document = PsiDocumentManager.getInstance(project).getDocument(file);
+        Document document = file == null ? null : file.getFileDocument();
+        if (document == null && file != null) document = PsiDocumentManager.getInstance(project).getDocument(file);
         if (document == null) return null;
         Set<PsiField> fields = new LinkedHashSet<>();
         TextRange referenceRange = null;
@@ -94,6 +96,18 @@ public final class ResourceResolver {
     }
 
     public static List<LSDefinitionLocation> resolve(Project project, Module module, ResourceReference reference) {
+        List<LSDefinitionLocation> all = resolveAll(project, module, reference);
+        if (reference != null && reference.classOrigin() != null && reference.originRange() != null) {
+            // When queried from Kotlin or Java, the platform's LSCommonDefinitionProvider
+            // resolves the R field and navigates to the first source via AndroidResourceNavigation
+            // (DirectNavigationProvider). Emitting only supplementary qualifiers prevents duplicate
+            // reporting of the first source in ILS 271's union stream.
+            return all.size() <= 1 ? List.of() : all.subList(1, all.size());
+        }
+        return all;
+    }
+
+    public static List<LSDefinitionLocation> resolveAll(Project project, Module module, ResourceReference reference) {
         if (module == null || reference.isFramework()) return List.of();
         List<Module> owners = new ArrayList<>();
         owners.add(module);
@@ -125,9 +139,44 @@ public final class ResourceResolver {
         return result;
     }
 
-    private static String key(String type, String name) {
+    public static String key(String type, String name) {
         if (type.equals("string-array") || type.equals("integer-array")) type = "array";
         return type + '\0' + name.replace('.', '_').replace(':', '_');
+    }
+
+    public static void verifyProvenance(Project project, Path module, String variant, String namespace, String type, String name) {
+        Provenance provenance = new Provenance(project, module, variant, namespace);
+        if (!Files.isRegularFile(provenance.merger)) {
+            throw AndroidQueryException.missingSnapshot("Build snapshot merger.xml not found for variant " + variant);
+        }
+        try {
+            provenance.load();
+            String wanted = key(type, name);
+            provenance.validate(wanted, type, name);
+        } catch (InvalidProvenance e) {
+            throw AndroidQueryException.staleSnapshot("Resource declaration is missing from snapshot or modified without rebuilding: " + type + "/" + name + (e.getMessage() != null ? " (" + e.getMessage() + ")" : ""));
+        }
+    }
+
+    public static List<Path> findVerifiedRClassOrigins(Path module, String variant) {
+        String cap = Character.toUpperCase(variant.charAt(0)) + variant.substring(1);
+        String processTask = "process" + cap + "Resources";
+        String generateTask = "generate" + cap + "RFile";
+        String bundleTask = "bundle" + cap + "ClassesToCompileJar";
+        List<Path> candidates = List.of(
+                module.resolve("build/intermediates/compile_and_runtime_r_class_jar").resolve(variant).resolve(processTask).resolve("R.jar"),
+                module.resolve("build/intermediates/compile_r_class_jar").resolve(variant).resolve(processTask).resolve("R.jar"),
+                module.resolve("build/intermediates/compile_r_class_jar").resolve(variant).resolve(generateTask).resolve("R.jar"),
+                module.resolve("build/intermediates/compile_and_runtime_not_namespaced_r_class_jar").resolve(variant).resolve(processTask).resolve("R.jar"),
+                module.resolve("build/intermediates/compile_app_classes_jar").resolve(variant).resolve(bundleTask).resolve("classes.jar")
+        );
+        List<Path> found = new ArrayList<>();
+        for (Path p : candidates) {
+            if (Files.isRegularFile(p)) {
+                found.add(p.toAbsolutePath().normalize());
+            }
+        }
+        return found;
     }
 
     private static String declaration(XmlTag tag) {
@@ -173,6 +222,13 @@ public final class ResourceResolver {
     }
 
     private static final class InvalidProvenance extends RuntimeException {
+        InvalidProvenance(String message) {
+            super(message);
+        }
+
+        InvalidProvenance() {
+            super();
+        }
     }
 
     private static final class Provenance {
@@ -195,11 +251,33 @@ public final class ResourceResolver {
             this.module = module;
             this.variant = variant;
             this.namespace = namespace;
-            task = "merge" + Character.toUpperCase(variant.charAt(0)) + variant.substring(1) + "Resources";
-            incremental = module.resolve("build/intermediates/incremental").resolve(variant).resolve(task);
+            String cap = Character.toUpperCase(variant.charAt(0)) + variant.substring(1);
+            String mergeTask = "merge" + cap + "Resources";
+            String packageTask = "package" + cap + "Resources";
+            Path mTask = module.resolve("build/intermediates/incremental").resolve(variant).resolve(mergeTask);
+            Path pTask = module.resolve("build/intermediates/incremental").resolve(packageTask);
+            Path pTaskVar = module.resolve("build/intermediates/incremental").resolve(variant).resolve(packageTask);
+            Set<String> producers = new LinkedHashSet<>();
+            for (Path origin : findVerifiedRClassOrigins(module, variant)) {
+                String producer = origin.getParent().getFileName().toString();
+                if (producer.equals("generate" + cap + "RFile")) producers.add(packageTask);
+                else if (producer.equals("process" + cap + "Resources")) producers.add(mergeTask);
+            }
+            if (producers.size() > 1)
+                throw new AndroidQueryException("ambiguous_target: Conflicting compiled resource producers for " + module, -32803);
+            boolean isLibrary = producers.contains(packageTask);
+            if (isLibrary) {
+                task = packageTask;
+                incremental = Files.isRegularFile(pTaskVar.resolve("merger.xml")) ? pTaskVar : pTask;
+            } else {
+                task = mergeTask;
+                incremental = mTask;
+            }
             merger = incremental.resolve("merger.xml");
             merged = incremental.resolve("merged.dir");
-            blame = module.resolve("build/intermediates/merged_res_blame_folder").resolve(variant).resolve(task).resolve("out");
+            Path b1 = module.resolve("build/intermediates/merged_res_blame_folder").resolve(variant).resolve(task).resolve("out");
+            Path b2 = module.resolve("build/intermediates/merged_res_blame_folder").resolve(task).resolve("out");
+            blame = Files.isDirectory(b1) ? b1 : b2;
         }
 
         private void load() {
@@ -349,8 +427,12 @@ public final class ResourceResolver {
                 if (xml == null || xml.getRootTag() == null) continue;
                 for (XmlTag tag : xml.getRootTag().getSubTags()) {
                     if (!wanted.equals(declaration(tag))) continue;
-                    JsonElement json = json(blame.resolve("multi-v2").resolve(qualifier + ".json"));
-                    if (json == null) throw new InvalidProvenance();
+                    Path blameFile = blame.resolve("multi-v2").resolve(qualifier + ".json");
+                    JsonElement json = json(blameFile);
+                    if (json == null && qualifier.startsWith("values-")) {
+                        json = json(blame.resolve("multi-v2").resolve(qualifier.replace("values-", "values-b+") + ".json"));
+                    }
+                    if (json == null) throw new InvalidProvenance("Blame map missing for qualifier " + qualifier);
                     boolean mapped = false;
                     for (JsonElement log : array(object(json).get("logs"))) {
                         ProgressManager.checkCanceled();
@@ -358,16 +440,22 @@ public final class ResourceResolver {
                         if (!decode(string(object, "outputFile")).equals(output)) continue;
                         for (JsonElement item : array(object.get("map"))) {
                             JsonObject map = object(item);
-                            JsonObject to = object(map.get("to"));
+                            // AGP omits "to" when every target coordinate equals "from".
+                            JsonObject to = object(map.has("to") ? map.get("to") : map.get("from"));
                             int[] starts = numbers(to, "startOffsets"), ends = numbers(to, "endOffsets");
+                            if (ends.length == 0) ends = starts;
                             boolean matches = false;
                             for (int index = 0; index < Math.min(starts.length, ends.length); index++)
                                 if (starts[index] <= tag.getTextOffset() && ends[index] >= tag.getTextOffset())
                                     matches = true;
                             if (starts.length == 0) {
-                                Document document = PsiDocumentManager.getInstance(project).getDocument(xml);
-                                for (int line : numbers(to, "startLines"))
-                                    if (line == document.getLineNumber(tag.getTextOffset())) matches = true;
+                                Document document = xml.getFileDocument();
+                                if (document == null) document = PsiDocumentManager.getInstance(project).getDocument(xml);
+                                if (document != null) {
+                                    int line = document.getLineNumber(tag.getTextOffset());
+                                    for (int startLine : numbers(to, "startLines"))
+                                        if (startLine == line) matches = true;
+                                }
                             }
                             if (matches) {
                                 addValue(decode(string(map, "source")), wanted, result);
@@ -375,7 +463,7 @@ public final class ResourceResolver {
                             }
                         }
                     }
-                    if (!mapped) throw new InvalidProvenance();
+                    if (!mapped) throw new InvalidProvenance("Unmapped resource in blame: " + wanted + " in " + output);
                 }
             }
             JsonElement single = json(blame.resolve("single").resolve(task + ".json"));
@@ -392,16 +480,17 @@ public final class ResourceResolver {
         }
 
         private void addValue(Path path, String wanted, Set<Location> result) {
-            if (!membership.getOrDefault(path, Set.of()).contains(wanted)) throw new InvalidProvenance();
+            if (!membership.getOrDefault(path, Set.of()).contains(wanted)) throw new InvalidProvenance("Resource missing in snapshot membership: " + path);
             XmlFile file = AndroidSources.xml(project, path);
+            if (file == null) throw new InvalidProvenance("Source XML cannot be opened: " + path);
             List<TextRange> ranges = declarations(file).get(wanted);
-            if (ranges == null) throw new InvalidProvenance();
-            Document document = PsiDocumentManager.getInstance(project).getDocument(file);
-            if (document == null) throw new InvalidProvenance();
+            if (ranges == null || ranges.isEmpty()) throw new InvalidProvenance("Declaration range missing for " + wanted + " in " + path);
+            Document document = file.getFileDocument();
+            if (document == null) document = PsiDocumentManager.getInstance(project).getDocument(file);
+            if (document == null) throw new InvalidProvenance("Document unavailable for " + path);
             for (TextRange range : ranges)
                 result.add(AndroidLocations.at(path, PositionKt.toLspRange(range, document)));
         }
-
         private JsonElement json(Path path) {
             String text = AndroidSources.text(path);
             if (text == null) return null;

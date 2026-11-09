@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { executeIntellij } from '../../src/extension/intellij-tool.js';
 import type { ExtensionContext } from '../../src/shared/extension-types.js';
+import { encode } from '../../src/shared/protocol.js';
 import {
   copyCachedWrapper,
   createIntegrationSandbox,
@@ -92,6 +93,17 @@ function findRangeInText(text: string, target: string, occurrence = 1): LspRange
       ? start.character + targetLines[0].length
       : targetLines[targetLines.length - 1].length;
   return { start, end: { line: endLine, character: endChar } };
+}
+
+function findFieldRangeInText(text: string, expression: string, occurrence = 1): LspRange {
+  const range = findRangeInText(text, expression, occurrence);
+  return {
+    start: {
+      line: range.start.line,
+      character: range.start.character + expression.lastIndexOf('.') + 1,
+    },
+    end: range.end,
+  };
 }
 
 function normalizeUri(uri: string): string {
@@ -238,6 +250,13 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
       wrapperJar,
       'org.gradle.wrapper.GradleWrapperMain',
       ':app:processDebugResources',
+      ':lib:packageDebugResources',
+      ':lib:generateDebugRFile',
+      ':core:packageDebugResources',
+      ':core:generateDebugRFile',
+      ':independent:packageDebugResources',
+      ':independent:generateDebugRFile',
+      ':independent:generateReleaseRFile',
       '--offline',
       '--no-daemon',
     ],
@@ -268,6 +287,7 @@ async function startLspClient(
     processId: process.pid,
     rootUri: pathToFileURL(projectDir).href,
     rootPath: projectDir,
+    initializationOptions: { indexDir: join(sandbox.sandboxDir, 'index') },
     capabilities: {
       textDocument: {
         documentSymbol: { hierarchicalDocumentSymbolSupport: hierarchical },
@@ -306,6 +326,32 @@ test('Android XML symbols and manifest references integration', {
       { cwd: projectDir } as ExtensionContext,
       { systemPath: sandbox.systemPath },
     );
+
+    const modelDir = join(sandbox.sandboxDir, 'resource-workspace-model');
+    await mkdir(modelDir);
+    await client.request('workspace/executeCommand', {
+      command: 'exportWorkspace',
+      arguments: [modelDir],
+    });
+    const workspaceModel = JSON.parse(await readFile(join(modelDir, 'workspace.json'), 'utf8')) as {
+      modules: Array<{
+        name: string;
+        contentRoots?: Array<{ sourceRoots?: Array<{ path: string }> }>;
+      }>;
+    };
+    const moduleForMainSources = (component: string): string => {
+      const modules = workspaceModel.modules.filter((module) =>
+        module.contentRoots?.some((root) =>
+          root.sourceRoots?.some((source) =>
+            source.path.replaceAll('\\', '/').endsWith(`/${component}/src/main/java`),
+          ),
+        ),
+      );
+      assert.equal(modules.length, 1, `Unique imported main source module required: ${component}`);
+      return modules[0].name;
+    };
+    const appModuleName = moduleForMainSources('app');
+    const independentModuleName = moduleForMainSources('independent');
 
     const appDir = join(projectDir, 'app', 'src', 'main');
     const stringsPath = join(appDir, 'res', 'values', 'strings.xml');
@@ -966,14 +1012,22 @@ test('Android XML symbols and manifest references integration', {
             position: { line: start.line, character: start.character + 'R.string.'.length + 1 },
           }),
         );
+      const qualifiedStringsPath = join(appDir, 'res', 'values-es', 'strings.xml');
       const expectedSource = [
         {
           uri: stringsUri,
           range: findRangeInText(stringsText, 'app_name'),
         },
+        {
+          uri: pathToFileURL(qualifiedStringsPath).href,
+          range: findRangeInText(await readFile(qualifiedStringsPath, 'utf8'), 'app_name'),
+        },
       ];
       const expectSource = (locations: LspLocation[]) =>
-        assert.deepEqual(locations.map(locationToKey), expectedSource.map(locationToKey));
+        assert.deepEqual(
+          new Set(locations.map(locationToKey)),
+          new Set(expectedSource.map(locationToKey)),
+        );
       let version = 4;
       const changeStrings = (text: string) =>
         client.notify('textDocument/didChange', {
@@ -1066,6 +1120,1155 @@ test('Android XML symbols and manifest references integration', {
         changeStrings(stringsText);
       }
     });
+    await t.test(
+      'References: Resource XML declaration to code references, includeDeclaration, and legal zero-use',
+      async () => {
+        const usageRefPath = join(
+          appDir,
+          'java',
+          'com',
+          'example',
+          'app',
+          'ResourceUsageReference.kt',
+        );
+        const usageRefText = await readFile(usageRefPath, 'utf8');
+        const usageRefUri = pathToFileURL(usageRefPath).href;
+
+        const javaResPath = join(
+          appDir,
+          'java',
+          'com',
+          'example',
+          'app',
+          'JavaResourceReference.java',
+        );
+        const javaResText = await readFile(javaResPath, 'utf8');
+        const javaResUri = pathToFileURL(javaResPath).href;
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: usageRefUri, languageId: 'kotlin', version: 1, text: usageRefText },
+        });
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: javaResUri, languageId: 'java', version: 1, text: javaResText },
+        });
+
+        // 1. Strings: hello_message
+        const helloDeclPos = findPositionInText(stringsText, 'hello_message');
+        const expectedDeclLoc: LspLocation = {
+          uri: stringsUri,
+          range: findRangeInText(stringsText, 'hello_message'),
+        };
+        const expectedMainHelloRef: LspLocation = {
+          uri: mainActivityUri,
+          range: findFieldRangeInText(mainActivityText, 'R.string.hello_message'),
+        };
+        const expectedHelloCodeRefs: LspLocation[] = [
+          expectedMainHelloRef,
+          {
+            uri: usageRefUri,
+            range: findFieldRangeInText(usageRefText, 'ResString.hello_message'),
+          },
+        ];
+
+        // Query references with includeDeclaration: false
+        const helloRefsNoDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: helloDeclPos,
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          new Set(helloRefsNoDecl.map(locationToKey)),
+          new Set(expectedHelloCodeRefs.map(locationToKey)),
+          'Exact set equality for hello_message code references without declaration',
+        );
+
+        // Query references with includeDeclaration: true
+        const helloRefsWithDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: helloDeclPos,
+            context: { includeDeclaration: true },
+          }),
+        );
+        const expectedHelloWithDecl = [...expectedHelloCodeRefs, expectedDeclLoc];
+        assert.deepEqual(
+          new Set(helloRefsWithDecl.map(locationToKey)),
+          new Set(expectedHelloWithDecl.map(locationToKey)),
+          'Exact set equality for hello_message code references with XML declaration',
+        );
+        assert.equal(
+          helloRefsWithDecl.length,
+          helloRefsNoDecl.length + 1,
+          'includeDeclaration: true must add exactly one current XML declaration',
+        );
+
+        // 2. Legal zero references: quoted_text
+        const quotedDeclPos = findPositionInText(stringsText, 'quoted_text');
+        const expectedQuotedDeclLoc: LspLocation = {
+          uri: stringsUri,
+          range: findRangeInText(stringsText, 'quoted_text'),
+        };
+        const zeroRefsNoDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: quotedDeclPos,
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          zeroRefsNoDecl,
+          [],
+          'Unreferenced resource with includeDeclaration: false must return exact []',
+        );
+
+        const zeroRefsWithDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: quotedDeclPos,
+            context: { includeDeclaration: true },
+          }),
+        );
+        assert.deepEqual(
+          zeroRefsWithDecl.map(locationToKey),
+          [locationToKey(expectedQuotedDeclLoc)],
+          'Unreferenced resource with includeDeclaration: true must return declaration alone',
+        );
+
+        // 3. App name: Java static import, qualified call, and local variable shadowing isolation
+        const appNameDeclPos = findPositionInText(stringsText, 'app_name');
+        const appNameRefsNoDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: appNameDeclPos,
+            context: { includeDeclaration: false },
+          }),
+        );
+        const expectedAppNameRefs: LspLocation[] = [
+          {
+            uri: mainActivityUri,
+            range: findFieldRangeInText(mainActivityText, 'R.string.app_name'),
+          },
+          {
+            uri: javaResUri,
+            range: findRangeInText(javaResText, 'app_name', 2),
+          },
+          {
+            uri: javaResUri,
+            range: findFieldRangeInText(javaResText, 'com.example.app.R.string.app_name', 2),
+          },
+          {
+            uri: javaResUri,
+            range: findFieldRangeInText(javaResText, 'com.example.app.R.string.app_name'),
+          },
+        ];
+        assert.deepEqual(
+          new Set(appNameRefsNoDecl.map(locationToKey)),
+          new Set(expectedAppNameRefs.map(locationToKey)),
+          'Exact set equality for app_name references covering Kotlin, Java static import, and qualified call',
+        );
+        assert.ok(
+          !appNameRefsNoDecl.some(
+            (loc) =>
+              normalizeUri(loc.uri) === normalizeUri(usageRefUri) &&
+              loc.range.start.line === findPositionInText(usageRefText, 'app_name.length').line,
+          ),
+          'Local shadowed variable must not be treated as resource reference',
+        );
+      },
+    );
+
+    await t.test(
+      'References: multiple resource types (color, dimen, bool, integer, array, plurals, style, id, layout)',
+      async () => {
+        const usageRefPath = join(
+          appDir,
+          'java',
+          'com',
+          'example',
+          'app',
+          'ResourceUsageReference.kt',
+        );
+        const usageRefText = await readFile(usageRefPath, 'utf8');
+        const usageRefUri = pathToFileURL(usageRefPath).href;
+
+        // Color
+        const colorsPath = join(appDir, 'res', 'values', 'colors.xml');
+        const colorsText = await readFile(colorsPath, 'utf8');
+        const colorsUri = pathToFileURL(colorsPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: colorsUri, languageId: 'xml', version: 1, text: colorsText },
+        });
+        const colorRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: colorsUri },
+            position: findPositionInText(colorsText, 'primary_color'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        const expectedColorRefs: LspLocation[] = [
+          {
+            uri: mainActivityUri,
+            range: findFieldRangeInText(mainActivityText, 'R.color.primary_color'),
+          },
+          {
+            uri: usageRefUri,
+            range: findRangeInText(usageRefText, 'primary_color'),
+          },
+        ];
+        assert.deepEqual(
+          new Set(colorRefs.map(locationToKey)),
+          new Set(expectedColorRefs.map(locationToKey)),
+          'Exact set equality for color references (direct and wildcard)',
+        );
+
+        // Dimen
+        const dimensPath = join(appDir, 'res', 'values', 'dimens.xml');
+        const dimensText = await readFile(dimensPath, 'utf8');
+        const dimensUri = pathToFileURL(dimensPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: dimensUri, languageId: 'xml', version: 1, text: dimensText },
+        });
+        const dimenRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: dimensUri },
+            position: findPositionInText(dimensText, 'default_margin'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        const expectedDimenRefs: LspLocation[] = [
+          {
+            uri: mainActivityUri,
+            range: findFieldRangeInText(mainActivityText, 'R.dimen.default_margin'),
+          },
+        ];
+        assert.deepEqual(
+          new Set(dimenRefs.map(locationToKey)),
+          new Set(expectedDimenRefs.map(locationToKey)),
+          'Exact set equality for dimen references',
+        );
+
+        // Attrs: bool, integer, array, plurals, id
+        const attrsPath = join(appDir, 'res', 'values', 'attrs.xml');
+        const attrsText = await readFile(attrsPath, 'utf8');
+        const attrsUri = pathToFileURL(attrsPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: attrsUri, languageId: 'xml', version: 1, text: attrsText },
+        });
+
+        // bool
+        const boolRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: attrsUri },
+            position: findPositionInText(attrsText, 'feature_enabled'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          boolRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.bool.feature_enabled'),
+            }),
+          ],
+          'Exact set equality for bool reference',
+        );
+
+        // integer
+        const intRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: attrsUri },
+            position: findPositionInText(attrsText, 'max_retry_count'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          intRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.integer.max_retry_count'),
+            }),
+          ],
+          'Exact set equality for integer reference',
+        );
+
+        // array
+        const arrayRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: attrsUri },
+            position: findPositionInText(attrsText, 'planets'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          arrayRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.array.planets'),
+            }),
+          ],
+          'Exact set equality for array reference',
+        );
+
+        // plurals
+        const pluralsRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: attrsUri },
+            position: findPositionInText(attrsText, 'items_count'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          pluralsRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.plurals.items_count'),
+            }),
+          ],
+          'Exact set equality for plurals reference',
+        );
+
+        // id item
+        const idRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: attrsUri },
+            position: findPositionInText(attrsText, 'custom_view_id'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          idRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.id.custom_view_id'),
+            }),
+          ],
+          'Exact set equality for id reference',
+        );
+
+        // Style: AppTheme in styles.xml
+        const stylesPath = join(appDir, 'res', 'values', 'styles.xml');
+        const stylesText = await readFile(stylesPath, 'utf8');
+        const stylesUri = pathToFileURL(stylesPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: stylesUri, languageId: 'xml', version: 1, text: stylesText },
+        });
+        const styleRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stylesUri },
+            position: findPositionInText(stylesText, 'AppTheme'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          styleRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.style.AppTheme'),
+            }),
+          ],
+          'Exact set equality for style reference',
+        );
+
+        // Layout: activity_main.xml (file resource)
+        const layoutPath = join(appDir, 'res', 'layout', 'activity_main.xml');
+        const layoutText = await readFile(layoutPath, 'utf8');
+        const layoutUri = pathToFileURL(layoutPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: layoutUri, languageId: 'xml', version: 1, text: layoutText },
+        });
+        const layoutRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: layoutUri },
+            position: findPositionInText(layoutText, 'LinearLayout'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          layoutRefs.map(locationToKey),
+          [
+            locationToKey({
+              uri: usageRefUri,
+              range: findFieldRangeInText(usageRefText, 'R.layout.activity_main'),
+            }),
+          ],
+          'Exact set equality for layout reference',
+        );
+
+        // Verify that clicking on an inner child element in layout file does NOT treat it as a resource declaration
+        const innerLayoutRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: layoutUri },
+            position: findPositionInText(layoutText, 'TextView'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          innerLayoutRefs,
+          [],
+          'Inner tag in layout file must not be treated as resource declaration',
+        );
+      },
+    );
+
+    await t.test('References: dotted style names use the verified compiled R field', async () => {
+      const file = join(appDir, 'res', 'values', 'styles.xml');
+      const text = await readFile(file, 'utf8');
+      const usage = join(appDir, 'java', 'com', 'example', 'app', 'ResourceUsageReference.kt');
+      const usageText = await readFile(usage, 'utf8');
+      const references = normalizeLocations(
+        await client.request('textDocument/references', {
+          textDocument: { uri: pathToFileURL(file).href },
+          position: findPositionInText(text, 'Dotted.Theme'),
+          context: { includeDeclaration: false },
+        }),
+      );
+      assert.deepEqual(references.map(locationToKey), [
+        locationToKey({
+          uri: pathToFileURL(usage).href,
+          range: findFieldRangeInText(usageText, 'R.style.Dotted_Theme'),
+        }),
+      ]);
+    });
+
+    for (const resource of [
+      { type: 'drawable', folder: 'drawable', name: 'reference_drawable', root: 'shape' },
+      {
+        type: 'mipmap',
+        folder: 'mipmap-anydpi-v26',
+        name: 'reference_icon',
+        root: 'adaptive-icon',
+      },
+      { type: 'anim', folder: 'anim', name: 'reference_alpha', root: 'alpha' },
+      { type: 'animator', folder: 'animator', name: 'reference_animator', root: 'objectAnimator' },
+      { type: 'raw', folder: 'raw', name: 'reference_raw', root: 'probe' },
+      { type: 'xml', folder: 'xml', name: 'reference_config', root: 'preferences' },
+    ]) {
+      await t.test(
+        `References: ${resource.type} XML file identity and declaration range`,
+        async () => {
+          const file = join(appDir, 'res', resource.folder, `${resource.name}.xml`);
+          const text = await readFile(file, 'utf8');
+          const uri = pathToFileURL(file).href;
+          const usage = join(appDir, 'java', 'com', 'example', 'app', 'ResourceUsageReference.kt');
+          const usageText = await readFile(usage, 'utf8');
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri, languageId: 'xml', version: 1, text },
+          });
+          const expectedUsage = locationToKey({
+            uri: pathToFileURL(usage).href,
+            range: findFieldRangeInText(usageText, `R.${resource.type}.${resource.name}`),
+          });
+          for (const includeDeclaration of [false, true]) {
+            const references = normalizeLocations(
+              await client.request('textDocument/references', {
+                textDocument: { uri },
+                position: findPositionInText(text, resource.root),
+                context: { includeDeclaration },
+              }),
+            );
+            const expected = new Set([expectedUsage]);
+            if (includeDeclaration)
+              expected.add(locationToKey({ uri, range: findRangeInText(text, resource.root) }));
+            assert.deepEqual(new Set(references.map(locationToKey)), expected);
+          }
+        },
+      );
+    }
+
+    await t.test(
+      'References: true transitive graph (> single edge: core -> lib -> app)',
+      async () => {
+        const coreStringsPath = join(
+          projectDir,
+          'core',
+          'src',
+          'main',
+          'res',
+          'values',
+          'strings.xml',
+        );
+        const coreStringsText = await readFile(coreStringsPath, 'utf8');
+        const coreStringsUri = pathToFileURL(coreStringsPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: {
+            uri: coreStringsUri,
+            languageId: 'xml',
+            version: 1,
+            text: coreStringsText,
+          },
+        });
+
+        const coreTitleRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: coreStringsUri },
+            position: findPositionInText(coreStringsText, 'core_title'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        const usageRefPath = join(
+          appDir,
+          'java',
+          'com',
+          'example',
+          'app',
+          'ResourceUsageReference.kt',
+        );
+        const usageRefText = await readFile(usageRefPath, 'utf8');
+        const usageRefUri = pathToFileURL(usageRefPath).href;
+
+        const expectedCoreRef: LspLocation = {
+          uri: usageRefUri,
+          range: findFieldRangeInText(usageRefText, 'com.example.core.R.string.core_title'),
+        };
+        const coreUsagePath = join(
+          projectDir,
+          'core',
+          'src',
+          'main',
+          'java',
+          'com',
+          'example',
+          'core',
+          'CoreUsage.java',
+        );
+        const coreUsageReference = locationToKey({
+          uri: pathToFileURL(coreUsagePath).href,
+          range: findFieldRangeInText(await readFile(coreUsagePath, 'utf8'), 'R.string.core_title'),
+        });
+        assert.deepEqual(
+          new Set(coreTitleRefs.map(locationToKey)),
+          new Set([locationToKey(expectedCoreRef), coreUsageReference]),
+          'True transitive consumption (core -> lib -> app) must be found with exact location',
+        );
+        const sameName = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: coreStringsUri },
+            position: findPositionInText(coreStringsText, 'app_name'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          sameName.map(locationToKey),
+          [
+            locationToKey({
+              uri: pathToFileURL(coreUsagePath).href,
+              range: findFieldRangeInText(
+                await readFile(coreUsagePath, 'utf8'),
+                'R.string.app_name',
+              ),
+            }),
+          ],
+          'Same resource name in a different namespace keeps its own PSI field identity',
+        );
+      },
+    );
+
+    await t.test(
+      'References: same-namespace independent module isolation and qualifiers',
+      async () => {
+        // 1. Independent module with same namespace com.example.app
+        const indStringsPath = join(
+          projectDir,
+          'independent',
+          'src',
+          'main',
+          'res',
+          'values',
+          'strings.xml',
+        );
+        const indStringsText = await readFile(indStringsPath, 'utf8');
+        const indStringsUri = pathToFileURL(indStringsPath).href;
+
+        const indUsagePath = join(
+          projectDir,
+          'independent',
+          'src',
+          'main',
+          'java',
+          'com',
+          'example',
+          'independent',
+          'IndependentUsage.java',
+        );
+        const indUsageText = await readFile(indUsagePath, 'utf8');
+        const indUsageUri = pathToFileURL(indUsagePath).href;
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: indStringsUri, languageId: 'xml', version: 1, text: indStringsText },
+        });
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: indUsageUri, languageId: 'java', version: 1, text: indUsageText },
+        });
+
+        // Querying app_name in app's strings.xml must NOT return IndependentUsage
+        const appRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: findPositionInText(stringsText, 'app_name'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.ok(
+          !appRefs.some((loc) => normalizeUri(loc.uri) === normalizeUri(indUsageUri)),
+          'app module references must not contain independent module usage',
+        );
+
+        // Querying app_name in independent module's strings.xml must return ONLY IndependentUsage
+        const indRefs = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: indStringsUri },
+            position: findPositionInText(indStringsText, 'app_name'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        const expectedIndRef: LspLocation = {
+          uri: indUsageUri,
+          range: findFieldRangeInText(indUsageText, 'com.example.app.R.string.app_name'),
+        };
+        assert.deepEqual(
+          indRefs.map(locationToKey),
+          [locationToKey(expectedIndRef)],
+          'Independent module references must be isolated and return exact usage',
+        );
+
+        // 2. Qualifiers: values-es/strings.xml
+        const esStringsPath = join(appDir, 'res', 'values-es', 'strings.xml');
+        const esStringsText = await readFile(esStringsPath, 'utf8');
+        const esStringsUri = pathToFileURL(esStringsPath).href;
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: esStringsUri, languageId: 'xml', version: 1, text: esStringsText },
+        });
+
+        const esDeclLoc: LspLocation = {
+          uri: esStringsUri,
+          range: findRangeInText(esStringsText, 'app_name'),
+        };
+
+        const esRefsNoDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: esStringsUri },
+            position: findPositionInText(esStringsText, 'app_name'),
+            context: { includeDeclaration: false },
+          }),
+        );
+        assert.deepEqual(
+          new Set(esRefsNoDecl.map(locationToKey)),
+          new Set(appRefs.map(locationToKey)),
+          'Qualified declaration references with includeDeclaration false must match code references',
+        );
+
+        const esRefsWithDecl = normalizeLocations(
+          await client.request('textDocument/references', {
+            textDocument: { uri: esStringsUri },
+            position: findPositionInText(esStringsText, 'app_name'),
+            context: { includeDeclaration: true },
+          }),
+        );
+        assert.ok(
+          esRefsWithDecl.some((loc) => locationsEqual(loc, esDeclLoc)),
+          'includeDeclaration: true on qualified declaration must include exact values-es declaration',
+        );
+        assert.ok(
+          !esRefsWithDecl.some((loc) => normalizeUri(loc.uri) === normalizeUri(stringsUri)),
+          'includeDeclaration: true on qualified declaration must NOT include default values declaration',
+        );
+      },
+    );
+
+    await t.test('References: explicit field command omp.findResourceFieldReferences', async () => {
+      const rJarPath = join(
+        projectDir,
+        'app',
+        'build',
+        'intermediates',
+        'compile_and_runtime_r_class_jar',
+        'debug',
+        'processDebugResources',
+        'R.jar',
+      );
+      const rJarUri = pathToFileURL(rJarPath).href;
+
+      // 1. Success with code references: origin.moduleName must match real module name
+      const successCmd = (await client.request('workspace/executeCommand', {
+        command: 'omp.findResourceFieldReferences',
+        arguments: [
+          {
+            protocolVersion: 1,
+            moduleName: appModuleName,
+            namespace: 'com.example.app',
+            type: 'string',
+            name: 'hello_message',
+            classOrigins: [rJarUri],
+          },
+        ],
+      })) as {
+        protocolVersion: number;
+        fieldResolved: boolean;
+        references: LspLocation[];
+        origin: { moduleName: string; namespace: string; classOrigins: string[] };
+      };
+
+      assert.equal(successCmd.protocolVersion, 1);
+      assert.equal(successCmd.fieldResolved, true);
+      assert.ok(Array.isArray(successCmd.references) && successCmd.references.length === 2);
+      assert.equal(successCmd.origin.moduleName, appModuleName);
+      assert.equal(successCmd.origin.namespace, 'com.example.app');
+      assert.ok(
+        successCmd.origin.classOrigins.some((uri) => normalizeUri(uri) === normalizeUri(rJarUri)),
+      );
+
+      // 2. Legal zero code references: quoted_text
+      const zeroCmd = (await client.request('workspace/executeCommand', {
+        command: 'omp.findResourceFieldReferences',
+        arguments: [
+          {
+            protocolVersion: 1,
+            moduleName: appModuleName,
+            namespace: 'com.example.app',
+            type: 'string',
+            name: 'quoted_text',
+            classOrigins: [rJarUri],
+          },
+        ],
+      })) as {
+        protocolVersion: number;
+        fieldResolved: boolean;
+        references: LspLocation[];
+      };
+      assert.equal(zeroCmd.fieldResolved, true);
+      assert.deepEqual(zeroCmd.references, []);
+
+      // 3. Exact moduleName resolution on independent module
+      const indRJarPath = join(
+        projectDir,
+        'independent',
+        'build',
+        'intermediates',
+        'compile_r_class_jar',
+        'debug',
+        'generateDebugRFile',
+        'R.jar',
+      );
+      const indRJarUri = pathToFileURL(indRJarPath).href;
+      const indCmd = (await client.request('workspace/executeCommand', {
+        command: 'omp.findResourceFieldReferences',
+        arguments: [
+          {
+            protocolVersion: 1,
+            moduleName: independentModuleName,
+            namespace: 'com.example.app',
+            type: 'string',
+            name: 'app_name',
+            classOrigins: [indRJarUri],
+          },
+        ],
+      })) as {
+        protocolVersion: number;
+        fieldResolved: boolean;
+        references: LspLocation[];
+        origin: { moduleName: string };
+      };
+      assert.equal(indCmd.fieldResolved, true);
+      assert.equal(indCmd.references.length, 1);
+      assert.equal(indCmd.origin.moduleName, independentModuleName);
+      assert.ok(indCmd.references[0].uri.includes('IndependentUsage.java'));
+
+      // 4. Missing protocolVersion must return -32602 (illegal typed / missing param)
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                moduleName: appModuleName,
+                namespace: 'com.example.app',
+                type: 'string',
+                name: 'app_name',
+                classOrigins: [rJarUri],
+              },
+            ],
+          }),
+        (err: Error) => err.message.includes('-32602'),
+      );
+
+      // 5. Incompatible numeric protocolVersion must return -32803 protocol_mismatch
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 2,
+                moduleName: appModuleName,
+                namespace: 'com.example.app',
+                type: 'string',
+                name: 'app_name',
+                classOrigins: [rJarUri],
+              },
+            ],
+          }),
+        (err: Error) => err.message.includes('-32803') && err.message.includes('protocol_mismatch'),
+      );
+
+      // 6. Invalid params (missing field, invalid classOrigins)
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 1,
+                moduleName: appModuleName,
+                namespace: 'com.example.app',
+                type: 'string',
+                classOrigins: [],
+              },
+            ],
+          }),
+        (err: Error) => err.message.includes('-32602'),
+      );
+
+      // 7. Nonexistent module name rejected with model_unavailable (-32803), no fallback to namespace!
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 1,
+                moduleName: 'does-not-exist',
+                namespace: 'com.example.app',
+                type: 'string',
+                name: 'app_name',
+                classOrigins: [rJarUri],
+              },
+            ],
+          }),
+        (err: Error) => err.message.includes('-32803') && err.message.includes('model_unavailable'),
+      );
+
+      // 8. Namespace mismatch for module rejected
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 1,
+                moduleName: appModuleName,
+                namespace: 'com.wrong.namespace',
+                type: 'string',
+                name: 'app_name',
+                classOrigins: [rJarUri],
+              },
+            ],
+          }),
+        (err: Error) => err.message.includes('-32803') && err.message.includes('target_unresolved'),
+      );
+
+      // 9. Arbitrary unverified classOrigin rejected
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 1,
+                moduleName: appModuleName,
+                namespace: 'com.example.app',
+                type: 'string',
+                name: 'app_name',
+                classOrigins: [
+                  pathToFileURL(join(projectDir, 'app', 'libs', 'no-sources.jar')).href,
+                ],
+              },
+            ],
+          }),
+        (err: Error) => err.message.includes('-32803'),
+      );
+      await assert.rejects(
+        () =>
+          client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 1,
+                moduleName: appModuleName,
+                namespace: 'com.example.app',
+                type: 'string',
+                name: 'app_name',
+                classOrigins: [
+                  rJarUri,
+                  pathToFileURL(join(projectDir, 'app', 'libs', 'no-sources.jar')).href,
+                ],
+              },
+            ],
+          }),
+        (error: Error) => error.message.includes('-32803'),
+      );
+    });
+
+    await t.test(
+      'References: missing merger snapshot fails and recovers without reimport',
+      async () => {
+        const merger = join(
+          projectDir,
+          'app',
+          'build',
+          'intermediates',
+          'incremental',
+          'debug',
+          'mergeDebugResources',
+          'merger.xml',
+        );
+        const displaced = `${merger}.missing`;
+        const query = () =>
+          client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: findPositionInText(stringsText, 'hello_message'),
+            context: { includeDeclaration: false },
+          });
+        await rename(merger, displaced);
+        try {
+          await assert.rejects(
+            query,
+            (error: Error) =>
+              error.message.includes('-32803') && error.message.includes('missing_snapshot'),
+          );
+        } finally {
+          await rename(displaced, merger);
+        }
+        const usage = join(appDir, 'java', 'com', 'example', 'app', 'ResourceUsageReference.kt');
+        const expected = [
+          {
+            uri: mainActivityUri,
+            range: findFieldRangeInText(mainActivityText, 'R.string.hello_message'),
+          },
+          {
+            uri: pathToFileURL(usage).href,
+            range: findFieldRangeInText(await readFile(usage, 'utf8'), 'ResString.hello_message'),
+          },
+        ];
+        assert.deepEqual(
+          new Set(normalizeLocations(await query()).map(locationToKey)),
+          new Set(expected.map(locationToKey)),
+        );
+      },
+    );
+
+    await t.test('References: stale declaration rename and definition regression', async () => {
+      let version = 80;
+      const changeStrings = (text: string) =>
+        client.notify('textDocument/didChange', {
+          textDocument: { uri: stringsUri, version: version++ },
+          contentChanges: [{ text }],
+        });
+
+      // 1. Uncompiled rename in editor causes references to fail with stale_snapshot
+      try {
+        changeStrings(stringsText.replace('name="app_name"', 'name="uncompiled_renamed_app_name"'));
+
+        await assert.rejects(
+          () =>
+            client.request('textDocument/references', {
+              textDocument: { uri: stringsUri },
+              position: findPositionInText(
+                stringsText.replace('name="app_name"', 'name="uncompiled_renamed_app_name"'),
+                'uncompiled_renamed_app_name',
+              ),
+              context: { includeDeclaration: false },
+            }),
+          (err: Error) =>
+            err.message.includes('-32803') &&
+            (err.message.includes('stale_snapshot') || err.message.includes('field_not_found')),
+        );
+
+        // 2. Definition regression test: definition for app_name cleanly falls back to native R class
+        const defPos = findPositionInText(mainActivityText, 'R.string.app_name');
+        const nativeDef = normalizeLocations(
+          await client.request('textDocument/definition', {
+            textDocument: { uri: mainActivityUri },
+            position: { line: defPos.line, character: defPos.character + 'R.string.'.length + 1 },
+          }),
+        );
+        assert.equal(nativeDef.length, 1);
+        assert.ok(nativeDef[0].uri.includes('/R.jar!/'));
+      } finally {
+        changeStrings(stringsText);
+      }
+
+      // Subsequent query on stabilized document must succeed with exact 2 references
+      const subRefs = normalizeLocations(
+        await client.request('textDocument/references', {
+          textDocument: { uri: stringsUri },
+          position: findPositionInText(stringsText, 'hello_message'),
+          context: { includeDeclaration: false },
+        }),
+      );
+      assert.equal(subRefs.length, 2, 'Subsequent query must return exact 2 references');
+    });
+
+    await t.test(
+      'References: populated PSI search cancels, rejects concurrent use edits, and recovers',
+      async () => {
+        const probeUris: string[] = [];
+        const probeContents = new Map<string, string>();
+        const usagePath = join(
+          appDir,
+          'java',
+          'com',
+          'example',
+          'app',
+          'ResourceUsageReference.kt',
+        );
+        const usageText = await readFile(usagePath, 'utf8');
+        const baseReferences: LspLocation[] = [
+          {
+            uri: mainActivityUri,
+            range: findFieldRangeInText(mainActivityText, 'R.string.hello_message'),
+          },
+          {
+            uri: pathToFileURL(usagePath).href,
+            range: findFieldRangeInText(usageText, 'ResString.hello_message'),
+          },
+        ];
+        const expectedReferences = [...baseReferences];
+        for (let i = 0; i < 60; i++) {
+          const uri = pathToFileURL(
+            join(
+              appDir,
+              'java',
+              'com',
+              'example',
+              'app',
+              i === 0 ? 'Cancel Probe 雪.kt' : `CancelProbe${i}.kt`,
+            ),
+          ).href;
+          const text = [
+            'package com.example.app',
+            `class CancelProbe${i} {`,
+            '    fun useResources() {',
+            ...Array.from(
+              { length: 200 },
+              (_, index) => `        val r${index} = R.string.hello_message`,
+            ),
+            '    }',
+            '}',
+          ].join('\n');
+          probeUris.push(uri);
+          probeContents.set(uri, text);
+          for (let occurrence = 1; occurrence <= 200; occurrence++) {
+            expectedReferences.push({
+              uri,
+              range: findFieldRangeInText(text, 'R.string.hello_message', occurrence),
+            });
+          }
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri, languageId: 'kotlin', version: 1, text },
+          });
+        }
+        const params = {
+          textDocument: { uri: stringsUri },
+          position: findPositionInText(stringsText, 'hello_message'),
+          context: { includeDeclaration: false },
+        };
+        const keys = (references: LspLocation[]) => new Set(references.map(locationToKey));
+        // The external JVM's PSI traversal cannot be advanced with fake JavaScript timers.
+        const delay = async () => {
+          const pending = Promise.withResolvers<void>();
+          setTimeout(pending.resolve, 25);
+          await pending.promise;
+        };
+        try {
+          const baseline = normalizeLocations(
+            await client.request('textDocument/references', params),
+          );
+          assert.deepEqual(
+            keys(baseline),
+            keys(expectedReferences),
+            'Every in-memory usage must be indexed before cancellation',
+          );
+          const cancelledId = 88003;
+          client.process.stdin?.write(
+            encode({ jsonrpc: '2.0', id: cancelledId, method: 'textDocument/references', params }),
+          );
+          await delay();
+          client.notify('$/cancelRequest', { id: cancelledId });
+          const cancelled = await client.waitFor(
+            (message) => message.id === cancelledId && !message.method,
+            30000,
+          );
+          assert.equal(cancelled.error?.code, -32800, JSON.stringify(cancelled));
+
+          const firstProbe = baseline.find((location) =>
+            probeUris.some((uri) => normalizeUri(uri) === normalizeUri(location.uri)),
+          );
+          assert.ok(firstProbe);
+          const changedUri = probeUris.find(
+            (uri) => normalizeUri(uri) === normalizeUri(firstProbe.uri),
+          );
+          assert.ok(changedUri);
+          const original = probeContents.get(changedUri);
+          assert.ok(original);
+          const removedLocation = locationToKey({
+            uri: changedUri,
+            range: findFieldRangeInText(original, 'R.string.hello_message'),
+          });
+          const changedId = 88004;
+          client.process.stdin?.write(
+            encode({ jsonrpc: '2.0', id: changedId, method: 'textDocument/references', params }),
+          );
+          await delay();
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: changedUri, version: 2 },
+            contentChanges: [
+              { text: original.replace('R.string.hello_message', 'R.string.app_name') },
+            ],
+          });
+          const modified = await client.waitFor(
+            (message) => message.id === changedId && !message.method,
+            30000,
+          );
+          assert.equal(
+            modified.error?.code,
+            -32801,
+            'Concurrent use-document edits must invalidate the old search snapshot',
+          );
+          const afterChange = normalizeLocations(
+            await client.request('textDocument/references', params),
+          );
+          assert.deepEqual(
+            keys(afterChange),
+            keys(
+              expectedReferences.filter((location) => locationToKey(location) !== removedLocation),
+            ),
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: changedUri, version: 3 },
+            contentChanges: [{ text: original }],
+          });
+          const restored = normalizeLocations(
+            await client.request('textDocument/references', params),
+          );
+          assert.deepEqual(keys(restored), keys(expectedReferences));
+        } finally {
+          for (const uri of probeUris)
+            client.notify('textDocument/didClose', { textDocument: { uri } });
+        }
+        const recovered = normalizeLocations(
+          await client.request('textDocument/references', params),
+        );
+        assert.deepEqual(keys(recovered), keys(baseReferences));
+      },
+    );
 
     await t.test(
       'Compose: suppress FunctionName inspection on Composable functions and preserve on regular functions',

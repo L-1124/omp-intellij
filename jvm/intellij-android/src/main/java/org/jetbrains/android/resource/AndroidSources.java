@@ -37,8 +37,13 @@ public final class AndroidSources {
     private AndroidSources() {
     }
 
+    public static void observeCompiledArchive(Path path) {
+        if (CURRENT.get() != null) track(path);
+    }
+
     public static final class Scope implements AutoCloseable {
         private final com.jetbrains.ls.api.core.LSServer server;
+        private final Map<String, Integer> initialOpenVersions = new HashMap<>();
         private final Map<String, Integer> versions = new HashMap<>();
         private final Map<Path, Stamp> stamps = new HashMap<>();
         private final Map<Path, PsiFile> files = new HashMap<>();
@@ -48,8 +53,16 @@ public final class AndroidSources {
         public Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file) {
             if (CURRENT.get() != null) throw new IllegalStateException("Nested Android source scope");
             this.server = server;
+            snapshotOpenDocuments();
             CURRENT.set(this);
             observe(file);
+        }
+
+        private void snapshotOpenDocuments() {
+            if (server == null) return;
+            for (com.jetbrains.lsp.protocol.URI uri : server.getDocuments().openDocuments()) {
+                initialOpenVersions.put(uri.getUri(), version(server, uri.getUri()));
+            }
         }
 
         public void verify() {
@@ -136,11 +149,13 @@ public final class AndroidSources {
         return new Scope(null, file);
     }
 
-    private static void observe(VirtualFile file) {
+    public static void observe(VirtualFile file) {
         Scope scope = CURRENT.get();
         if (file == null || scope == null || scope.server == null) return;
         String uri = com.jetbrains.ls.api.core.util.PositionKt.getUri(file);
-        if (!scope.versions.containsKey(uri)) scope.versions.put(uri, version(scope.server, uri));
+        if (!scope.versions.containsKey(uri)) {
+            scope.versions.put(uri, scope.initialOpenVersions.get(uri));
+        }
     }
 
     private static Integer version(com.jetbrains.ls.api.core.LSServer server, String uri) {

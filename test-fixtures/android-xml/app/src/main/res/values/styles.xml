@@ -4,4 +4,5 @@
         <item name="colorPrimary">@color/primary_color</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+    <style name="Dotted.Theme" parent="@android:style/Theme.Material" />
 </resources>

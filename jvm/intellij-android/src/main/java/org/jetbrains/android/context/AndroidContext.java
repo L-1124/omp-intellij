@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -38,14 +39,25 @@ public final class AndroidContext {
         if (file == null || file.getVirtualFile() == null || !file.isValid()) return AndroidFileInfo.nonAndroid();
         VirtualFile virtualFile = file.getVirtualFile();
         Module module = findModule(file.getProject(), virtualFile);
-        if (module != null && isAndroidModule(module)) return identify(file, module);
+        if (module != null && isAndroidModule(module)) {
+            AndroidFileInfo direct = identify(file, module);
+            if (direct.isAndroidFile()) return direct;
+        }
         // Explicit custom roots can lie outside all imported content roots.
         AndroidFileInfo selected = null;
         for (Module candidate : ModuleManager.getInstance(file.getProject()).getModules()) {
             if (!isAndroidModule(candidate)) continue;
             AndroidFileInfo info = identify(file, candidate);
             if (!info.isAndroidFile()) continue;
-            if (selected != null) return AndroidFileInfo.nonAndroid();
+            if (selected != null) {
+                if (Objects.equals(selected.moduleRoot(), info.moduleRoot())) {
+                    if (selected.variant() == null && info.variant() != null) selected = info;
+                    else if (selected.variant() != null && info.variant() != null
+                            && !selected.variant().equals(info.variant())) return AndroidFileInfo.nonAndroid();
+                    continue;
+                }
+                return AndroidFileInfo.nonAndroid();
+            }
             selected = info;
         }
         return selected == null ? AndroidFileInfo.nonAndroid() : selected;
@@ -80,12 +92,7 @@ public final class AndroidContext {
 
     public static boolean isAndroidModule(Module module) {
         if (module == null || module.isDisposed() || findModuleRoot(module) == null) return false;
-        boolean imported = false;
-        for (var entry : ModuleRootManager.getInstance(module).getOrderEntries()) {
-            if (entry instanceof LibraryOrderEntry library && library.getLibrary() != null && "Gradle: android:r:null".equals(library.getLibrary().getName()))
-                imported = true;
-        }
-        return imported && layout(module).android;
+        return layout(module).android;
     }
 
     public static Module findModule(Project project, VirtualFile file) {
@@ -131,6 +138,17 @@ public final class AndroidContext {
                 Path relative = directory.relativize(path);
                 if (relative.getNameCount() >= 3 && Set.of("compile_and_runtime_r_class_jar", "compile_r_class_jar", "compile_and_runtime_not_namespaced_r_class_jar").contains(relative.getName(0).toString()))
                     variants.add(relative.getName(1).toString());
+            }
+        }
+        // The importer names a production module after its active variant and registers its source-set URL,
+        // including nonexistent source directories. Require both; artifacts left on disk cannot select a variant.
+        String moduleName = module.getName();
+        int separator = moduleName.lastIndexOf('.');
+        if (separator >= 0 && separator + 1 < moduleName.length()) {
+            String candidate = moduleName.substring(separator + 1);
+            String sourceUrl = VfsUtilCore.pathToUrl(Path.of(root.getPath()).resolve("src").resolve(candidate).toString());
+            for (String contentUrl : ModuleRootManager.getInstance(module).getContentRootUrls()) {
+                if (contentUrl.equals(sourceUrl)) variants.add(candidate);
             }
         }
         return variants.size() == 1 ? variants.iterator().next() : null;

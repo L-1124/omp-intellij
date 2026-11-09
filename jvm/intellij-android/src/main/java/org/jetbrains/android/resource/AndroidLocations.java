@@ -26,7 +26,7 @@ public final class AndroidLocations {
     private AndroidLocations() {
     }
 
-    static Location at(Path path, Range range) {
+    public static Location at(Path path, Range range) {
         try {
             String uri = com.jetbrains.ls.api.core.util.UriConverterKt.intellijUriToLspUri(com.intellij.openapi.vfs.VfsUtilCore.pathToUrl(path.toAbsolutePath().normalize().toString()));
             return (Location) CONSTRUCTOR.invokeExact(uri, range, (kotlin.jvm.internal.DefaultConstructorMarker) null);
@@ -39,7 +39,8 @@ public final class AndroidLocations {
 
     public static Path path(Location location) {
         try {
-            return Path.of(java.net.URI.create((String) URI.invokeExact(location)));
+            String url = com.jetbrains.ls.api.core.util.UriConverter.INSTANCE.lspUriToIntellijUri((String) URI.invokeExact(location));
+            return Path.of(com.intellij.openapi.vfs.VfsUtilCore.urlToPath(url));
         } catch (RuntimeException | Error error) {
             throw error;
         } catch (Throwable error) {

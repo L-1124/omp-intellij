@@ -17,3 +17,5 @@ dependencyResolutionManagement {
 rootProject.name = "android-xml"
 include(":app")
 include(":lib")
+include(":core")
+include(":independent")

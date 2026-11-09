@@ -18,9 +18,21 @@ import org.jetbrains.android.resource.ResourceReference;
 import org.jetbrains.android.resource.AndroidLocations;
 import org.jetbrains.android.resource.ResourceResolver;
 
+import com.intellij.openapi.application.Application;
+import com.jetbrains.analyzer.api.AnalyzerContextKind;
+import com.jetbrains.analyzer.bootstrap.AnalyzerContainerBuilder;
+import com.jetbrains.ls.api.features.WorkspaceComponentEntry;
+import com.jetbrains.ls.snapshot.api.impl.core.LSConfigurationData;
+import com.jetbrains.ls.snapshot.api.impl.core.WorkspaceComponent;
+import kotlin.Unit;
+import kotlin.coroutines.Continuation;
 import java.nio.file.Path;
 
 public final class AndroidResourceNavigation implements DirectNavigationProvider {
+    public static final AndroidResourceNavigation INSTANCE = new AndroidResourceNavigation();
+
+    public AndroidResourceNavigation() {
+    }
     @Override
     public PsiElement getNavigationElement(PsiElement element) {
         if (!(element instanceof PsiField field)) return null;
@@ -34,10 +46,11 @@ public final class AndroidResourceNavigation implements DirectNavigationProvider
         try (var sources = AndroidSources.open(element.getContainingFile().getVirtualFile())) {
             for (Module module : ModuleManager.getInstance(element.getProject()).getModules()) {
                 ProgressManager.checkCanceled();
+                if (!AndroidContext.isAndroidModule(module)) continue;
                 var root = AndroidContext.findModuleRoot(module);
                 if (root == null || !origin.startsWith(Path.of(root.getPath()).toAbsolutePath().normalize())) continue;
                 var reference = new ResourceReference(type.getName(), field.getName(), qualified.substring(0, qualified.length() - 2), false, null, origin);
-                var definitions = ResourceResolver.resolve(element.getProject(), module, reference);
+                var definitions = ResourceResolver.resolveAll(element.getProject(), module, reference);
                 if (definitions.isEmpty()) continue;
                 var location = definitions.get(0).getLocation();
                 Path path = AndroidLocations.path(location);
@@ -99,6 +112,37 @@ public final class AndroidResourceNavigation implements DirectNavigationProvider
         @Override
         public String getText() {
             return file.getText().substring(range.getStartOffset(), range.getEndOffset());
+        }
+    }
+
+    public static final class Component implements WorkspaceComponent<Object> {
+        public static final Component INSTANCE = new Component();
+
+        private Component() {
+        }
+
+        @Override
+        public Object init(LSConfigurationData data) {
+            return this;
+        }
+
+        @Override
+        public Object registerInApplicationContainer(
+                AnalyzerContainerBuilder builder,
+                Application application,
+                Object state,
+                AnalyzerContextKind kind,
+                Continuation<? super Unit> continuation) {
+            builder.extension("com.intellij.lang.directNavigationProvider", AndroidResourceNavigation.INSTANCE);
+            return Unit.INSTANCE;
+        }
+
+    }
+
+    public static final class Entry implements WorkspaceComponentEntry {
+        @Override
+        public WorkspaceComponent<?> component() {
+            return Component.INSTANCE;
         }
     }
 }
