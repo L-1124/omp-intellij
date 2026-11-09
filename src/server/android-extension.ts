@@ -16,6 +16,7 @@ const EXTENSION_ASSETS = [
   'kxml2-2.3.0.jar',
   'sdk-common-32.4.1.jar',
   'layoutlib-api-32.4.1.jar',
+  'manifest-merger-32.4.1.jar',
 ] as const;
 const UPSTREAM_SHA256: Readonly<Record<string, string>> = {
   'adblib-9.4.1.jar': 'ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9',
@@ -28,6 +29,7 @@ const UPSTREAM_SHA256: Readonly<Record<string, string>> = {
   'kxml2-2.3.0.jar': 'f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2',
   'sdk-common-32.4.1.jar': '0ef83f5f212f2fce8300a167ba256d1cd81e4cda6adc868f7025a8dbdd2ae14f',
   'layoutlib-api-32.4.1.jar': '24d9d0877a956ebd6e586640147bc6bd52ce904f0e6ab740be0899271e354543',
+  'manifest-merger-32.4.1.jar': 'a8ade13523ccf3289fdb4946fcf23831d2eac8ad8b216f63a74850d46cdc8dd4',
 };
 
 export interface AndroidExtensionResolution {

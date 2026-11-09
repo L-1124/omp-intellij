@@ -129,6 +129,7 @@ const assetNames = [
   'kxml2-2.3.0.jar',
   'sdk-common-32.4.1.jar',
   'layoutlib-api-32.4.1.jar',
+  'manifest-merger-32.4.1.jar',
 ];
 
 async function extensionFixture(t: TestContext) {
@@ -358,6 +359,7 @@ for (const name of [
   'kxml2-2.3.0.jar',
   'sdk-common-32.4.1.jar',
   'layoutlib-api-32.4.1.jar',
+  'manifest-merger-32.4.1.jar',
 ]) {
   test(`extension rejects substituted ${name} even with a self-consistent manifest`, async (t) => {
     const { extension, executable, manifestPath } = await extensionFixture(t);

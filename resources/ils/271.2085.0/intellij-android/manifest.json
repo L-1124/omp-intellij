@@ -12,8 +12,8 @@
     {
       "name": "intellij-android.jar",
       "path": "lib/intellij-android.jar",
-      "sha256": "ef5c994da405ea06a361fff4312e06dbd16ace733c91a9f596c44d8d8033fb28",
-      "size": 527394
+      "sha256": "d5318b8766c065a44ef64dddee78c8e548bdaed5343c6717b6afcfe11ada3d5e",
+      "size": 733139
     },
     {
       "name": "adblib-9.4.1.jar",
@@ -62,6 +62,12 @@
       "path": "lib/lint-model-32.4.1.jar",
       "sha256": "81ac1f03f390f0aa8308d389a8bbe4238f9bd843ff705556f68564f6ee257cf1",
       "size": 164882
+    },
+    {
+      "name": "manifest-merger-32.4.1.jar",
+      "path": "lib/manifest-merger-32.4.1.jar",
+      "sha256": "a8ade13523ccf3289fdb4946fcf23831d2eac8ad8b216f63a74850d46cdc8dd4",
+      "size": 272632
     },
     {
       "name": "sdk-common-32.4.1.jar",
