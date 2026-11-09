@@ -25,9 +25,10 @@
    - 服务端通过 `executeCommandProvider.commands` 暴露 `list-mcp-tools` 与 `run-mcp-tool`。通过发送 `{"command":"list-mcp-tools","arguments":[]}` 可动态拉取当前项目可用的 22 项 MCP 工具定义及其完整的 `inputSchema`。
    - 工具调用必须封装为 `{"command":"run-mcp-tool","arguments":[{"tool":"<tool_name>","arguments":{...}}]}`，严禁传错参数结构（缺少外层包装对象会触发服务端 `-32602` 参数校验异常）。能力广告不等于可用性证明，未构建或缺少模块元数据时部分工具（如 `list_directory_tree`）会返回执行错误。
 
-7. **同进程 Android Lint 研究边界**：
-   - 历史探针研究了 6 个核心依赖 JAR 与 `LSDiagnosticProvider` 集成，并记录 MyHook 增量诊断耗时；该研究不等于当前 271 生产资产已集成 Lint。
-   - 当前发布清单为 Android 扩展及两个 adblib JAR。下方 Lint 依赖和时延保留为历史研究证据，生产集成仍按 `plan.md` 阶段 H 单独验收，不属于本次工程治理 TODO 的交付范围。
+7. **同进程 Android Lint**：
+   - `AndroidLintProvider` 已接入标准 `textDocument/diagnostic`，与 ILS 原生 Java/Kotlin 编译诊断合并；工程依赖 AAR 的规则通过官方 `JarFileIssueRegistry` 装载。
+   - 当前发布清单含 11 个 JAR，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
+   - 当前诊断范围为阶段 H 的 Java/Kotlin。XML/Manifest Lint 属于[阶段 I](../plan.md)；已完成小范围独立 JVM 探索，生产接入及真实 ILS 验收尚未进行，现有 XML 导航与配置解析不作为它的完成证据。
 
 ---
 
@@ -285,7 +286,7 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 
 ### 3. 内嵌官方 Android Lint 依赖与规则架构
 
-以下为历史内嵌 Lint 探针的依赖和设计记录；当前生产发布是否包含该能力，以阶段 H 实现和对应版本验收为准。
+以下为历史探针的依赖和设计记录。当前生产实现及 11 项资产以 [Android JVM 扩展指南](android-jvm-extension.md#7-android-lint-单文件诊断) 为准，历史耗时不作为当前完整规则集的性能承诺。
 
 #### ① 6 个核心依赖 JAR 清单（总计 11.36 MB / 11,362,788 字节）
 
@@ -341,7 +342,7 @@ Gradle 导入完成后，标准 definition 将 `NotificationChannel` 定位到 `
 
 `run-mcp-tool` 的 `get_file_problems` 与 `lint_files` 在本实例返回 `{"isError":true,"content":"com.intellij.codeInsight.daemon.DaemonCodeAnalyzer"}`，不能作为已验证可用的替代入口；该错误本身不证明内部故障机制。
 
-结论限于上述版本、实例和规则：原生通用编译诊断可用，未满足阶段 H 的 Android/Compose 正反例契约。阶段 H 的自有实现仍待开展，命名采用 `AndroidLintProvider`；本轮未分发 Lint 依赖或实现该 Provider。原始报告及代码切片归档于 `local://native271-diagnostic-evidence.json`。
+上述无扩展控制组证明：该版本的原生通用编译诊断可用，单独使用原生服务时未满足 Android/Compose 正反例契约。控制组未分发 Lint 依赖，也未实现 `AndroidLintProvider`；当前扩展已单独接入该 Provider。原始控制组报告及代码切片归档于 `local://native271-diagnostic-evidence.json`。
 
 ---
 
