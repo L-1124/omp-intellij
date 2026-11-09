@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { executeIntellij } from '../../src/extension/intellij-tool.js';
@@ -2483,10 +2483,76 @@ async function findCommonJar(gradleCacheDir: string): Promise<string> {
   throw new Error(`Prerequisite common-32.4.1.jar not found under ${dir}`);
 }
 
+async function findSdkCommonJar(gradleCacheDir: string): Promise<string> {
+  const dir = join(
+    gradleCacheDir,
+    'caches',
+    'modules-2',
+    'files-2.1',
+    'com.android.tools',
+    'sdk-common',
+    '32.4.1',
+  );
+  if (existsSync(dir)) {
+    const subdirs = await readdir(dir);
+    for (const sub of subdirs) {
+      const jarPath = join(dir, sub, 'sdk-common-32.4.1.jar');
+      if (existsSync(jarPath)) return jarPath;
+    }
+  }
+  throw new Error(`Prerequisite sdk-common-32.4.1.jar not found under ${dir}`);
+}
+
+async function findLayoutlibApiJar(gradleCacheDir: string): Promise<string> {
+  const dir = join(
+    gradleCacheDir,
+    'caches',
+    'modules-2',
+    'files-2.1',
+    'com.android.tools.layoutlib',
+    'layoutlib-api',
+    '32.4.1',
+  );
+  if (existsSync(dir)) {
+    const subdirs = await readdir(dir);
+    for (const sub of subdirs) {
+      const jarPath = join(dir, sub, 'layoutlib-api-32.4.1.jar');
+      if (existsSync(jarPath)) return jarPath;
+    }
+  }
+  throw new Error(`Prerequisite layoutlib-api-32.4.1.jar not found under ${dir}`);
+}
+
+async function findGuavaJar(gradleCacheDir: string): Promise<string> {
+  const dir = join(
+    gradleCacheDir,
+    'caches',
+    'modules-2',
+    'files-2.1',
+    'com.google.guava',
+    'guava',
+  );
+  if (existsSync(dir)) {
+    const versions = await readdir(dir);
+    for (const v of versions) {
+      const vDir = join(dir, v);
+      const subdirs = await readdir(vDir);
+      for (const sub of subdirs) {
+        const jarPath = join(vDir, sub, `guava-${v}.jar`);
+        if (existsSync(jarPath)) return jarPath;
+      }
+    }
+  }
+  throw new Error(`Prerequisite guava jar not found under ${dir}`);
+}
+
 async function createCustomExternalAar(
   sandbox: IntegrationSandbox,
   lintApiJar: string,
   commonJar: string,
+  sdkCommonJar: string,
+  layoutlibApiJar: string,
+  guavaJar: string,
   targetAarPath: string,
 ): Promise<void> {
   const staging = join(sandbox.sandboxDir, 'custom-external-staging');
@@ -2551,6 +2617,96 @@ async function createCustomExternalAar(
     'utf8',
   );
 
+  const xmlDetectorSrc = join(staging, 'CustomXmlDetector.java');
+  await writeFile(
+    xmlDetectorSrc,
+    [
+      'package com.example.external;',
+      'import com.android.tools.lint.client.api.ResourceRepositoryScope;',
+      'import com.android.tools.lint.detector.api.*;',
+      'import com.android.ide.common.resources.ResourceRepository;',
+      'import com.android.ide.common.resources.ResourceItem;',
+      'import com.android.ide.common.rendering.api.ResourceNamespace;',
+      'import com.android.ide.common.rendering.api.ResourceValue;',
+      'import com.android.resources.ResourceType;',
+      'import org.w3c.dom.Element;',
+      'import java.util.*;',
+      'public class CustomXmlDetector extends Detector implements XmlScanner {',
+      '    private static final java.util.concurrent.atomic.AtomicLong visits = new java.util.concurrent.atomic.AtomicLong();',
+      '    public static final Issue ISSUE = Issue.create(',
+      '        "CustomXmlRule",',
+      '        "Custom XML rule description",',
+      '        "Explanation of custom XML rule",',
+      '        Category.CORRECTNESS,',
+      '        5,',
+      '        Severity.WARNING,',
+      '        new Implementation(CustomXmlDetector.class, Scope.RESOURCE_FILE_SCOPE)',
+      '    );',
+      '    @Override',
+      '    public Collection<String> getApplicableElements() {',
+      '        return Arrays.asList("CustomXmlView", "CustomRepoQueryView");',
+      '    }',
+      '    @Override',
+      '    public void visitElement(XmlContext context, Element element) {',
+      '        String tag = element.getTagName();',
+      '        if ("CustomRepoQueryView".equals(tag)) {',
+      '            try {',
+      '                ResourceRepository projectRepo = context.getClient().getResources(context.getProject(), ResourceRepositoryScope.PROJECT_ONLY);',
+      '                ResourceRepository localRepo = context.getClient().getResources(context.getProject(), ResourceRepositoryScope.LOCAL_DEPENDENCIES);',
+      '                ResourceRepository allRepo = context.getClient().getResources(context.getProject(), ResourceRepositoryScope.ALL_DEPENDENCIES);',
+      '                ResourceRepository androidRepo = context.getClient().getResources(context.getProject(), ResourceRepositoryScope.ANDROID);',
+      '                List<ResourceItem> appNameItems = projectRepo != null ? projectRepo.getResources(ResourceNamespace.RES_AUTO, ResourceType.STRING, "app_name") : Collections.<ResourceItem>emptyList();',
+      '                String appNameVal = !appNameItems.isEmpty() ? appNameItems.get(0).getResourceValue().getValue() : "missing";',
+      '                List<ResourceItem> projLibItems = projectRepo != null ? projectRepo.getResources(ResourceNamespace.RES_AUTO, ResourceType.STRING, "lib_name") : Collections.<ResourceItem>emptyList();',
+      '                boolean projHasLib = !projLibItems.isEmpty();',
+      '                List<ResourceItem> localLibItems = localRepo != null ? localRepo.getResources(ResourceNamespace.RES_AUTO, ResourceType.STRING, "lib_name") : Collections.<ResourceItem>emptyList();',
+      '                String libNameVal = !localLibItems.isEmpty() ? localLibItems.get(0).getResourceValue().getValue() : "missing";',
+      '                List<ResourceItem> okItems = androidRepo != null ? androidRepo.getResources(ResourceNamespace.ANDROID, ResourceType.STRING, "ok") : Collections.<ResourceItem>emptyList();',
+      '                boolean hasOk = !okItems.isEmpty();',
+      '                String msg = "CustomRepoQuery: app_name=" + appNameVal + "; projHasLib=" + projHasLib + "; lib_name=" + libNameVal + "; hasOk=" + hasOk + "; count=" + appNameItems.size();',
+      '                Location loc = context.getElementLocation(element);',
+      '                context.report(ISSUE, loc, msg);',
+      '            } catch (Throwable t) {',
+      '                Location loc = context.getElementLocation(element);',
+      '                context.report(ISSUE, loc, "CustomRepoQuery error: " + t.getMessage());',
+      '            }',
+      '        } else {',
+      '            Location loc = context.getElementLocation(element);',
+      '            context.report(ISSUE, loc, "Custom XML rule triggered on " + tag + "; visit=" + visits.incrementAndGet());',
+      '        }',
+      '    }',
+      '}',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const manifestDetectorSrc = join(staging, 'CustomManifestDetector.java');
+  await writeFile(manifestDetectorSrc, [
+    'package com.example.external;',
+    'import com.android.tools.lint.client.api.LintClient;',
+    'import com.android.tools.lint.detector.api.*;',
+    'import org.w3c.dom.*;',
+    'import java.util.*;',
+    'public class CustomManifestDetector extends Detector implements XmlScanner {',
+    '  public static final Issue ISSUE = Issue.create("CustomManifestRule", "Manifest source mapping",',
+    '      "Reports the merged label through its original source location.", Category.CORRECTNESS, 5,',
+    '      Severity.WARNING, new Implementation(CustomManifestDetector.class, Scope.MANIFEST_SCOPE));',
+    '  public Collection<String> getApplicableElements() { return Collections.singleton("application"); }',
+    '  public void visitElement(XmlContext context, Element source) {',
+    '    Document merged = context.getClient().getMergedManifest(context.getProject());',
+    '    if (merged == null) return;',
+    '    NodeList apps = merged.getElementsByTagName("application");',
+    '    if (apps.getLength() == 0) return;',
+    '    Attr label = ((Element) apps.item(0)).getAttributeNodeNS("http://schemas.android.com/apk/res/android", "label");',
+    '    if (label == null) return;',
+    '    boolean built = merged.getUserData(LintClient.MERGED_MANIFEST) != null;',
+    '    Location location = context.getLocation(label);',
+    '    context.report(ISSUE, label, location, "ManifestSnapshot: merged=" + built + "; label=" + label.getValue());',
+    '  }',
+    '}',
+  ].join('\n'), 'utf8');
+
   const registrySrc = join(staging, 'CustomExternalIssueRegistry.java');
   await writeFile(
     registrySrc,
@@ -2559,12 +2715,12 @@ async function createCustomExternalAar(
       'import com.android.tools.lint.client.api.IssueRegistry;',
       'import com.android.tools.lint.client.api.Vendor;',
       'import com.android.tools.lint.detector.api.Issue;',
-      'import java.util.Collections;',
+      'import java.util.Arrays;',
       'import java.util.List;',
       'public class CustomExternalIssueRegistry extends IssueRegistry {',
       '    @Override',
       '    public List<Issue> getIssues() {',
-      '        return Collections.singletonList(CustomExternalDetector.ISSUE);',
+      '        return Arrays.asList(CustomExternalDetector.ISSUE, CustomXmlDetector.ISSUE, CustomManifestDetector.ISSUE);',
       '    }',
       '    @Override',
       '    public int getApi() { return 16; }',
@@ -2580,8 +2736,8 @@ async function createCustomExternalAar(
     'utf8',
   );
 
-  const cp = [lintApiJar, commonJar].join(process.platform === 'win32' ? ';' : ':');
-  const compileRes = spawnSync(javac, ['-cp', cp, '-d', lintStaging, detectorSrc, registrySrc], { encoding: 'utf8' });
+  const cp = [lintApiJar, commonJar, sdkCommonJar, layoutlibApiJar, guavaJar].join(process.platform === 'win32' ? ';' : ':');
+  const compileRes = spawnSync(javac, ['-cp', cp, '-d', lintStaging, detectorSrc, xmlDetectorSrc, manifestDetectorSrc, registrySrc], { encoding: 'utf8' });
   assert.equal(compileRes.status, 0, `compileCustomExternal: ${compileRes.stderr}`);
 
   const servicesDir = join(lintStaging, 'META-INF', 'services');
@@ -2700,15 +2856,61 @@ async function createCorruptedAar(
     'utf8',
   );
 
+  // 3. CorruptXmlNodeIssueRegistry & CorruptXmlNodeDetector (node visit linkage error)
+  const corruptXmlSrc = join(staging, 'CorruptXmlNodeIssueRegistry.java');
+  await writeFile(
+    corruptXmlSrc,
+    [
+      'package com.example.corrupt;',
+      'import com.android.tools.lint.client.api.IssueRegistry;',
+      'import com.android.tools.lint.detector.api.*;',
+      'import org.w3c.dom.Element;',
+      'import java.util.Collections;',
+      'import java.util.List;',
+      'import java.util.Collection;',
+      'public class CorruptXmlNodeIssueRegistry extends IssueRegistry {',
+      '    public static final Issue ISSUE = Issue.create(',
+      '        "CorruptXmlNodeRule",',
+      '        "Corrupt XML node rule",',
+      '        "Explanation",',
+      '        Category.CORRECTNESS,',
+      '        5,',
+      '        Severity.ERROR,',
+      '        new Implementation(CorruptXmlNodeDetector.class, Scope.RESOURCE_FILE_SCOPE)',
+      '    );',
+      '    public static class CorruptXmlNodeDetector extends Detector implements XmlScanner {',
+      '        @Override',
+      '        public Collection<String> getApplicableElements() {',
+      '            return Collections.singletonList("CorruptXmlNode");',
+      '        }',
+      '        @Override',
+      '        public void visitElement(XmlContext context, Element element) {',
+      '            if (element.hasAttribute("triggerNodeFault")) {',
+      '                throw new NoSuchMethodError("Simulated corrupt detector node visit linkage failure");',
+      '            }',
+      '        }',
+      '    }',
+      '    @Override',
+      '    public List<Issue> getIssues() { return Collections.singletonList(ISSUE); }',
+      '    @Override',
+      '    public int getApi() { return 16; }',
+      '    @Override',
+      '    public int getMinApi() { return 14; }',
+      '}',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
   const cp = [lintApiJar, commonJar].join(process.platform === 'win32' ? ';' : ':');
-  const compileCorrupt = spawnSync(javac, ['-cp', cp, '-d', lintStaging, corruptConstructorSrc, corruptExecutionSrc], { encoding: 'utf8' });
+  const compileCorrupt = spawnSync(javac, ['-cp', cp, '-d', lintStaging, corruptConstructorSrc, corruptExecutionSrc, corruptXmlSrc], { encoding: 'utf8' });
   assert.equal(compileCorrupt.status, 0, `compileCorrupt: ${compileCorrupt.stderr}`);
 
   const servicesDir = join(lintStaging, 'META-INF', 'services');
   await mkdir(servicesDir, { recursive: true });
   await writeFile(
     join(servicesDir, 'com.android.tools.lint.client.api.IssueRegistry'),
-    'com.example.corrupt.CorruptConstructorIssueRegistry\ncom.example.corrupt.CorruptExecutionIssueRegistry\n',
+    'com.example.corrupt.CorruptConstructorIssueRegistry\ncom.example.corrupt.CorruptExecutionIssueRegistry\ncom.example.corrupt.CorruptXmlNodeIssueRegistry\n',
     'utf8',
   );
 
@@ -2814,12 +3016,18 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
 
   const lintApiJar = await findLintApiJar(GLOBAL_GRADLE_USER_HOME);
   const commonJar = await findCommonJar(GLOBAL_GRADLE_USER_HOME);
+  const sdkCommonJar = await findSdkCommonJar(GLOBAL_GRADLE_USER_HOME);
+  const layoutlibApiJar = await findLayoutlibApiJar(GLOBAL_GRADLE_USER_HOME);
+  const guavaJar = await findGuavaJar(GLOBAL_GRADLE_USER_HOME);
 
   // Real non-AndroidX custom rule AAR
   await createCustomExternalAar(
     sandbox,
     lintApiJar,
     commonJar,
+    sdkCommonJar,
+    layoutlibApiJar,
+    guavaJar,
     join(targetDir, 'app', 'libs', 'custom-external.aar'),
   );
 
@@ -2910,6 +3118,223 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
     );
   }
 
+  // Post-build XML fixture probe files
+  const resDir = join(targetDir, 'app', 'src', 'main', 'res');
+  await mkdir(join(resDir, 'layout'), { recursive: true });
+  await mkdir(join(resDir, 'layout-v26'), { recursive: true });
+  await mkdir(join(resDir, 'menu'), { recursive: true });
+  await mkdir(join(targetDir, 'app', 'src', 'debug'), { recursive: true });
+
+  await writeFile(
+    join(resDir, 'layout', 'layout_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent"',
+      '    android:orientation="vertical">',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Hardcoded String Text" />',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'layout', 'layout_image_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent">',
+      '    <ImageView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:src="@drawable/reference_drawable" />',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'layout', 'layout_ignore_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    xmlns:t="http://schemas.android.com/tools"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent"',
+      '    android:orientation="vertical">',
+      '    <TextView',
+      '        t:ignore="HardcodedText"',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Ignored Hardcoded Text" />',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Not Ignored Sibling Text" />',
+      '    <LinearLayout',
+      '        t:ignore="HardcodedText,ContentDescription"',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content">',
+      '        <TextView',
+      '            android:layout_width="wrap_content"',
+      '            android:layout_height="wrap_content"',
+      '            android:text="Ancestor Ignored Text" />',
+      '        <ImageView',
+      '            android:layout_width="wrap_content"',
+      '            android:layout_height="wrap_content"',
+      '            android:src="@drawable/reference_drawable" />',
+      '    </LinearLayout>',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'layout', 'layout_edge_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    xmlns:customalias="http://schemas.android.com/apk/res/android"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent"',
+      '    android:orientation="vertical">',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Emoji 👋 probe 🎉" />',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Entity &amp; &lt; test" />',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text=\'Single quote hardcoded\' />',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Multi\nLine\nHardcoded" />',
+      '    <TextView',
+      '        customalias:text="Alias Hardcoded Text"',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content" />',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'layout', 'layout_api_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    xmlns:tools="http://schemas.android.com/tools"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent">',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:tooltipText="Tooltip Text" />',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'layout-v26', 'layout_api_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent">',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:tooltipText="Tooltip Text" />',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'layout', 'layout_aar_probe.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    android:layout_width="match_parent"',
+      '    android:layout_height="match_parent"',
+      '    android:orientation="vertical">',
+      '    <CustomXmlView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content" />',
+      '    <CustomRepoQueryView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content" />',
+      '    <CorruptXmlNode',
+      '        triggerNodeFault="true"',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content" />',
+      '    <TextView',
+      '        android:layout_width="wrap_content"',
+      '        android:layout_height="wrap_content"',
+      '        android:text="Fault Sibling Text" />',
+      '</LinearLayout>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(resDir, 'menu', 'sample_menu.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<menu xmlns:android="http://schemas.android.com/apk/res/android">',
+      '    <item',
+      '        android:id="@+id/menu_item1"',
+      '        android:title="Hardcoded Menu Title" />',
+      '</menu>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(targetDir, 'app', 'src', 'debug', 'AndroidManifest.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<manifest xmlns:android="http://schemas.android.com/apk/res/android"',
+      '    package="com.example.app">',
+      '    <application>',
+      '        <activity android:name=".DebugActivity" android:exported="false" />',
+      '    </application>',
+      '</manifest>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  await writeFile(
+    join(targetDir, 'app', 'plain_doc.xml'),
+    [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<plain-root>',
+      '    <child text="Plain text document" />',
+      '</plain-root>',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
   return targetDir;
 }
 
@@ -3853,3 +4278,1286 @@ test('Android Lint diagnostics integration', {
     await sandbox.cleanup();
   }
 });
+
+test('Android XML and Manifest Lint diagnostics integration', {
+  skip: !hasPrerequisitesEnvironment(),
+  timeout: 600000,
+}, async (t) => {
+  const prereqs = await verifyPrerequisites();
+
+  // 1. Native baseline in isolated session (WITHOUT extension)
+  await t.test(
+    'Baseline: Isolated native ILS session without extension preserves native XML diagnostics and emits no Lint issues',
+    async () => {
+      const nativeSandbox = await createIntegrationSandbox(prereqs);
+      let nativeProjectDir = '';
+      let nativeDriver: InitializedLspClientDriver | null = null;
+      try {
+        nativeProjectDir = await copyAndroidLintFixture(nativeSandbox);
+        nativeDriver = await startLspClient(nativeProjectDir, nativeSandbox);
+
+        await executeIntellij(
+          { action: 'wait', project: nativeProjectDir, timeout: 180 },
+          undefined,
+          undefined,
+          { cwd: nativeProjectDir } as ExtensionContext,
+          { systemPath: nativeSandbox.systemPath },
+        );
+
+        // Verify capabilities: diagnosticProvider declared
+        const initCapabilities = nativeDriver.initResult?.capabilities;
+        assert.ok(
+          Boolean(initCapabilities?.diagnosticProvider),
+          'Native server must declare diagnosticProvider capability',
+        );
+
+        // Open an XML with syntax error
+        const syntaxErrorUri = pathToFileURL(
+          join(nativeProjectDir, 'app', 'src', 'main', 'res', 'layout', 'native_syntax_err.xml'),
+        ).href;
+        const badXmlText = [
+          '<?xml version="1.0" encoding="utf-8"?>',
+          '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+          '    android:layout_width="match_parent"',
+          '    android:layout_height="match_parent">',
+          '    <TextView',
+          '        android:layout_width="wrap_content"',
+          '        android:layout_height="wrap_content"',
+          '        android:text="Native syntax test"',
+          '</LinearLayout>',
+          '',
+        ].join('\n');
+
+        nativeDriver.notify('textDocument/didOpen', {
+          textDocument: { uri: syntaxErrorUri, languageId: 'xml', version: 1, text: badXmlText },
+        });
+
+        try {
+          const report = await pullDiagnostics(nativeDriver, syntaxErrorUri);
+          const items = report.items ?? [];
+          const nativeErrors = items.filter((d: LspDiagnostic) => d.source !== 'android-lint');
+          const lintErrors = items.filter((d: LspDiagnostic) => d.source === 'android-lint');
+
+          assert.ok(nativeErrors.length >= 1, 'Native server must report XML syntax error');
+          assert.equal(
+            lintErrors.length,
+            0,
+            'Native session without extension must emit zero android-lint diagnostics',
+          );
+        } finally {
+          nativeDriver.notify('textDocument/didClose', { textDocument: { uri: syntaxErrorUri } });
+        }
+
+        // Open manifest with debuggable="true" in native session
+        const nativeManifestUri = pathToFileURL(
+          join(nativeProjectDir, 'app', 'config', 'manifest-main.xml'),
+        ).href;
+        const nativeManifestContent = (await readFile(fileURLToPath(nativeManifestUri), 'utf8')).replace(
+          '<application',
+          '<application android:debuggable="true"',
+        );
+
+        nativeDriver.notify('textDocument/didOpen', {
+          textDocument: {
+            uri: nativeManifestUri,
+            languageId: 'xml',
+            version: 1,
+            text: nativeManifestContent,
+          },
+        });
+
+        try {
+          const report = await pullDiagnostics(nativeDriver, nativeManifestUri);
+          const items = report.items ?? [];
+          const lintErrors = items.filter((d: LspDiagnostic) => d.source === 'android-lint');
+          assert.equal(
+            lintErrors.length,
+            0,
+            'Native session without extension must emit zero HardcodedDebugMode diagnostics',
+          );
+        } finally {
+          nativeDriver.notify('textDocument/didClose', { textDocument: { uri: nativeManifestUri } });
+        }
+      } finally {
+        if (nativeDriver) {
+          try {
+            await nativeDriver.close();
+          } catch {
+            // ignore
+          }
+        }
+        await nativeSandbox.cleanup();
+      }
+    },
+  );
+
+  // 2. Full XML & Manifest Lint acceptance suite in isolated session (WITH extension)
+  const sandbox = await createIntegrationSandbox(prereqs);
+  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/intellij-android');
+  let projectDir = '';
+  let driver: InitializedLspClientDriver | null = null;
+
+  try {
+    projectDir = await copyAndroidLintFixture(sandbox);
+    const client = await startLspClient(projectDir, sandbox);
+    driver = client;
+
+    await executeIntellij(
+      { action: 'wait', project: projectDir, timeout: 180 },
+      undefined,
+      undefined,
+      { cwd: projectDir } as ExtensionContext,
+      { systemPath: sandbox.systemPath },
+    );
+
+    const initCapabilities = client.initResult?.capabilities;
+    assert.ok(
+      Boolean(initCapabilities?.diagnosticProvider),
+      'Server initialize response must declare diagnosticProvider capability',
+    );
+
+    // 2. Official XML/Manifest rules positive trigger, exact ranges, and didChange fix
+    await t.test(
+      'Diagnostics: Official XML/Manifest rules positive trigger, exact ranges, and didChange fix',
+      async () => {
+        // A. Layout HardcodedText
+        const layoutUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
+        ).href;
+        const layoutText1 = await readFile(fileURLToPath(layoutUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: layoutUri, languageId: 'xml', version: 1, text: layoutText1 },
+        });
+
+        try {
+          const rep1 = await pullDiagnostics(client, layoutUri);
+          assert.equal(rep1.kind, 'full');
+          const items1 = rep1.items ?? [];
+          const hardcoded1 = items1.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(hardcoded1.length >= 1, 'Must report HardcodedText for hardcoded string');
+          assert.equal(hardcoded1[0].severity, 2, 'HardcodedText severity must be Warning (2)');
+
+          const expectedAttrRange = findRangeInText(layoutText1, 'android:text="Hardcoded String Text"');
+          const match = hardcoded1.find(
+            (d: LspDiagnostic) =>
+              (d.range.start.line === expectedAttrRange.start.line &&
+                d.range.start.character === expectedAttrRange.start.character &&
+                d.range.end.line === expectedAttrRange.end.line &&
+                d.range.end.character === expectedAttrRange.end.character),
+          );
+          assert.ok(match, `HardcodedText range must strictly match the full attribute: ${JSON.stringify(hardcoded1)}`);
+          // Fix via didChange
+          const layoutText2 = layoutText1.replace('Hardcoded String Text', '@string/app_name');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: layoutUri, version: 2 },
+            contentChanges: [{ text: layoutText2 }],
+          });
+
+          const rep2 = await pullDiagnostics(client, layoutUri);
+          const items2 = rep2.items ?? [];
+          const hardcoded2 = items2.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.equal(hardcoded2.length, 0, 'HardcodedText must be cleared after replacing with resource reference');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: layoutUri } });
+        }
+
+        // B. Layout ContentDescription
+        const imageUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_image_probe.xml'),
+        ).href;
+        const imageText1 = await readFile(fileURLToPath(imageUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: imageUri, languageId: 'xml', version: 1, text: imageText1 },
+        });
+
+        try {
+          const repImg1 = await pullDiagnostics(client, imageUri);
+          const itemsImg1 = repImg1.items ?? [];
+          const contentDesc1 = itemsImg1.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ContentDescription',
+          );
+          assert.ok(contentDesc1.length >= 1, 'Must report ContentDescription for ImageView without description');
+          assert.equal(contentDesc1[0].severity, 2, 'ContentDescription severity must be Warning (2)');
+
+          // Fix via didChange
+          const imageText2 = imageText1.replace(
+            '<ImageView',
+            '<ImageView android:contentDescription="@string/app_name"',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: imageUri, version: 2 },
+            contentChanges: [{ text: imageText2 }],
+          });
+
+          const repImg2 = await pullDiagnostics(client, imageUri);
+          const itemsImg2 = repImg2.items ?? [];
+          const contentDesc2 = itemsImg2.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ContentDescription',
+          );
+          assert.equal(contentDesc2.length, 0, 'ContentDescription must be cleared after adding attribute');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: imageUri } });
+        }
+
+        // C. Manifest HardcodedDebugMode
+        const manifestUri = pathToFileURL(
+          join(projectDir, 'app', 'config', 'manifest-main.xml'),
+        ).href;
+        const baseManifest = await readFile(fileURLToPath(manifestUri), 'utf8');
+        const manifestWithDebug = baseManifest.replace(
+          '<application',
+          '<application android:debuggable="true"',
+        );
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: manifestUri, languageId: 'xml', version: 1, text: manifestWithDebug },
+        });
+
+        try {
+          const repMan1 = await pullDiagnostics(client, manifestUri);
+          const itemsMan1 = repMan1.items ?? [];
+          assert.equal(itemsMan1.some(
+            (d) => d.source === 'android-lint' && d.code === 'MissingClass'
+              && d.message?.includes('com.example.app.MainApplication'),
+          ), false, 'Custom source Manifest checks must resolve classes in the selected production module');
+          const debug1 = itemsMan1.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          );
+          assert.ok(debug1.length >= 1, `Must report HardcodedDebugMode for android:debuggable="true": ${JSON.stringify(itemsMan1)}`);
+          assert.equal(debug1[0].severity, 1, 'HardcodedDebugMode severity must be Error/Fatal (1)');
+
+          const expectedDebugRange = findRangeInText(manifestWithDebug, 'android:debuggable="true"');
+          const debugMatch = debug1.find(
+            (d: LspDiagnostic) =>
+              d.range.start.line === expectedDebugRange.start.line &&
+              d.range.start.character === expectedDebugRange.start.character &&
+              d.range.end.line === expectedDebugRange.end.line &&
+              d.range.end.character === expectedDebugRange.end.character,
+          );
+          assert.ok(debugMatch, `HardcodedDebugMode range must strictly match android:debuggable="true": ${JSON.stringify(debug1)}`);
+          // Fix via didChange
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: manifestUri, version: 2 },
+            contentChanges: [{ text: baseManifest }],
+          });
+
+          const repMan2 = await pullDiagnostics(client, manifestUri);
+          const itemsMan2 = repMan2.items ?? [];
+          const debug2 = itemsMan2.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          );
+          assert.equal(debug2.length, 0, 'HardcodedDebugMode must be cleared after removing attribute');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: manifestUri } });
+        }
+      },
+    );
+
+    // 3. Folder families, qualified/custom roots, variant/library manifests, and non-Android exclusions
+    await t.test(
+      'Diagnostics: Folder families, qualified/custom roots, variant/library manifests, and non-Android exclusions',
+      async () => {
+        const unusedDefault = join(projectDir, 'app', 'src', 'main', 'AndroidManifest.xml');
+        const unusedUri = pathToFileURL(unusedDefault).href;
+        const unusedText = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          + '<application android:debuggable="true" /></manifest>';
+        await writeFile(unusedDefault, unusedText, 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: unusedUri, languageId: 'xml', version: 1, text: unusedText },
+        });
+        try {
+          const unused = await pullDiagnostics(client, unusedUri);
+          assert.equal((unused.items ?? []).filter((d) => d.source === 'android-lint').length, 0,
+            'A default Manifest replaced by manifest.srcFile must remain outside the configured source set');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: unusedUri } });
+          await rm(unusedDefault);
+        }
+        for (const resourcePath of [
+          ['src', 'main', 'res', 'layout-land', 'namespace_probe.xml'],
+          ['src', 'main', 'res', 'values-es', 'namespace_probe.xml'],
+          ['src', 'main', 'res', 'drawable-night', 'namespace_probe.xml'],
+          ['src', 'main', 'res', 'menu-land', 'namespace_probe.xml'],
+          ['src', 'main', 'res', 'xml-v26', 'namespace_probe.xml'],
+          ['custom-res', 'values', 'namespace_probe.xml'],
+        ]) {
+          const path = join(projectDir, 'app', ...resourcePath);
+          await mkdir(dirname(path), { recursive: true });
+          const root = resourcePath.includes('values') || resourcePath.includes('values-es')
+            ? 'resources' : resourcePath.includes('menu-land') ? 'menu'
+              : resourcePath.includes('drawable-night') ? 'shape' : 'LinearLayout';
+          const text = `<${root} xmlns:unused="http://schemas.android.com/apk/res/com.example.unused" />`;
+          await writeFile(path, text, 'utf8');
+          const uri = pathToFileURL(path).href;
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri, languageId: 'xml', version: 1, text },
+          });
+          try {
+            const positive = await pullDiagnostics(client, uri);
+            const unused = (positive.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnusedNamespace',
+            );
+            assert.equal(unused.length, 1,
+              `Official namespace rule must run for ${resourcePath.join('/')}: ${JSON.stringify(positive.items)}`);
+            assert.deepEqual(unused[0].range,
+              findRangeInText(text, 'xmlns:unused="http://schemas.android.com/apk/res/com.example.unused"'));
+            client.notify('textDocument/didChange', {
+              textDocument: { uri, version: 2 },
+              contentChanges: [{ text: `<${root} />` }],
+            });
+            const negative = await pullDiagnostics(client, uri);
+            assert.equal((negative.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnusedNamespace',
+            ).length, 0, `Removing the unused namespace must clear ${resourcePath.join('/')}`);
+          } finally {
+            client.notify('textDocument/didClose', { textDocument: { uri } });
+            await rm(path);
+          }
+        }
+        // A. Menu folder: res/menu/sample_menu.xml
+        const menuUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'menu', 'sample_menu.xml'),
+        ).href;
+        const menuText = await readFile(fileURLToPath(menuUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: menuUri, languageId: 'xml', version: 1, text: menuText },
+        });
+        try {
+          const repMenu = await pullDiagnostics(client, menuUri);
+          const menuItems = repMenu.items ?? [];
+          const menuHardcoded = menuItems.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(menuHardcoded.length >= 1, 'Menu title must trigger HardcodedText in res/menu folder');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: menuUri } });
+        }
+
+        // B. Qualified root: res/values-es/strings.xml
+        const esUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'values-es', 'strings.xml'),
+        ).href;
+        const esText = await readFile(fileURLToPath(esUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: esUri, languageId: 'xml', version: 1, text: esText },
+        });
+        try {
+          const repEs = await pullDiagnostics(client, esUri);
+          assert.equal(repEs.kind, 'full');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: esUri } });
+        }
+
+        // C. Custom resource root: app/custom-res/values/custom.xml
+        const customResUri = pathToFileURL(
+          join(projectDir, 'app', 'custom-res', 'values', 'custom.xml'),
+        ).href;
+        const customResText = await readFile(fileURLToPath(customResUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: customResUri, languageId: 'xml', version: 1, text: customResText },
+        });
+        try {
+          const repCustom = await pullDiagnostics(client, customResUri);
+          assert.equal(repCustom.kind, 'full');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: customResUri } });
+        }
+
+        // D. Variant manifest: app/src/debug/AndroidManifest.xml
+        const debugManifestUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'debug', 'AndroidManifest.xml'),
+        ).href;
+        const debugManifestText = await readFile(fileURLToPath(debugManifestUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: debugManifestUri, languageId: 'xml', version: 1, text: debugManifestText },
+        });
+        try {
+          const repDebug = await pullDiagnostics(client, debugManifestUri);
+          assert.equal(repDebug.kind, 'full');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: debugManifestUri } });
+        }
+
+        // E. Library manifest: lib/src/main/AndroidManifest.xml
+        const libManifestUri = pathToFileURL(
+          join(projectDir, 'lib', 'src', 'main', 'AndroidManifest.xml'),
+        ).href;
+        const libManifestText = (await readFile(fileURLToPath(libManifestUri), 'utf8')).replace(
+          '</manifest>', '<application android:debuggable="true" /></manifest>',
+        );
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: libManifestUri, languageId: 'xml', version: 1, text: libManifestText },
+        });
+        try {
+          const repLib = await pullDiagnostics(client, libManifestUri);
+          assert.equal(repLib.kind, 'full');
+          assert.ok((repLib.items ?? []).some(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          ), `Library manifests must run official single-file checks: ${JSON.stringify(repLib.items)}`);
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: libManifestUri } });
+        }
+
+        // F. Applicability exclusion: res/raw/reference_raw.xml
+        const rawUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'raw', 'reference_raw.xml'),
+        ).href;
+        const rawText = '<raw-data hardcoded="Raw Value Text" />';
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: rawUri, languageId: 'xml', version: 1, text: rawText },
+        });
+        try {
+          const repRaw = await pullDiagnostics(client, rawUri);
+          const rawLint = (repRaw.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint');
+          assert.equal(rawLint.length, 0, 'res/raw files must not be analyzed by layout or values detectors');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: rawUri } });
+        }
+
+        // G. Plain non-Android XML: app/plain_doc.xml
+        const plainUri = pathToFileURL(join(projectDir, 'app', 'plain_doc.xml')).href;
+        const plainText = await readFile(fileURLToPath(plainUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: plainUri, languageId: 'xml', version: 1, text: plainText },
+        });
+        try {
+          const repPlain = await pullDiagnostics(client, plainUri);
+          const plainLint = (repPlain.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint');
+          assert.equal(plainLint.length, 0, 'Plain XML outside Android resource roots must emit zero android-lint diagnostics');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: plainUri } });
+        }
+      },
+    );
+
+    // 4. Newly saved XML file analyzed on disk
+    await t.test(
+      'Diagnostics: Newly saved XML file analyzed on disk',
+      async () => {
+        const newSavedPath = join(
+          projectDir,
+          'app',
+          'src',
+          'main',
+          'res',
+          'layout',
+          'new_saved_layout.xml',
+        );
+        const newSavedUri = pathToFileURL(newSavedPath).href;
+
+        const newSavedText1 = [
+          '<?xml version="1.0" encoding="utf-8"?>',
+          '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+          '    android:layout_width="match_parent"',
+          '    android:layout_height="match_parent"',
+          '    android:orientation="vertical">',
+          '    <TextView',
+          '        android:layout_width="wrap_content"',
+          '        android:layout_height="wrap_content"',
+          '        android:text="Newly Saved Hardcoded Text" />',
+          '</LinearLayout>',
+          '',
+        ].join('\n');
+
+        await writeFile(newSavedPath, newSavedText1, 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: newSavedUri, languageId: 'xml', version: 1, text: newSavedText1 },
+        });
+
+        try {
+          const rep1 = await pullDiagnostics(client, newSavedUri);
+          assert.equal(rep1.kind, 'full');
+          const items1 = rep1.items ?? [];
+          const hardcoded1 = items1.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(
+            hardcoded1.length >= 1,
+            'Newly saved XML file must trigger HardcodedText',
+          );
+
+          // Modify via didChange
+          const newSavedText2 = newSavedText1.replace(
+            'Newly Saved Hardcoded Text',
+            '@string/app_name',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: newSavedUri, version: 2 },
+            contentChanges: [{ text: newSavedText2 }],
+          });
+
+          const rep2 = await pullDiagnostics(client, newSavedUri);
+          const items2 = rep2.items ?? [];
+          const hardcoded2 = items2.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.equal(
+            hardcoded2.length,
+            0,
+            'HardcodedText must be cleared in saved file after didChange fix',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: newSavedUri } });
+          if (existsSync(newSavedPath)) await rm(newSavedPath);
+        }
+      },
+    );
+
+    // 5. Position and range accuracy for CRLF, emoji, entities, quotes, multiline, CDATA, and namespace alias
+    await t.test(
+      'Diagnostics: Position and range accuracy for CRLF, emoji, entities, quotes, multiline, CDATA, and namespace alias',
+      async () => {
+        const edgeUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_edge_probe.xml'),
+        ).href;
+        const baseEdgeText = await readFile(fileURLToPath(edgeUri), 'utf8');
+        // Ensure CRLF line endings
+        const edgeText = baseEdgeText.replace(/\r?\n/g, '\r\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: edgeUri, languageId: 'xml', version: 1, text: edgeText },
+        });
+
+        try {
+          const rep = await pullDiagnostics(client, edgeUri);
+          const items = rep.items ?? [];
+          const hardcodedList = items.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(
+            hardcodedList.length >= 4,
+            `Must report multiple HardcodedText for edge cases: found ${hardcodedList.length}`,
+          );
+          const assertExactEdge = (attrSnippet: string, label: string) => {
+            const attrR = findRangeInText(edgeText, attrSnippet.replace(/\r?\n/g, '\r\n'));
+            const m = hardcodedList.find(
+              (d) =>
+                (d.range.start.line === attrR.start.line &&
+                  d.range.start.character === attrR.start.character &&
+                  d.range.end.line === attrR.end.line &&
+                  d.range.end.character === attrR.end.character),
+            );
+            assert.ok(m, `${label} must strictly match the full attribute: ${JSON.stringify(hardcodedList)}`);
+          };
+
+          assertExactEdge('android:text="Emoji 👋 probe 🎉"', 'Emoji UTF-16 code units range');
+          assertExactEdge('android:text="Entity &amp; &lt; test"', 'XML entity range');
+          assertExactEdge("android:text='Single quote hardcoded'", 'Single quote range');
+          assertExactEdge('android:text="Multi\nLine\nHardcoded"', 'Multiline CRLF attribute range');
+          assertExactEdge('customalias:text="Alias Hardcoded Text"', 'Custom namespace alias range');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: edgeUri } });
+        }
+      },
+    );
+
+    // 6. Incomplete XML retains native syntax errors and tolerates partial AST without crash
+    await t.test(
+      'Diagnostics: Incomplete XML retains native syntax errors and tolerates partial AST without crash',
+      async () => {
+        const incompleteUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_incomplete_probe.xml'),
+        ).href;
+        const brokenXmlText = [
+          '<?xml version="1.0" encoding="utf-8"?>',
+          '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+          '    android:layout_width="match_parent"',
+          '    android:layout_height="match_parent">',
+          '    <ImageView android:layout_width="wrap_content" android:layout_height="wrap_content" />',
+          '    <TextView',
+          '        android:layout_width="wrap_content"',
+          '        android:layout_height="wrap_content"',
+          '        android:text="Incomplete Broken Text"',
+          '</LinearLayout>',
+          '',
+        ].join('\n');
+        await writeFile(fileURLToPath(incompleteUri), brokenXmlText, 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: incompleteUri, languageId: 'xml', version: 1, text: brokenXmlText },
+        });
+
+        try {
+          const rep = await pullDiagnostics(client, incompleteUri);
+          const items = rep.items ?? [];
+          const nativeErrors = items.filter((d: LspDiagnostic) => d.source !== 'android-lint');
+          assert.ok(
+            nativeErrors.length >= 1,
+            'Native syntax error must be reported for incomplete unclosed XML tag',
+          );
+          assert.ok(items.some((d) => d.source === 'android-lint' && d.code === 'ContentDescription'),
+            'Recovered valid nodes must retain Android Lint diagnostics alongside native syntax errors');
+
+          // Fix syntax error via didChange
+          const fixedXmlText = brokenXmlText.replace(
+            'android:text="Incomplete Broken Text"',
+            'android:text="Incomplete Broken Text" />',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: incompleteUri, version: 2 },
+            contentChanges: [{ text: fixedXmlText }],
+          });
+
+          const repFixed = await pullDiagnostics(client, incompleteUri);
+          const fixedNative = (repFixed.items ?? []).filter(
+            (d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1,
+          );
+          assert.equal(fixedNative.length, 0, 'Native syntax errors must be cleared after fixing tag');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: incompleteUri } });
+          await rm(fileURLToPath(incompleteUri), { force: true });
+        }
+      },
+    );
+
+    // 7. tools:ignore suppression with namespace aliases, multiple issues, ancestor inheritance, and strict sibling isolation
+    await t.test(
+      'Diagnostics: tools:ignore suppression with namespace aliases, multiple issues, ancestor inheritance, and strict sibling isolation',
+      async () => {
+        const ignoreUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_ignore_probe.xml'),
+        ).href;
+        const ignoreText = await readFile(fileURLToPath(ignoreUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: ignoreUri, languageId: 'xml', version: 1, text: ignoreText },
+        });
+
+        try {
+          const rep = await pullDiagnostics(client, ignoreUri);
+          const items = rep.items ?? [];
+          const hardcodedList = items.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          const contentDescList = items.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ContentDescription',
+          );
+
+          // 1. Element 1 with t:ignore="HardcodedText" is suppressed
+          const ignoredMatch = hardcodedList.find((d) => d.message?.includes('Ignored Hardcoded Text'));
+          assert.equal(ignoredMatch, undefined, 'Element with t:ignore="HardcodedText" must be suppressed');
+
+          // 2. Element 2 (Sibling): MUST NOT BE SUPPRESSED! Sibling isolation!
+          const siblingMatch = hardcodedList.find(
+            (d) =>
+              d.range.start.line === findRangeInText(ignoreText, 'Not Ignored Sibling Text').start.line,
+          );
+          assert.ok(
+            siblingMatch,
+            'Sibling element without tools:ignore must NOT be suppressed (sibling isolation)',
+          );
+
+          // 3. Ancestor with t:ignore="HardcodedText,ContentDescription" suppresses both issues on children
+          const ancestorTextMatch = hardcodedList.find((d) =>
+            d.message?.includes('Ancestor Ignored Text'),
+          );
+          assert.equal(
+            ancestorTextMatch,
+            undefined,
+            'Child of ancestor with multiple tools:ignore must be suppressed',
+          );
+          assert.equal(
+            contentDescList.length,
+            0,
+            'ImageView inside ancestor with ContentDescription ignore must be suppressed',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: ignoreUri } });
+        }
+      },
+    );
+
+    // 8. API level preconditions, tools:targetApi exemption, and folder qualifier minSdk
+    await t.test(
+      'Diagnostics: API level preconditions, tools:targetApi exemption, and folder qualifier minSdk',
+      async () => {
+        const apiLayoutUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_api_probe.xml'),
+        ).href;
+        const apiLayoutText = await readFile(fileURLToPath(apiLayoutUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: apiLayoutUri, languageId: 'xml', version: 1, text: apiLayoutText },
+        });
+
+        try {
+          // API 26 tooltipText in layout with minSdk=21 triggers API warning/error
+          const rep1 = await pullDiagnostics(client, apiLayoutUri);
+          const items1 = rep1.items ?? [];
+          const apiIssues1 = items1.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnusedAttribute',
+          );
+          assert.equal(apiIssues1.length, 1,
+            `API 26 tooltipText must produce UnusedAttribute with minSdk 21: ${JSON.stringify(items1)}`);
+          const scriptPath = join(projectDir, 'app', 'build.gradle.kts');
+          const scriptUri = pathToFileURL(scriptPath).href;
+          const scriptText = await readFile(scriptPath, 'utf8');
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri: scriptUri, languageId: 'kotlin', version: 1,
+              text: scriptText.replace('minSdk = 21', 'minSdk = 26') },
+          });
+          try {
+            const associatedEdit = await pullDiagnostics(client, apiLayoutUri);
+            assert.equal((associatedEdit.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnusedAttribute',
+            ).length, 1, 'Unsaved associated Gradle settings must not change the saved XML model');
+          } finally {
+            client.notify('textDocument/didClose', { textDocument: { uri: scriptUri } });
+          }
+
+          // Now suppress with tools:targetApi="26"
+          const apiLayoutTextSuppressed = apiLayoutText.replace(
+            '<TextView',
+            '<TextView tools:targetApi="26"',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: apiLayoutUri, version: 2 },
+            contentChanges: [{ text: apiLayoutTextSuppressed }],
+          });
+
+          const rep2 = await pullDiagnostics(client, apiLayoutUri);
+          const items2 = rep2.items ?? [];
+          const apiIssues2 = items2.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnusedAttribute',
+          );
+          assert.equal(
+            apiIssues2.length,
+            0,
+            'tools:targetApi="26" must exempt API 26 attribute from API checks',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: apiLayoutUri } });
+        }
+
+        // Folder qualifier -v26: res/layout-v26/layout_api_probe.xml
+        const v26LayoutUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout-v26', 'layout_api_probe.xml'),
+        ).href;
+        const v26Text = await readFile(fileURLToPath(v26LayoutUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: v26LayoutUri, languageId: 'xml', version: 1, text: v26Text },
+        });
+
+        try {
+          const repV26 = await pullDiagnostics(client, v26LayoutUri);
+          const itemsV26 = repV26.items ?? [];
+          const apiIssuesV26 = itemsV26.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnusedAttribute',
+          );
+          assert.equal(
+            apiIssuesV26.length,
+            0,
+            'Layout in -v26 folder must implicitly have minSdk>=26 and not flag API 26 attributes',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: v26LayoutUri } });
+        }
+      },
+    );
+
+    // 9. lint.xml configuration override (ignore and error severity)
+    await t.test(
+      'Diagnostics: lint.xml configuration override (ignore and error severity)',
+      async () => {
+        const lintXmlPath = join(projectDir, 'app', 'lint.xml');
+        const probeUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
+        ).href;
+        const probeText = await readFile(fileURLToPath(probeUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: probeUri, languageId: 'xml', version: 1, text: probeText },
+        });
+
+        try {
+          // Initial: HardcodedText is Warning (2)
+          const repInit = await pullDiagnostics(client, probeUri);
+          const initHardcoded = (repInit.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(initHardcoded.length >= 1);
+          assert.equal(initHardcoded[0].severity, 2);
+
+          // Override to ignore
+          await writeFile(
+            lintXmlPath,
+            '<?xml version="1.0" encoding="UTF-8"?>\n<lint>\n    <issue id="HardcodedText" severity="ignore" />\n</lint>\n',
+            'utf8',
+          );
+
+          // Trigger check with new version
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: probeUri, version: 2 },
+            contentChanges: [{ text: `${probeText}\n` }],
+          });
+
+          const repIgnored = await pullDiagnostics(client, probeUri);
+          const ignoredHardcoded = (repIgnored.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.equal(
+            ignoredHardcoded.length,
+            0,
+            'lint.xml severity="ignore" must suppress HardcodedText',
+          );
+
+          // Override to error
+          await writeFile(
+            lintXmlPath,
+            '<?xml version="1.0" encoding="UTF-8"?>\n<lint>\n    <issue id="HardcodedText" severity="error" />\n</lint>\n',
+            'utf8',
+          );
+
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: probeUri, version: 3 },
+            contentChanges: [{ text: probeText }],
+          });
+
+          const repError = await pullDiagnostics(client, probeUri);
+          const errorHardcoded = (repError.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(errorHardcoded.length >= 1);
+          assert.equal(
+            errorHardcoded[0].severity,
+            1,
+            'lint.xml severity="error" must elevate HardcodedText to Error (1)',
+          );
+        } finally {
+          if (existsSync(lintXmlPath)) await rm(lintXmlPath);
+          client.notify('textDocument/didClose', { textDocument: { uri: probeUri } });
+        }
+      },
+    );
+
+    // 10. Resource repository scopes, precedence, framework/library resolution, and linked unsaved edits
+    await t.test(
+      'Diagnostics: Resource repository scopes, precedence, framework/library resolution, and linked unsaved edits',
+      async () => {
+        const aarUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_aar_probe.xml'),
+        ).href;
+        const aarText = await readFile(fileURLToPath(aarUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: aarUri, languageId: 'xml', version: 1, text: aarText },
+        });
+
+        try {
+          const rep = await pullDiagnostics(client, aarUri);
+          const items = rep.items ?? [];
+          const repoQueryMsg = items.find(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'CustomXmlRule' &&
+              d.message?.includes('CustomRepoQuery:'),
+          );
+          assert.ok(repoQueryMsg, `CustomRepoQuery detector must report repository availability: ${JSON.stringify(items)}`);
+          assert.match(
+            repoQueryMsg.message ?? '',
+            /app_name=Android XML Fixture/,
+            'PROJECT_ONLY repository must resolve app_name to Android XML Fixture',
+          );
+          assert.match(
+            repoQueryMsg.message ?? '',
+            /projHasLib=false/,
+            'PROJECT_ONLY repository must not resolve dependency lib_name',
+          );
+          assert.match(
+            repoQueryMsg.message ?? '',
+            /lib_name=Android XML Lib/,
+            'LOCAL_DEPENDENCIES repository must resolve dependency lib_name',
+          );
+          assert.match(
+            repoQueryMsg.message ?? '',
+            /hasOk=true/,
+            'ANDROID framework repository must resolve framework resource ok',
+          );
+          assert.match(
+            repoQueryMsg.message ?? '',
+            /count=2/,
+            'Qualifier overlay must resolve count=2 for app_name across default and es',
+          );
+
+          // Saved resource edit on disk triggers cache invalidation on the SAME layout
+          const stringsPath = join(projectDir, 'app', 'src', 'main', 'res', 'values', 'strings.xml');
+          const stringsBaseText = await readFile(stringsPath, 'utf8');
+          const stringsUri = pathToFileURL(stringsPath).href;
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri: stringsUri, languageId: 'xml', version: 1,
+              text: stringsBaseText.replace('Android XML Fixture', 'Unrelated Unsaved Title') },
+          });
+          try {
+            const unsavedReport = await pullDiagnostics(client, aarUri);
+            const unsavedQuery = (unsavedReport.items ?? []).find(
+              (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
+                && d.message?.includes('CustomRepoQuery:'),
+            );
+            assert.match(unsavedQuery?.message ?? '', /app_name=Android XML Fixture/,
+              'An unsaved associated document must not replace the resource disk snapshot');
+            const stringsDiskModified = stringsBaseText.replace(
+              'Android XML Fixture',
+              'Live On-Disk Updated Title',
+            );
+            await writeFile(stringsPath, stringsDiskModified, 'utf8');
+            try {
+              const repLive = await pullDiagnostics(client, aarUri);
+              const liveItems = repLive.items ?? [];
+              const liveQueryMsg = liveItems.find(
+                (d: LspDiagnostic) =>
+                  d.source === 'android-lint' &&
+                  d.code === 'CustomXmlRule' &&
+                  d.message?.includes('CustomRepoQuery:'),
+              );
+              assert.ok(liveQueryMsg, `Resource refresh must retain query diagnostics: ${JSON.stringify(liveItems)}`);
+              assert.match(
+                liveQueryMsg.message ?? '',
+                /app_name=Live On-Disk Updated Title/,
+                'A disk edit must refresh the same layout while the associated editor remains unsaved',
+              );
+            } finally {
+              await writeFile(stringsPath, stringsBaseText, 'utf8');
+            }
+          } finally {
+            client.notify('textDocument/didClose', { textDocument: { uri: stringsUri } });
+          }
+
+          const libraryStringsPath = join(projectDir, 'lib', 'src', 'main', 'res', 'values', 'strings.xml');
+          const libraryStrings = await readFile(libraryStringsPath, 'utf8');
+          try {
+            await writeFile(libraryStringsPath,
+              libraryStrings.replace('Android XML Lib', 'Updated Dependency Title'), 'utf8');
+            const dependencyReport = await pullDiagnostics(client, aarUri);
+            const dependencyQuery = (dependencyReport.items ?? []).find(
+              (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
+                && d.message?.includes('CustomRepoQuery:'),
+            );
+            assert.match(dependencyQuery?.message ?? '', /lib_name=Updated Dependency Title/,
+              'Editing an existing dependency values file must invalidate the consuming layout cache');
+          } finally {
+            await writeFile(libraryStringsPath, libraryStrings, 'utf8');
+          }
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: aarUri } });
+        }
+      },
+    );
+
+    await t.test(
+      'Diagnostics: Source Manifest and workspace isolation',
+      async () => {
+        // A. Variant manifest isolation
+        const debugManifestUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'debug', 'AndroidManifest.xml'),
+        ).href;
+        const debugManifestText = await readFile(fileURLToPath(debugManifestUri), 'utf8');
+        const debugWithHardcoded = debugManifestText.replace(
+          '<application>',
+          '<application android:debuggable="true">',
+        );
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: debugManifestUri, languageId: 'xml', version: 1, text: debugWithHardcoded },
+        });
+
+        const mainManifestUri = pathToFileURL(
+          join(projectDir, 'app', 'config', 'manifest-main.xml'),
+        ).href;
+        const mainManifestText = await readFile(fileURLToPath(mainManifestUri), 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: mainManifestUri, languageId: 'xml', version: 1, text: mainManifestText },
+        });
+
+        try {
+          const debugRep = await pullDiagnostics(client, debugManifestUri);
+          const debugLint = (debugRep.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          );
+          assert.ok(debugLint.length >= 1, 'Debug variant manifest must report HardcodedDebugMode');
+
+          const mainRep = await pullDiagnostics(client, mainManifestUri);
+          const mainLint = (mainRep.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          );
+          assert.equal(mainLint.length, 0, 'Main manifest must not leak HardcodedDebugMode from variant manifest');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: debugManifestUri } });
+          client.notify('textDocument/didClose', { textDocument: { uri: mainManifestUri } });
+        }
+
+        // B. Two Workspaces isolation
+        const workspace2 = await createIntegrationSandbox(prereqs);
+        workspace2.env.OMP_ANDROID_LS_EXTENSION_DIR = sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR;
+        const workspace2Dir = await copyAndroidLintFixture(workspace2);
+        let client2: InitializedLspClientDriver | null = null;
+        try {
+          client2 = await startLspClient(workspace2Dir, workspace2);
+          await executeIntellij(
+            { action: 'wait', project: workspace2Dir, timeout: 180 }, undefined, undefined,
+            { cwd: workspace2Dir } as ExtensionContext, { systemPath: workspace2.systemPath },
+          );
+          const ws1ProbeUri = pathToFileURL(
+            join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
+          ).href;
+          const ws2ProbeUri = pathToFileURL(
+            join(workspace2Dir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
+          ).href;
+          const probeContent = await readFile(fileURLToPath(ws1ProbeUri), 'utf8');
+
+          // In workspace 1, create lint.xml to ignore HardcodedText
+          const ws1LintXml = join(projectDir, 'app', 'lint.xml');
+          await writeFile(
+            ws1LintXml,
+            '<?xml version="1.0" encoding="UTF-8"?>\n<lint>\n    <issue id="HardcodedText" severity="ignore" />\n</lint>\n',
+            'utf8',
+          );
+
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri: ws1ProbeUri, languageId: 'xml', version: 1, text: probeContent },
+          });
+          client2.notify('textDocument/didOpen', {
+            textDocument: { uri: ws2ProbeUri, languageId: 'xml', version: 1, text: probeContent },
+          });
+
+          try {
+            const repWs1 = await pullDiagnostics(client, ws1ProbeUri);
+            const hardcodedWs1 = (repWs1.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
+            );
+            assert.equal(hardcodedWs1.length, 0, 'Workspace 1 must ignore HardcodedText per its local lint.xml');
+
+            const repWs2 = await pullDiagnostics(client2, ws2ProbeUri);
+            const hardcodedWs2 = (repWs2.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
+            );
+            assert.ok(
+              hardcodedWs2.length >= 1,
+              'Workspace 2 must NOT inherit Workspace 1 lint.xml suppression (workspace isolation)',
+            );
+          } finally {
+            if (existsSync(ws1LintXml)) await rm(ws1LintXml);
+            client.notify('textDocument/didClose', { textDocument: { uri: ws1ProbeUri } });
+            client2.notify('textDocument/didClose', { textDocument: { uri: ws2ProbeUri } });
+          }
+        } finally {
+          if (client2) {
+            try {
+              await client2.close();
+            } catch {
+              // ignore
+            }
+          }
+          await workspace2.cleanup();
+        }
+      },
+    );
+
+    // 12. AAR custom XML rule execution, node visit fault isolation, cancellation, and concurrency
+    await t.test(
+      'Diagnostics: AAR custom XML rule execution, node visit fault isolation, cancellation, and concurrency',
+      async () => {
+        const aarProbeUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_aar_probe.xml'),
+        ).href;
+        const aarProbeText = await readFile(fileURLToPath(aarProbeUri), 'utf8');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: aarProbeUri, languageId: 'xml', version: 1, text: aarProbeText },
+        });
+
+        try {
+          // A. Fault isolation: CorruptXmlNode node visit linkage fault does not prevent sibling rules
+          const rep = await pullDiagnostics(client, aarProbeUri);
+          const items = rep.items ?? [];
+          const customXml = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'CustomXmlRule' &&
+              d.message?.includes('CustomXmlView'),
+          );
+          assert.ok(
+            customXml.length >= 1,
+            'CustomXmlRule on CustomXmlView must report despite CorruptXmlNode fault in same file',
+          );
+
+          const hardcoded = items.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.ok(
+            hardcoded.length >= 1,
+            'HardcodedText on sibling TextView must report despite CorruptXmlNode fault',
+          );
+          const repeated = await pullDiagnostics(client, aarProbeUri);
+          const repeatedCustom = (repeated.items ?? []).find(
+            (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
+              && d.message?.includes('CustomXmlView'),
+          );
+          assert.equal(repeatedCustom?.message, customXml[0].message,
+            'An unchanged XML pull must reuse the result without visiting the custom detector again');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: aarProbeUri, version: 2 },
+            contentChanges: [{ text: `${aarProbeText}\n` }],
+          });
+          const rechecked = await pullDiagnostics(client, aarProbeUri);
+          const recheckedCustom = (rechecked.items ?? []).find(
+            (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
+              && d.message?.includes('CustomXmlView'),
+          );
+          assert.ok(recheckedCustom);
+          assert.notEqual(recheckedCustom.message, customXml[0].message,
+            'A changed XML snapshot must actually visit the detector again');
+
+          // B. In-flight cancellation recovery on XML diagnostic
+          const cancelId = 73737;
+          client.process.stdin?.write(
+            encode({
+              jsonrpc: '2.0',
+              id: cancelId,
+              method: 'textDocument/diagnostic',
+              params: { textDocument: { uri: aarProbeUri } },
+            }),
+          );
+          client.notify('$/cancelRequest', { id: cancelId });
+          const cancelMsg = await client.waitFor(
+            (m: { id?: number | string }) => m.id === cancelId,
+            15000,
+          );
+          assert.ok(cancelMsg, 'Cancel message response must be received');
+          assert.equal(
+            cancelMsg.error?.code,
+            -32800,
+            'In-flight cancellation of XML diagnostic must return -32800',
+          );
+
+          // Recovery after cancel
+          const repAfterCancel = await pullDiagnostics(client, aarProbeUri);
+          assert.equal(repAfterCancel.kind, 'full', 'Server must recover and serve XML diagnostics after cancellation');
+
+          // C. Concurrent didChange recovery
+          const concurrentId = 64646;
+          const modifiedAarText = aarProbeText.replace(
+            'android:text="Fault Sibling Text"',
+            'android:text="@string/app_name"',
+          );
+          client.process.stdin?.write(
+            encode({
+              jsonrpc: '2.0',
+              id: concurrentId,
+              method: 'textDocument/diagnostic',
+              params: { textDocument: { uri: aarProbeUri } },
+            }),
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: aarProbeUri, version: 3 },
+            contentChanges: [{ text: modifiedAarText }],
+          });
+
+          const concurrentMsg = await client.waitFor(
+            (m: { id?: number | string }) => m.id === concurrentId,
+            15000,
+          );
+          assert.ok(concurrentMsg, 'Concurrent request response must be received');
+          if (concurrentMsg.error) {
+            assert.equal(
+              concurrentMsg.error.code,
+              -32801,
+              'Concurrent didChange during XML analysis must return -32801 (content_modified)',
+            );
+          }
+
+          const repFinal = await pullDiagnostics(client, aarProbeUri);
+          assert.equal(repFinal.kind, 'full');
+          const finalHardcoded = (repFinal.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+          );
+          assert.equal(
+            finalHardcoded.length,
+            0,
+            'Diagnostics must reflect updated content after concurrent didChange',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: aarProbeUri } });
+        }
+      },
+    );
+    await t.test('Diagnostics: Official AGP merged Manifest source ranges and stale snapshot fallback', async () => {
+      const java = join(prereqs.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+      const path = join(projectDir, 'app', 'config', 'manifest-main.xml');
+      const text = await readFile(path, 'utf8');
+      const uri = pathToFileURL(path).href;
+      await writeFile(path, text, 'utf8');
+      client.notify('textDocument/didOpen', {
+        textDocument: { uri, languageId: 'xml', version: 1, text },
+      });
+      try {
+        const clean = await pullDiagnostics(client, uri);
+        const cleanSnapshot = (clean.items ?? []).find(
+          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+        );
+        assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=false;/);
+        const build = spawnSync(java, [
+          '-cp', join(projectDir, 'gradle', 'wrapper', 'gradle-wrapper.jar'),
+          'org.gradle.wrapper.GradleWrapperMain', ':app:processDebugManifest',
+          '--offline', '--no-daemon', '--rerun-tasks',
+        ], { cwd: projectDir, env: sandbox.env, encoding: 'utf8', timeout: 180000 });
+        assert.equal(build.status, 0, `Manifest Merger must run successfully:\n${build.stdout}\n${build.stderr}`);
+        const built = await pullDiagnostics(client, uri);
+        const snapshot = (built.items ?? []).find(
+          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+        );
+        assert.ok(snapshot, `Merged Manifest diagnostic must map to its source: ${JSON.stringify(built.items)}`);
+        assert.match(snapshot.message ?? '', /ManifestSnapshot: merged=true;/);
+        assert.deepEqual(snapshot.range, findRangeInText(text, 'android:label="@string/app_name"'));
+
+        const edited = text.replace('android:label="@string/app_name"', 'android:label="Unsaved Label"');
+        client.notify('textDocument/didChange', {
+          textDocument: { uri, version: 2 }, contentChanges: [{ text: edited }],
+        });
+        const unsaved = await pullDiagnostics(client, uri);
+        const local = (unsaved.items ?? []).find(
+          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+        );
+        assert.match(local?.message ?? '', /ManifestSnapshot: merged=false; label=Unsaved Label/);
+        assert.deepEqual(local?.range, findRangeInText(edited, 'android:label="Unsaved Label"'));
+        client.notify('textDocument/didClose', { textDocument: { uri } });
+
+        await writeFile(path, edited, 'utf8');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri, languageId: 'xml', version: 1, text: edited },
+        });
+        const stale = await pullDiagnostics(client, uri);
+        const fallback = (stale.items ?? []).find(
+          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+        );
+        assert.match(fallback?.message ?? '', /ManifestSnapshot: merged=false; label=Unsaved Label/,
+          'A saved source newer than merger output must invalidate the built snapshot');
+      } finally {
+        client.notify('textDocument/didClose', { textDocument: { uri } });
+        await writeFile(path, text, 'utf8');
+      }
+    });
+  } finally {
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        // Ignore close failure
+      }
+    }
+    await sandbox.cleanup();
+  }
+});
+

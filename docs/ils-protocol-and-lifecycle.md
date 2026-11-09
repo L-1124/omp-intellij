@@ -27,8 +27,8 @@
 
 7. **同进程 Android Lint**：
    - `AndroidLintProvider` 已接入标准 `textDocument/diagnostic`，与 ILS 原生 Java/Kotlin 编译诊断合并；工程依赖 AAR 的规则通过官方 `JarFileIssueRegistry` 装载。
-   - 当前发布清单含 11 个 JAR，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
-   - 当前诊断范围为阶段 H 的 Java/Kotlin。XML/Manifest Lint 属于[阶段 I](../plan.md)；已完成小范围独立 JVM 探索，生产接入及真实 ILS 验收尚未进行，现有 XML 导航与配置解析不作为它的完成证据。
+   - 当前发布清单含 12 个 JAR，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
+   - 阶段 H 的 Java/Kotlin 与[阶段 I](../plan.md#15-iandroid-资源-xml-与-manifest-编辑期-lint) 的 XML/Manifest 诊断均已验收。真实独立 ILS 271 完整运行包含无扩展原生对照、实际 AGP 合并来源及缓存切换；既有 Java/Kotlin/Compose 和导航回归通过。
 
 ---
 
@@ -286,7 +286,7 @@ ILS `271.2085.0` 在全平台的二进制归档均采用严格的 SHA-256 旁挂
 
 ### 3. 内嵌官方 Android Lint 依赖与规则架构
 
-以下为历史探针的依赖和设计记录。当前生产实现及 11 项资产以 [Android JVM 扩展指南](android-jvm-extension.md#7-android-lint-单文件诊断) 为准，历史耗时不作为当前完整规则集的性能承诺。
+以下为历史探针的依赖和设计记录。当前生产实现及 12 项资产以 [Android JVM 扩展指南](android-jvm-extension.md#7-android-lint-单文件诊断) 为准，历史耗时不作为当前完整规则集的性能承诺。
 
 #### ① 6 个核心依赖 JAR 清单（总计 11.36 MB / 11,362,788 字节）
 
