@@ -53,32 +53,45 @@ test('debug control HTTP server enforces loopback, bearer token, route and paylo
     });
     assert.equal(badToken.status, 401);
 
-    // 2. Non-loopback Host header -> 403
-    const {
-      promise: remoteHostStatusPromise,
-      resolve: resolveStatus,
-      reject: rejectStatus,
-    } = Promise.withResolvers<number>();
-    const req = httpRequest(
-      {
-        hostname: '127.0.0.1',
-        port,
-        path: '/status',
-        method: 'GET',
-        headers: {
-          Host: 'example.com:8080',
-          Authorization: `Bearer ${token}`,
+    // 2. Host header loopback validation (IPv4, localhost, IPv6 loopbacks vs non-loopback/invalid)
+    const checkHost = async (hostHeader: string): Promise<number> => {
+      const { promise, resolve, reject } = Promise.withResolvers<number>();
+      const r = httpRequest(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/status',
+          method: 'GET',
+          headers: {
+            Host: hostHeader,
+            Authorization: `Bearer ${token}`,
+          },
         },
-      },
-      (res) => {
-        res.resume();
-        resolveStatus(res.statusCode ?? 0);
-      },
-    );
-    req.once('error', rejectStatus);
-    req.end();
-    const remoteHostStatus = await remoteHostStatusPromise;
-    assert.equal(remoteHostStatus, 403);
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      r.once('error', reject);
+      r.end();
+      return promise;
+    };
+
+    assert.equal(await checkHost('example.com:8080'), 403);
+    assert.equal(await checkHost(`192.168.1.1:${port}`), 403);
+    assert.equal(await checkHost(`[::2]:${port}`), 403);
+    assert.equal(await checkHost('[::1:8080]'), 403);
+    assert.equal(await checkHost('[::1]:abc'), 403);
+    assert.equal(await checkHost(`[127.0.0.1]:${port}`), 403);
+    assert.equal(await checkHost('::1:8080'), 403);
+    assert.equal(await checkHost('[::1'), 403);
+    assert.equal(await checkHost(`user@127.0.0.1:${port}`), 403);
+
+    assert.equal(await checkHost(`[::1]:${port}`), 200);
+    assert.equal(await checkHost('[::1]'), 200);
+    assert.equal(await checkHost('::1'), 200);
+    assert.equal(await checkHost(`localhost:${port}`), 200);
+    assert.equal(await checkHost(`127.0.0.1:${port}`), 200);
     // 3. Valid authenticated GET /status -> 200
     const okStatus = await fetch(`http://127.0.0.1:${port}/status`, {
       headers: { Authorization: `Bearer ${token}` },

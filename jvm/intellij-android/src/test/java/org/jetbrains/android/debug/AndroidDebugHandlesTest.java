@@ -87,9 +87,15 @@ public class AndroidDebugHandlesTest {
                     if ("lease_conflict".equals(e.getReason())) {
                         conflictCount.incrementAndGet();
                     }
-                    try { child.close(); } catch (Exception ignored) {}
+                    try {
+                        child.close();
+                    } catch (Exception ignored) {
+                    }
                 } catch (Exception e) {
-                    try { child.close(); } catch (Exception ignored) {}
+                    try {
+                        child.close();
+                    } catch (Exception ignored) {
+                    }
                 } finally {
                     doneLatch.countDown();
                 }
@@ -207,7 +213,11 @@ public class AndroidDebugHandlesTest {
             assertEquals("lease_conflict", e.getReason());
         }
 
-        // Subsequent claim must report lease_expired, never claimed: false
+        // Wait for async close to complete and verify subsequent claim still reports lease_expired
+        AndroidDebugHandles.DebugHandle handle = handles.getHandleByPort(50451);
+        if (handle != null) {
+            handle.getCloseFuture().get(2, TimeUnit.SECONDS);
+        }
         CompletableJob newOwner = JobKt.Job(null);
         try {
             handles.claim("127.0.0.1", 50451, newOwner);
@@ -251,6 +261,15 @@ public class AndroidDebugHandlesTest {
         Boolean closed = handle.getCloseFuture().get(2, TimeUnit.SECONDS);
         assertTrue("Child session and handle should be closed when owner cancels", closed);
         assertEquals(AndroidDebugHandles.HandleState.CLOSED, handle.getState());
+
+        // Subsequent claim must report lease_expired
+        CompletableJob newOwner = JobKt.Job(null);
+        try {
+            handles.claim("127.0.0.1", 50601, newOwner);
+            fail("Expected lease_expired after cancelled owner lease");
+        } catch (AndroidDebugException e) {
+            assertEquals("lease_expired", e.getReason());
+        }
     }
 
     @Test
@@ -259,7 +278,8 @@ public class AndroidDebugHandlesTest {
         handles = new AndroidDebugHandles();
         CompletableJob owner = JobKt.Job(null);
         kotlinx.coroutines.AbstractCoroutine<kotlin.Unit> suspendedChild =
-                new kotlinx.coroutines.AbstractCoroutine<>(owner, true, true) {};
+                new kotlinx.coroutines.AbstractCoroutine<>(owner, true, true) {
+                };
         AndroidDebugHandles.DebugHandle handle = handles.recordPrepared(
                 "device-1", 1001, "com.app", "127.0.0.1", 50551, createChildSession());
         handles.claim("127.0.0.1", 50551, owner);
@@ -323,7 +343,10 @@ public class AndroidDebugHandlesTest {
         Job job = JobKt.getJob(child.getScope().getCoroutineContext());
         assertNotNull(job);
         job.invokeOnCompletion(cause -> {
-            try { socket.close(); } catch (IOException ignored) {}
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+            }
             return kotlin.Unit.INSTANCE;
         });
         return child;
@@ -353,7 +376,8 @@ public class AndroidDebugHandlesTest {
                     "ttl".equals(trigger) ? 30L : 5000L);
             switch (trigger) {
                 case "release" -> assertTrue(handles.release(handle.getCleanupKey()).cleaned());
-                case "ttl" -> {}
+                case "ttl" -> {
+                }
                 case "owner" -> {
                     CompletableJob owner = JobKt.Job(null);
                     assertTrue(handles.claim("127.0.0.1", port, owner).claimed());
@@ -429,16 +453,55 @@ public class AndroidDebugHandlesTest {
                 child.close();
             }
 
-            @Override public AdbSession getParentSession() { return child.getParentSession(); }
-            @Override public AdbSessionHost getHost() { return child.getHost(); }
-            @Override public com.android.adblib.AdbChannelFactory getChannelFactory() { return child.getChannelFactory(); }
-            @Override public com.android.adblib.AdbHostServices getHostServices() { return child.getHostServices(); }
-            @Override public com.android.adblib.AdbDeviceServices getDeviceServices() { return child.getDeviceServices(); }
-            @Override public kotlinx.coroutines.CoroutineScope getScope() { return child.getScope(); }
-            @Override public com.android.adblib.CoroutineScopeCache getCache() { return child.getCache(); }
-            @Override public kotlinx.coroutines.CoroutineDispatcher getIoDispatcher() { return child.getIoDispatcher(); }
-            @Override public kotlinx.coroutines.CoroutineDispatcher getBlockingIoDispatcher() { return child.getBlockingIoDispatcher(); }
-            @Override public void throwIfClosed() { child.throwIfClosed(); }
+            @Override
+            public AdbSession getParentSession() {
+                return child.getParentSession();
+            }
+
+            @Override
+            public AdbSessionHost getHost() {
+                return child.getHost();
+            }
+
+            @Override
+            public com.android.adblib.AdbChannelFactory getChannelFactory() {
+                return child.getChannelFactory();
+            }
+
+            @Override
+            public com.android.adblib.AdbHostServices getHostServices() {
+                return child.getHostServices();
+            }
+
+            @Override
+            public com.android.adblib.AdbDeviceServices getDeviceServices() {
+                return child.getDeviceServices();
+            }
+
+            @Override
+            public kotlinx.coroutines.CoroutineScope getScope() {
+                return child.getScope();
+            }
+
+            @Override
+            public com.android.adblib.CoroutineScopeCache getCache() {
+                return child.getCache();
+            }
+
+            @Override
+            public kotlinx.coroutines.CoroutineDispatcher getIoDispatcher() {
+                return child.getIoDispatcher();
+            }
+
+            @Override
+            public kotlinx.coroutines.CoroutineDispatcher getBlockingIoDispatcher() {
+                return child.getBlockingIoDispatcher();
+            }
+
+            @Override
+            public void throwIfClosed() {
+                child.throwIfClosed();
+            }
         };
 
         AndroidDebugHandles.DebugHandle handle = handles.recordPrepared(
@@ -466,5 +529,51 @@ public class AndroidDebugHandlesTest {
         AndroidDebugHandles.ReleaseResult finalResult = handles.release(handle.getCleanupKey());
         assertFalse(finalResult.cleaned());
         assertEquals("already_cleaned", finalResult.reason());
+    }
+
+    @Test
+    public void testExpiredPortTombstonesBoundedLruAndNewLease() {
+        AdbSession child = createChildSession();
+        int basePort = 61000;
+        AndroidDebugHandles.DebugHandle h0 = handles.recordPrepared(
+                "device-1", 1000, "com.app.base", "127.0.0.1", basePort, child);
+        handles.release(h0.getCleanupKey());
+
+        // Immediately after release, claiming basePort must report lease_expired
+        CompletableJob owner = JobKt.Job(null);
+        try {
+            handles.claim("127.0.0.1", basePort, owner);
+            fail("Expected lease_expired for recently released handle");
+        } catch (AndroidDebugException e) {
+            assertEquals("lease_expired", e.getReason());
+        }
+
+        // Fill tombstones past MAX_EXPIRED_PORT_TOMBSTONES (128)
+        for (int i = 1; i <= AndroidDebugHandles.MAX_EXPIRED_PORT_TOMBSTONES + 5; i++) {
+            int port = basePort + i;
+            AndroidDebugHandles.DebugHandle h = handles.recordPrepared(
+                    "device-1", 1000 + i, "com.app." + i, "127.0.0.1", port, child);
+            handles.release(h.getCleanupKey());
+        }
+
+        // Base port should have been evicted by LRU bound (MAX_EXPIRED_PORT_TOMBSTONES)
+        AndroidDebugHandles.ClaimResult claimEvicted = handles.claim("127.0.0.1", basePort, owner);
+        assertFalse("Evicted port tombstone should return claimed: false", claimEvicted.claimed());
+
+        // Recently closed port should still be retained in tombstones
+        int recentPort = basePort + AndroidDebugHandles.MAX_EXPIRED_PORT_TOMBSTONES + 5;
+        try {
+            handles.claim("127.0.0.1", recentPort, owner);
+            fail("Expected lease_expired for recently tombstoned port");
+        } catch (AndroidDebugException e) {
+            assertEquals("lease_expired", e.getReason());
+        }
+
+        // Preparing a new lease on the tombstoned port clears the tombstone and succeeds
+        AndroidDebugHandles.DebugHandle rePrepared = handles.recordPrepared(
+                "device-1", 9999, "com.app.renewed", "127.0.0.1", recentPort, child);
+        AndroidDebugHandles.ClaimResult claimNew = handles.claim("127.0.0.1", recentPort, owner);
+        assertTrue("Newly prepared lease on tombstoned port must be claimable", claimNew.claimed());
+        assertEquals(rePrepared.getCleanupKey(), claimNew.cleanupKey());
     }
 }

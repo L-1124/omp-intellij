@@ -833,7 +833,12 @@ public class AndroidDebugService implements Disposable {
         if (host == null || host.isBlank()) {
             return false;
         }
-        return "127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host) || "::1".equals(host) || "0:0:0:0:0:0:0:1".equals(host);
+        return "127.0.0.1".equals(host)
+                || "localhost".equalsIgnoreCase(host)
+                || "::1".equals(host)
+                || "[::1]".equals(host)
+                || "0:0:0:0:0:0:0:1".equals(host)
+                || "[0:0:0:0:0:0:0:1]".equals(host);
     }
 
 

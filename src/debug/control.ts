@@ -1,8 +1,60 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import net from 'node:net';
 import { join } from 'node:path';
 import { canonicalizeProject, pathsEqual } from '../project/metadata.js';
+
+function isLoopbackIPv6(hostPart: string): boolean {
+  if (!net.isIPv6(hostPart)) return false;
+  try {
+    const url = new URL(`http://[${hostPart}]`);
+    return url.hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+function isValidPort(portStr: string): boolean {
+  if (!/^[0-9]{1,5}$/.test(portStr)) return false;
+  const p = Number(portStr);
+  return p >= 1 && p <= 65535;
+}
+
+export function isLoopbackHostHeader(hostHeader: string): boolean {
+  const trimmed = hostHeader.trim();
+  if (!trimmed) return false;
+  if (/[\s/@?#\\]/.test(trimmed)) return false;
+
+  if (trimmed.startsWith('[')) {
+    const closingIdx = trimmed.indexOf(']');
+    if (closingIdx === -1) return false;
+    if (trimmed.indexOf('[', 1) !== -1 || trimmed.indexOf(']', closingIdx + 1) !== -1) return false;
+    const hostPart = trimmed.slice(1, closingIdx);
+    const rest = trimmed.slice(closingIdx + 1);
+    if (rest.length > 0) {
+      if (!rest.startsWith(':')) return false;
+      const portStr = rest.slice(1);
+      if (!isValidPort(portStr)) return false;
+    }
+    return isLoopbackIPv6(hostPart);
+  }
+
+  if (trimmed.includes(']')) return false;
+
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    return isLoopbackIPv6(trimmed);
+  } else if (colonCount === 1) {
+    const [hostPart, portStr] = trimmed.split(':');
+    if (!isValidPort(portStr)) return false;
+    const lower = hostPart.toLowerCase();
+    return lower === '127.0.0.1' || lower === 'localhost';
+  } else {
+    const lower = trimmed.toLowerCase();
+    return lower === '127.0.0.1' || lower === 'localhost';
+  }
+}
 
 export type DebugPhase =
   | 'connecting-lsp'
@@ -252,9 +304,8 @@ export async function createDebugControl(
         return;
       }
 
-      const hostHeader = (req.headers.host || '').trim();
-      const hostWithoutPort = hostHeader.split(':')[0].toLowerCase();
-      if (hostWithoutPort !== '127.0.0.1' && hostWithoutPort !== 'localhost') {
+      const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : '';
+      if (!isLoopbackHostHeader(hostHeader)) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'forbidden: loopback host required' }));
         return;

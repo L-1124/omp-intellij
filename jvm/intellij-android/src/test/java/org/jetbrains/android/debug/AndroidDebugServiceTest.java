@@ -159,6 +159,29 @@ public class AndroidDebugServiceTest {
             assertEquals("invalid_params", e.getReason());
         }
 
+        // Non-loopback IPv6 host
+        try {
+            service.claim("[::2]", 50000, null);
+            fail("Expected invalid_params for non-loopback IPv6 host");
+        } catch (AndroidDebugException e) {
+            assertEquals("invalid_params", e.getReason());
+        }
+
+        // Malformed bracketed host
+        try {
+            service.claim("[127.0.0.1]", 50000, null);
+            fail("Expected invalid_params for bracketed IPv4 host");
+        } catch (AndroidDebugException e) {
+            assertEquals("invalid_params", e.getReason());
+        }
+
+        try {
+            service.claim("[::1:8080]", 50000, null);
+            fail("Expected invalid_params for non-loopback IPv6 host");
+        } catch (AndroidDebugException e) {
+            assertEquals("invalid_params", e.getReason());
+        }
+
         // Null host
         try {
             service.claim(null, 50000, null);
@@ -191,6 +214,12 @@ public class AndroidDebugServiceTest {
 
         JsonObject c3 = service.claim("::1", 50001, null);
         assertFalse(JsonElementKt.getBoolean((JsonPrimitive) c3.get("claimed")));
+
+        JsonObject c4 = service.claim("[::1]", 50001, null);
+        assertFalse(JsonElementKt.getBoolean((JsonPrimitive) c4.get("claimed")));
+
+        JsonObject c5 = service.claim("[0:0:0:0:0:0:0:1]", 50001, null);
+        assertFalse(JsonElementKt.getBoolean((JsonPrimitive) c5.get("claimed")));
     }
 
     @Test

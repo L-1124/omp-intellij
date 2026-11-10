@@ -142,7 +142,13 @@ public class AndroidDebugHandles {
     private final Map<String, DebugHandle> handlesByKey = new HashMap<>();
     private final Map<Integer, DebugHandle> handlesByPort = new HashMap<>();
     private final Map<TargetId, Object> activeTargets = new HashMap<>(); // Holds DebugHandle or RESERVATION_PLACEHOLDER
-    private final Map<Integer, Long> expiredPortTombstones = new HashMap<>();
+    public static final int MAX_EXPIRED_PORT_TOMBSTONES = 128;
+    private final Map<Integer, Long> expiredPortTombstones = new LinkedHashMap<>(32, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<Integer, Long> eldest) {
+            return size() > MAX_EXPIRED_PORT_TOMBSTONES;
+        }
+    };
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
 
@@ -228,7 +234,12 @@ public class AndroidDebugHandles {
         return handle;
     }
 
+    private void recordExpiredPortLocked(int port) {
+        expiredPortTombstones.put(port, System.currentTimeMillis());
+    }
+
     private CompletableFuture<Boolean> beginCloseLocked(DebugHandle handle) {
+        recordExpiredPortLocked(handle.port);
         handle.state = HandleState.CLOSING;
         if (handle.expirationFuture != null) {
             handle.expirationFuture.cancel(false);
@@ -258,7 +269,6 @@ public class AndroidDebugHandles {
             if (handle == null || handle.state != HandleState.PREPARED) {
                 return;
             }
-            expiredPortTombstones.put(handle.port, System.currentTimeMillis());
             beginCloseLocked(handle);
         }
     }
@@ -267,7 +277,7 @@ public class AndroidDebugHandles {
         synchronized (lock) {
             DebugHandle handle = handlesByPort.get(port);
             if (handle == null) {
-                if (expiredPortTombstones.containsKey(port)) {
+                if (expiredPortTombstones.get(port) != null) {
                     throw new AndroidDebugException("lease_expired", "Debug handle has already expired or closed");
                 }
                 return ClaimResult.notClaimed();
@@ -278,7 +288,6 @@ public class AndroidDebugHandles {
             }
 
             if (handle.state == HandleState.PREPARED && System.currentTimeMillis() >= handle.expiresAt) {
-                expiredPortTombstones.put(port, System.currentTimeMillis());
                 beginCloseLocked(handle);
                 throw new AndroidDebugException("lease_expired", "Debug handle has expired");
             }

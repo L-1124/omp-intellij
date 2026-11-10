@@ -121,13 +121,30 @@ test('EOF during claim waits for ownership then releases before closing LSP', as
 });
 
 test('unclaimed loopback attach and remote attach preserve ordinary JVM behavior', async (t) => {
-  for (const host of ['127.0.0.1', '192.0.2.1']) {
+  for (const host of ['127.0.0.1', '[::1]', '[0:0:0:0:0:0:0:1]', '192.0.2.1', '[::1:8080]']) {
     let claims = 0;
+    let claimedHost: string | undefined;
     const harness = await createDapTestHarness(t, {
       onLspRequest(method, params) {
         if (method === 'initialize') return capabilities;
         if (commandOf(params) === ANDROID_DEBUG_COMMANDS.claim) {
           claims++;
+          if (
+            params &&
+            typeof params === 'object' &&
+            'arguments' in params &&
+            Array.isArray(params.arguments)
+          ) {
+            const firstArg = params.arguments[0];
+            if (
+              firstArg &&
+              typeof firstArg === 'object' &&
+              'host' in firstArg &&
+              typeof firstArg.host === 'string'
+            ) {
+              claimedHost = firstArg.host;
+            }
+          }
           return { claimed: false };
         }
         return undefined;
@@ -138,11 +155,35 @@ test('unclaimed loopback attach and remote attach preserve ordinary JVM behavior
       (await harness.request('attach', { host, port: 50558, timeout: 30000 })).success,
       true,
     );
-    assert.equal(claims, host === '127.0.0.1' ? 1 : 0);
+    const isLoopback = host === '127.0.0.1' || host === '[::1]' || host === '[0:0:0:0:0:0:0:1]';
+    assert.equal(claims, isLoopback ? 1 : 0);
+    if (host === '[::1]' || host === '[0:0:0:0:0:0:0:1]') {
+      assert.equal(claimedHost, '::1');
+      assert.equal(
+        harness.backendRequests.find((request) => request.command === 'attach')?.arguments?.hostName,
+        '::1',
+      );
+    } else if (host === '[::1:8080]') {
+      assert.equal(
+        harness.backendRequests.find((request) => request.command === 'attach')?.arguments?.hostName,
+        '::1:8080',
+      );
+    }
     assert.equal(
       harness.backendRequests.find((request) => request.command === 'attach')?.arguments?.timeout,
       30000,
     );
     assert.equal((await harness.request('disconnect')).success, true);
   }
+});
+
+test('attach rejects malformed hosts before opening backend', async (t) => {
+  const harness = await createDapTestHarness(t);
+  await harness.request('initialize');
+  for (const host of ['[::1', '::1]', '[127.0.0.1]', 'foo[bar]', '[[::1]]']) {
+    const res = await harness.request('attach', { host, port: 50558 });
+    assert.equal(res.success, false);
+    assert.match(res.message ?? '', /Malformed/);
+  }
+  assert.equal(harness.backendRequests.length, 0);
 });

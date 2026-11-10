@@ -188,6 +188,46 @@ export function isDirectExecution(
   }
 }
 
+function isLoopbackIPv6(host: string): boolean {
+  if (!net.isIPv6(host)) return false;
+  try {
+    const url = new URL(`http://[${host}]`);
+    return url.hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeAttachHost(rawHost: string): { host: string } | { error: string } {
+  const trimmed = rawHost.trim();
+  if (!trimmed) {
+    return { error: 'IntelliJ attach requires a non-empty host' };
+  }
+  if (trimmed.startsWith('[') || trimmed.endsWith(']')) {
+    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+      return { error: `Malformed bracketed IPv6 host: ${rawHost}` };
+    }
+    const inner = trimmed.slice(1, -1);
+    if (inner.includes('[') || inner.includes(']')) {
+      return { error: `Malformed bracketed IPv6 host: ${rawHost}` };
+    }
+    if (!net.isIPv6(inner)) {
+      return { error: `Malformed bracketed IPv6 host: ${rawHost}` };
+    }
+    if (isLoopbackIPv6(inner)) {
+      return { host: '::1' };
+    }
+    return { host: inner };
+  }
+  if (trimmed.includes('[') || trimmed.includes(']')) {
+    return { error: `Malformed host: ${rawHost}` };
+  }
+  if (isLoopbackIPv6(trimmed)) {
+    return { host: '::1' };
+  }
+  return { host: trimmed };
+}
+
 export interface DapProxyOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
@@ -916,12 +956,17 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           );
           return;
         }
-        const host = args.host ?? args.hostName ?? '127.0.0.1';
-        if (typeof host !== 'string' || !host.trim()) {
+        const rawHost = args.host ?? args.hostName ?? '127.0.0.1';
+        if (typeof rawHost !== 'string' || !rawHost.trim()) {
           respond(request, false, undefined, 'IntelliJ attach requires a non-empty host');
           return;
         }
-        hostName = host;
+        const hostResult = normalizeAttachHost(rawHost);
+        if ('error' in hostResult) {
+          respond(request, false, undefined, hostResult.error);
+          return;
+        }
+        hostName = hostResult.host;
         if (args.timeout !== undefined) {
           if (
             typeof args.timeout !== 'number' ||
