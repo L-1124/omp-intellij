@@ -274,6 +274,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 所有 Maven 运行依赖均关闭传递解析；不分发 `lint-psi`、UAST 或 standalone Kotlin 编译器。ILS 未提供资源仓库类型，`sdk-common` 与 `layoutlib-api` 共同支撑资源仓库接口与值类型，不能只放在编译 classpath。
 
+依赖校验覆盖二进制、POM、Gradle module metadata、BOM 和 IDE 下载的源码包。新增依赖时，使用 `--write-verification-metadata sha256` 生成候选摘要，再核对官方仓库发布的摘要或签名；普通构建和 IDE 同步保持只校验，不自动接受新摘要。CLI 构建通过后，还需实际导入此 JVM 工程，覆盖 ILS 的模型与源码解析路径。
+
 宿主库存在于 ILS 安装目录不代表插件类加载器可访问。`plugin.xml` 显式声明公共模块 `intellij.libraries.asm`、`intellij.libraries.asm.tools` 与 `intellij.libraries.guava`；ASM Tree 的 `AbstractInsnNode` 位于 `asm.tools`。Lint 的 `Detector` 和内置规则仍引用 ASM 类型，单文件 Scope 过滤不会消除类链接依赖，因此保留这两个模块声明，不复制宿主 JAR。
 
 `manifest.json` 记录 ILS 版本、插件 ID、Java/classfile 版本、工具链，以及全部资产的名称、相对路径、SHA-256 和大小。实际发布清单见 [manifest.json](../resources/ils/271.2085.0/intellij-android/manifest.json)；Node 校验同时核对固定白名单与上游摘要，拒绝缺失、多余或被替换的文件。
@@ -442,3 +444,4 @@ SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅
 - 真实 ILS `271.2085.0` 的 `android-xml.test.js` 全部通过，覆盖 Java/Kotlin 编译诊断、Compose、XML/Manifest 规则、资源导航及合并来源回退。
 - 独立 Groovy 工程实测：保存的 `minSdk 21` 触发 API 26 的 `NewApi`；未保存缓冲区改为 26 后诊断保留，落盘并发送 `didSave` 后消失。自定义资源根与自定义 Manifest 生效，默认 Manifest 被排除。真实服务的 `owner.pluginPaths` 记录预期的绝对扩展目录；验证后已关闭客户端并清理沙箱。
 - 额外执行的 `engineering.test.js` 中，Gradle 子项目调试通过；两项工程模型用例在 `model.classpath` 断言处失败。ILS 271 未广告 `intellij.java.resolveLaunch`，`exportWorkspace` 回退只提供工程模型，不提供运行 classpath。本轮保留该能力边界，未伪造 classpath 或放宽断言。
+- 当前 JVM 工程的真实导入验证已通过：Groovy BOM 的 `.pom`、`.module` 及 Groovy 源码包摘要与 Maven Central 发布值一致，补齐后执行工作区重导入，原连接恢复 `ready`。严格依赖校验保持启用。
