@@ -487,37 +487,43 @@ test('/intellij eula accept aborts and does not write old acceptance if file cha
 test('watchIndex observer notifies on auth denial once and notifies once on recovery', async () => {
   const pi = createMockPi();
   let listener!: (state: ProjectStateResult) => void;
+  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  const originalOn = pi.on.bind(pi);
+  pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
+    if (event === 'session_start') {
+      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+    }
+    originalOn(event, handler);
+  }) as typeof pi.on;
+
   const notifications: Array<{ msg: string; level?: string }> = [];
-
-  extension(pi, {
-    readinessApi: {
-      watchIndex: (_root, onState) => {
-        listener = onState as (state: ProjectStateResult) => void;
-        return () => {};
-      },
-    },
-  });
-
-  const ctx = createMockCtx('F:/proj');
-  // Override notify to capture notifications
-  ctx.ui = {
-    notify(msg: string, level: string = 'info') {
-      notifications.push({ msg, level });
-    },
-    setStatus() {},
-  };
-
-  // Start observer via start command
-  // We emit session_start with Java marker present
   const base = join(tmpdir(), `omp-auth-obs-${Math.random().toString(36).slice(2)}`);
-  await mkdir(base, { recursive: true });
+  const customSystemPath = join(base, 'system');
+  await mkdir(customSystemPath, { recursive: true });
   await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
-  try {
-    const javaCtx = createMockCtx(base);
-    javaCtx.ui = ctx.ui;
-    pi.emit('session_start', {}, javaCtx);
-    assert.ok(listener, 'watchIndex must be registered for Java workspace');
 
+  try {
+    extension(pi, {
+      systemPath: customSystemPath,
+      readinessApi: {
+        watchIndex: (_root, onState) => {
+          listener = onState as (state: ProjectStateResult) => void;
+          return () => {};
+        },
+      },
+    });
+
+    const javaCtx = createMockCtx(base);
+    javaCtx.ui = {
+      notify(msg: string, level: string = 'info') {
+        notifications.push({ msg, level });
+      },
+      setStatus() {},
+    };
+
+    assert.ok(sessionStartHandler, 'session_start handler must be registered');
+    await sessionStartHandler({}, javaCtx);
+    assert.ok(listener, 'watchIndex must be registered for Java workspace');
     // 1. Initial indexing with unknown license
     if (listener) {
       listener({
@@ -650,5 +656,272 @@ test('session_start writes connection record to activeSystemPath override', asyn
     pi.emit('session_shutdown');
     await rm(customSystemPath, { recursive: true, force: true });
     await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('watchIndex observer notifies on fresh structured import failure once and deduplicates progress details', async () => {
+  const pi = createMockPi();
+  let listener!: (state: ProjectStateResult) => void;
+  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  const originalOn = pi.on.bind(pi);
+  pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
+    if (event === 'session_start') {
+      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+    }
+    originalOn(event, handler);
+  }) as typeof pi.on;
+
+  const notifications: Array<{ msg: string; level?: string }> = [];
+  const base = join(tmpdir(), `omp-fail-obs-${Math.random().toString(36).slice(2)}`);
+  const customSystemPath = join(base, 'system');
+  await mkdir(customSystemPath, { recursive: true });
+  await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
+
+  try {
+    extension(pi, {
+      systemPath: customSystemPath,
+      readinessApi: {
+        watchIndex: (_root, onState) => {
+          listener = onState as (state: ProjectStateResult) => void;
+          return () => {};
+        },
+      },
+    });
+
+    const javaCtx = createMockCtx(base);
+    javaCtx.ui = {
+      notify(msg: string, level: string = 'info') {
+        notifications.push({ msg, level });
+      },
+      setStatus() {},
+    };
+
+    assert.ok(sessionStartHandler, 'session_start handler must be registered');
+    await sessionStartHandler({}, javaCtx);
+    assert.ok(listener, 'watchIndex must be registered for Java workspace');
+
+    const now = Date.now();
+    listener({
+      phase: 'failed',
+      detail: 'Import step 1/3: resolving dependencies',
+      updatedAt: now,
+      failure: {
+        kind: 'import',
+        stage: 'import',
+        message: 'Maven sync failed: unresolved dependency',
+      },
+    });
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].level, 'warning');
+    assert.match(notifications[0].msg, /Maven sync failed: unresolved dependency/);
+    assert.match(notifications[0].msg, /\/intellij workspace reload/);
+    assert.doesNotMatch(notifications[0].msg, /\/intellij restart/);
+
+    listener({
+      phase: 'failed',
+      detail: 'Import step 2/3: downloading plugins',
+      updatedAt: now + 100,
+      failure: {
+        kind: 'import',
+        stage: 'import',
+        message: 'Maven sync failed: unresolved dependency',
+      },
+    });
+    assert.equal(notifications.length, 1, 'same structured failure with different detail must not re-notify');
+
+    listener({
+      phase: 'failed',
+      detail: 'Import step 3/3: indexing failed',
+      updatedAt: now + 200,
+      failure: {
+        kind: 'import',
+        stage: 'import',
+        message: 'POM parse error: invalid XML',
+      },
+    });
+    assert.equal(notifications.length, 2);
+    assert.equal(notifications[1].level, 'warning');
+    assert.match(notifications[1].msg, /POM parse error: invalid XML/);
+    assert.match(notifications[1].msg, /\/intellij workspace reload/);
+
+    listener({
+      phase: 'importing',
+      detail: 'Retrying Maven sync',
+      updatedAt: now + 300,
+    });
+    assert.equal(notifications.length, 2);
+
+    listener({
+      phase: 'failed',
+      detail: 'Import failed again',
+      updatedAt: now + 400,
+      failure: {
+        kind: 'import',
+        stage: 'import',
+        message: 'POM parse error: invalid XML',
+      },
+    });
+    assert.equal(notifications.length, 3, 'new failure after importing phase must notify even with same failure content');
+    assert.equal(notifications[2].level, 'warning');
+    assert.match(notifications[2].msg, /POM parse error: invalid XML/);
+  } finally {
+    pi.emit('session_shutdown');
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('watchIndex observer failure action guidance distinguishes import vs non-import', async () => {
+  const pi = createMockPi();
+  let listener!: (state: ProjectStateResult) => void;
+  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  const originalOn = pi.on.bind(pi);
+  pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
+    if (event === 'session_start') {
+      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+    }
+    originalOn(event, handler);
+  }) as typeof pi.on;
+
+  const notifications: Array<{ msg: string; level?: string }> = [];
+  const base = join(tmpdir(), `omp-guidance-obs-${Math.random().toString(36).slice(2)}`);
+  const customSystemPath = join(base, 'system');
+  await mkdir(customSystemPath, { recursive: true });
+  await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
+
+  try {
+    extension(pi, {
+      systemPath: customSystemPath,
+      readinessApi: {
+        watchIndex: (_root, onState) => {
+          listener = onState as (state: ProjectStateResult) => void;
+          return () => {};
+        },
+      },
+    });
+
+    const javaCtx = createMockCtx(base);
+    javaCtx.ui = {
+      notify(msg: string, level: string = 'info') {
+        notifications.push({ msg, level });
+      },
+      setStatus() {},
+    };
+
+    assert.ok(sessionStartHandler, 'session_start handler must be registered');
+    await sessionStartHandler({}, javaCtx);
+    assert.ok(listener, 'watchIndex must be registered for Java workspace');
+
+    const now = Date.now();
+    listener({
+      phase: 'failed',
+      detail: 'Bridge failed',
+      updatedAt: now,
+      failure: {
+        kind: 'connection',
+        stage: 'connect',
+        message: 'Socket reset by peer',
+      },
+    });
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].level, 'warning');
+    assert.match(notifications[0].msg, /\/intellij restart/);
+    assert.doesNotMatch(notifications[0].msg, /\/intellij workspace reload/);
+
+    listener({
+      phase: 'failed',
+      detail: 'Import failed',
+      updatedAt: now + 100,
+      failure: {
+        kind: 'import',
+        stage: 'import',
+        message: 'Gradle sync failed',
+      },
+    });
+    assert.equal(notifications.length, 2);
+    assert.equal(notifications[1].level, 'warning');
+    assert.match(notifications[1].msg, /\/intellij workspace reload/);
+    assert.doesNotMatch(notifications[1].msg, /\/intellij restart/);
+  } finally {
+    pi.emit('session_shutdown');
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('watchIndex observer unstructured failure falls back to phase and detail changes', async () => {
+  const pi = createMockPi();
+  let listener!: (state: ProjectStateResult) => void;
+  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  const originalOn = pi.on.bind(pi);
+  pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
+    if (event === 'session_start') {
+      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+    }
+    originalOn(event, handler);
+  }) as typeof pi.on;
+
+  const notifications: Array<{ msg: string; level?: string }> = [];
+  const base = join(tmpdir(), `omp-unstructured-obs-${Math.random().toString(36).slice(2)}`);
+  const customSystemPath = join(base, 'system');
+  await mkdir(customSystemPath, { recursive: true });
+  await writeFile(join(base, 'pom.xml'), '<project></project>', 'utf8');
+
+  try {
+    extension(pi, {
+      systemPath: customSystemPath,
+      readinessApi: {
+        watchIndex: (_root, onState) => {
+          listener = onState as (state: ProjectStateResult) => void;
+          return () => {};
+        },
+      },
+    });
+
+    const javaCtx = createMockCtx(base);
+    javaCtx.ui = {
+      notify(msg: string, level: string = 'info') {
+        notifications.push({ msg, level });
+      },
+      setStatus() {},
+    };
+
+    assert.ok(sessionStartHandler, 'session_start handler must be registered');
+    await sessionStartHandler({}, javaCtx);
+    assert.ok(listener, 'watchIndex must be registered for Java workspace');
+
+    const now = Date.now();
+    listener({
+      phase: 'failed',
+      detail: 'Process exited unexpectedly',
+      updatedAt: now,
+    });
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].level, 'warning');
+    assert.match(notifications[0].msg, /Process exited unexpectedly/);
+    assert.match(notifications[0].msg, /\/intellij restart/);
+
+    listener({
+      phase: 'failed',
+      detail: 'Process exited unexpectedly',
+      updatedAt: now + 50,
+    });
+    assert.equal(notifications.length, 1, 'identical unstructured failure must not re-notify');
+
+    listener({
+      phase: 'failed',
+      detail: 'Process core dumped',
+      updatedAt: now + 100,
+    });
+    assert.equal(notifications.length, 2, 'unstructured failure with new detail must notify');
+    assert.match(notifications[1].msg, /Process core dumped/);
+
+    listener({
+      phase: 'failed',
+      detail: 'Very old error',
+      updatedAt: now - 100000,
+    });
+    assert.equal(notifications.length, 2, 'stale failure must be ignored');
+  } finally {
+    pi.emit('session_shutdown');
+    await rm(base, { recursive: true, force: true });
   }
 });

@@ -302,6 +302,75 @@ test('reduceConnectionState: ignores task finish ($/progress kind end) and only 
   assert.equal(state.detail, 'IntelliJ index ready');
 });
 
+test('reduceConnectionState: maintains progress but preserves failed detail and failure on $/progress begin/report/end', () => {
+  const failedImportMessage = {
+    method: 'intellij/workspaceImportState',
+    params: {
+      phase: 'FAILED',
+      errorMessage: 'Gradle sync failed',
+      folders: [{ uri: 'file:///project', status: 'FAILED', errorMessage: 'Gradle sync failed' }],
+    },
+  };
+  let state = reduceConnectionState(null, failedImportMessage, 'server');
+  assert.equal(state.phase, 'failed');
+  assert.equal(state.detail, 'Gradle sync failed');
+  assert.equal(state.failure?.message, 'Gradle sync failed');
+  const originalFailure = state.failure;
+
+  const progressSteps = [
+    { kind: 'begin', title: 'Indexing', message: 'Scanning files', percentage: 10 },
+    { kind: 'report', title: 'Indexing', message: 'Resolving dependencies', percentage: 50 },
+  ] as const;
+
+  for (const step of progressSteps) {
+    state = reduceConnectionState(
+      state,
+      {
+        method: '$/progress',
+        params: {
+          token: 'task-token',
+          value: step,
+        },
+      },
+      'server',
+    );
+    assert.equal(state.phase, 'failed');
+    assert.equal(state.detail, 'Gradle sync failed');
+    assert.deepEqual(state.failure, originalFailure);
+    assert.deepEqual(state.progress, {
+      token: 'task-token',
+      title: step.title,
+      message: step.message,
+      percentage: step.percentage,
+    });
+  }
+
+  state = reduceConnectionState(
+    state,
+    {
+      method: '$/progress',
+      params: {
+        token: 'task-token',
+        value: { kind: 'end', message: 'Finished' },
+      },
+    },
+    'server',
+  );
+  assert.equal(state.phase, 'failed');
+  assert.equal(state.detail, 'Gradle sync failed');
+  assert.deepEqual(state.failure, originalFailure);
+  assert.equal(state.progress, null);
+
+  state = reduceConnectionState(
+    state,
+    { method: 'intellij/ready-for-test', params: {} },
+    'server',
+  );
+  assert.equal(state.phase, 'failed');
+  assert.equal(state.detail, 'Gradle sync failed');
+  assert.deepEqual(state.failure, originalFailure);
+});
+
 test('enqueueWrite error reporting: notifies onWriteError on failure and close() rejects', async () => {
   const invalidPath = join('Z:', 'nonexistent-drive-12345', 'path');
   const errors: unknown[] = [];

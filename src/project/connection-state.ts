@@ -437,9 +437,11 @@ export function reduceConnectionState(
         }
         if (kind === 'begin' || kind === 'report') {
           next.progress = { token, title, message: progMsg, percentage };
-          const parts = [title, progMsg].filter(Boolean);
-          if (parts.length > 0) {
-            next.detail = parts.join(': ');
+          if (next.phase !== 'failed') {
+            const parts = [title, progMsg].filter(Boolean);
+            if (parts.length > 0) {
+              next.detail = parts.join(': ');
+            }
           }
         } else if (kind === 'end') {
           next.progress = null;

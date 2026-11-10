@@ -431,8 +431,9 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             const currentFailKey = failureContentKey(next.failure);
             const failChanged =
               previous.phase !== next.phase ||
-              previous.detail !== next.detail ||
-              currentFailKey !== lastNotifiedFailureKey;
+              (next.failure
+                ? currentFailKey !== lastNotifiedFailureKey
+                : previous.detail !== next.detail);
             if (!stale && failChanged) {
               lastNotifiedFailureKey = currentFailKey;
               if (next.phase === 'disconnected') {
@@ -442,8 +443,12 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 );
               } else {
                 const failDetail = next.failure?.message || next.detail || '';
+                const action =
+                  next.failure?.kind === 'import'
+                    ? '/intellij workspace reload'
+                    : '/intellij restart';
                 ctx.ui?.notify(
-                  `IntelliJ index failed: ${failDetail}. Use /intellij start to retry.`,
+                  `IntelliJ index failed: ${failDetail}. Use ${action} to retry.`,
                   'warning',
                 );
               }
