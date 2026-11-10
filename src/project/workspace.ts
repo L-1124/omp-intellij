@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -28,6 +28,64 @@ export function cleanPath(input: unknown): string {
     s = s.slice(1, -1).trim();
   }
   return s;
+}
+
+const registeredSystemPaths = new Set<string>();
+let exitHookInstalled = false;
+
+function normalizeSystemPath(systemPath: string): string {
+  const resolved = resolve(cleanPath(systemPath));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function cleanupProcessLeases(systemPath: string, pid: number = process.pid): void {
+  try {
+    const leasesDir = join(systemPath, 'plugin-metadata', 'leases');
+    if (!existsSync(leasesDir)) return;
+    const entries = readdirSync(leasesDir);
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const file = join(leasesDir, entry);
+      try {
+        const content = readFileSync(file, 'utf8');
+        const parsed: unknown = JSON.parse(content);
+        if (parsed && typeof parsed === 'object' && 'pid' in parsed && parsed.pid === pid) {
+          try {
+            unlinkSync(file);
+          } catch (unlinkErr: unknown) {
+            if (unlinkErr && typeof unlinkErr === 'object' && 'code' in unlinkErr && unlinkErr.code !== 'ENOENT') {
+              // ignore
+            }
+          }
+        }
+      } catch (readErr: unknown) {
+        if (readErr && typeof readErr === 'object' && 'code' in readErr && readErr.code !== 'ENOENT') {
+          // ignore corrupt/inaccessible files during exit
+        }
+      }
+    }
+  } catch {}
+}
+
+function cleanupAllRegisteredSystemPaths(pid: number = process.pid): void {
+  for (const path of registeredSystemPaths) {
+    cleanupProcessLeases(path, pid);
+  }
+}
+
+function ensureExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on('exit', () => {
+    cleanupAllRegisteredSystemPaths();
+  });
+}
+
+export function registerSystemPath(systemPath?: string): void {
+  if (!systemPath || typeof systemPath !== 'string') return;
+  const normalized = normalizeSystemPath(systemPath);
+  registeredSystemPaths.add(normalized);
+  ensureExitHook();
 }
 
 export function getWorkspaceConfigDir(options: { configDir?: string } = {}): string {
@@ -417,6 +475,8 @@ export async function setWorkspaceJdk(
   options: { systemPath?: string; configDir?: string } = {},
 ) {
   if (!projectRoot) throw new Error('Project root is required');
+  const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   const targetDir = getWorkspaceConfigDir(options);
   const cleanedRoot = cleanPath(projectRoot);
   const canonical = canonicalizeProject(cleanedRoot);
@@ -477,6 +537,8 @@ export async function setWorkspaceEnvVar(
   options: { systemPath?: string; configDir?: string } = {},
 ): Promise<SetWorkspaceEnvVarResult> {
   if (!projectRoot) throw new Error('Project root is required');
+  const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   const cleanedName = typeof name === 'string' ? name.trim() : '';
   if (!cleanedName) throw new Error('Environment variable name is required');
   if (typeof value !== 'string') throw new Error('Environment variable value must be a string');
@@ -522,6 +584,8 @@ export async function unsetWorkspaceEnvVar(
 ): Promise<UnsetWorkspaceEnvVarResult> {
   if (!projectRoot) throw new Error('Project root is required');
   const cleanedName = typeof name === 'string' ? name.trim() : '';
+  const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   if (!cleanedName) throw new Error('Environment variable name is required');
 
   const targetDir = getWorkspaceConfigDir(options);
@@ -613,6 +677,7 @@ export async function getWorkspaceInfo(
   options: { systemPath?: string; configDir?: string } = {},
 ): Promise<WorkspaceInfo> {
   const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   const configDir = options.configDir;
   if (!projectRoot) throw new Error('Project root is required');
   const cleanedRoot = cleanPath(projectRoot);
@@ -758,6 +823,7 @@ export async function listWorkspaces(
   options: { systemPath?: string; configDir?: string } = {},
 ): Promise<WorkspaceInfo[]> {
   const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   const configDir = options.configDir;
   const targetDir = getWorkspaceConfigDir({ configDir });
   const map = new Map<string, string>();
@@ -908,6 +974,8 @@ export async function applyWorkspaceOptions(
   const canonical = canonicalizeProject(cleanedRoot);
   const { nativePath, id } = canonical;
   const targetDir = getWorkspaceConfigDir(options);
+  const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   if (!Object.hasOwn(initOptions, 'fromWorkspace')) {
     const source = await knownWorktreeSource(nativePath, options.systemPath ?? settings.systemPath);
     if (source) initOptions = { ...initOptions, fromWorkspace: source };
@@ -1052,6 +1120,7 @@ export async function reimportWorkspace(
   const canonical = canonicalizeProject(cleanedRoot);
   const { canonicalPath, nativePath, rootUri, id } = canonical;
   const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   const configDir = options.configDir;
   const targetDir = getWorkspaceConfigDir({ configDir });
   const saved = await readWorkspaceConfig(targetDir, canonical);
@@ -1229,6 +1298,8 @@ export async function discoverJdks(
     includeDefaultRoots?: boolean;
   } = {},
 ): Promise<DiscoveredJdkItem[]> {
+  const systemPath = options.systemPath ?? settings.systemPath;
+  if (systemPath) registerSystemPath(systemPath);
   const env = options.env || process.env;
   const discovered = new Map<string, DiscoveredJdkItem>();
 

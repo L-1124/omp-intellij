@@ -28,6 +28,7 @@ import {
   unsetWorkspaceEnvVar,
   validateEnvMap,
   validateJdk,
+  registerSystemPath,
 } from '../src/project/workspace.js';
 import { asyncFramedStream, encode } from '../src/shared/protocol.js';
 
@@ -1112,4 +1113,89 @@ test('linked worktrees only inherit an attributed ready source URI and preserve 
   );
   await writeFile(record, JSON.stringify({ rootUri: pathToFileURL(linked).href }));
   assert.equal((await applyWorkspaceOptions(linked, {}, options)).fromWorkspace, undefined);
+});
+
+test('process exit releases only this process leases across multiple registered system paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-exit-lease-'));
+  const sys1 = join(root, 'sys1');
+  const sys2 = join(root, 'sys2');
+  const sys1Leases = join(sys1, 'plugin-metadata', 'leases');
+  const sys2Leases = join(sys2, 'plugin-metadata', 'leases');
+
+  await mkdir(sys1Leases, { recursive: true });
+  await mkdir(sys2Leases, { recursive: true });
+
+  const foreignLease = join(sys1Leases, 'foreign.json');
+  await writeFile(foreignLease, JSON.stringify({ id: 'foreign', pid: 999999 }), 'utf8');
+
+  const workspaceModuleUrl = new URL('../src/project/workspace.js', import.meta.url).href;
+
+  const childScript = `
+    import { registerSystemPath } from ${JSON.stringify(workspaceModuleUrl)};
+    import { writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+
+    const sys1 = ${JSON.stringify(sys1)};
+    const sys2 = ${JSON.stringify(sys2)};
+
+    registerSystemPath(sys1);
+    registerSystemPath(sys2);
+    ${process.platform === 'win32' ? `registerSystemPath(sys1.toUpperCase());` : ''}
+
+    writeFileSync(join(sys1, 'plugin-metadata', 'leases', 'child1.json'), JSON.stringify({ id: 'c1', pid: process.pid }), 'utf8');
+    writeFileSync(join(sys2, 'plugin-metadata', 'leases', 'child2.json'), JSON.stringify({ id: 'c2', pid: process.pid }), 'utf8');
+
+    process.exit(0);
+  `;
+
+  try {
+    execFileSync(process.execPath, ['--input-type=module', '-e', childScript], {
+      windowsHide: true,
+      encoding: 'utf8',
+    });
+
+    const child1Lease = join(sys1Leases, 'child1.json');
+    const child2Lease = join(sys2Leases, 'child2.json');
+
+    assert.equal(existsSync(child1Lease), false, 'sys1 child lease must be cleaned up on exit');
+    assert.equal(existsSync(child2Lease), false, 'sys2 child lease must be cleaned up on exit');
+    assert.equal(existsSync(foreignLease), true, 'foreign lease must be preserved');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace operations register systemPath for child process exit cleanup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-op-exit-lease-'));
+  const sys = join(root, 'sys');
+  const leasesDir = join(sys, 'plugin-metadata', 'leases');
+  await mkdir(leasesDir, { recursive: true });
+
+  const workspaceModuleUrl = new URL('../src/project/workspace.js', import.meta.url).href;
+
+  const childScript = `
+    import { getWorkspaceInfo } from ${JSON.stringify(workspaceModuleUrl)};
+    import { writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+
+    const sys = ${JSON.stringify(sys)};
+
+    await getWorkspaceInfo('F:/fake/project', { systemPath: sys }).catch(() => {});
+
+    writeFileSync(join(sys, 'plugin-metadata', 'leases', 'child.json'), JSON.stringify({ id: 'child-lease', pid: process.pid }), 'utf8');
+
+    process.exit(0);
+  `;
+
+  try {
+    execFileSync(process.execPath, ['--input-type=module', '-e', childScript], {
+      windowsHide: true,
+      encoding: 'utf8',
+    });
+
+    const childLease = join(leasesDir, 'child.json');
+    assert.equal(existsSync(childLease), false, 'lease in workspace-registered systemPath must be cleaned up on exit');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

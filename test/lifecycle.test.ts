@@ -326,6 +326,67 @@ test('stopServer: refuses to stop legacy PID-only owner record without token/sys
   assert.equal(isProcessAlive(process.pid), true);
 });
 
+test('verifyServerOwnership accepts owner record with valid empty or populated pluginPaths and distinguishes legacy undefined', async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-pluginpaths-'));
+  let fake: FakeServer | null = null;
+  t.after(async () => {
+    if (fake) await fake.cleanup();
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  fake = await startFakeServer(tempRoot);
+  const ownerFile = join(tempRoot, 'omp-server.json');
+  const baseRecord = JSON.parse(await readFile(ownerFile, 'utf8')) as ServerOwnerRecord;
+
+  // 1. Legacy record without pluginPaths
+  delete baseRecord.pluginPaths;
+  await writeFile(ownerFile, JSON.stringify(baseRecord, null, 2), 'utf8');
+  let verification = await verifyServerOwnership(tempRoot);
+  assert.equal(verification.status, 'running-owned');
+  assert.equal(verification.owner?.pluginPaths, undefined);
+
+  // 2. Modern record with empty pluginPaths []
+  baseRecord.pluginPaths = [];
+  await writeFile(ownerFile, JSON.stringify(baseRecord, null, 2), 'utf8');
+  verification = await verifyServerOwnership(tempRoot);
+  assert.equal(verification.status, 'running-owned');
+  assert.deepEqual(verification.owner?.pluginPaths, []);
+
+  // 3. Modern record with populated pluginPaths
+  baseRecord.pluginPaths = ['/opt/plugins/test-plugin'];
+  await writeFile(ownerFile, JSON.stringify(baseRecord, null, 2), 'utf8');
+  verification = await verifyServerOwnership(tempRoot);
+  assert.equal(verification.status, 'running-owned');
+  assert.deepEqual(verification.owner?.pluginPaths, ['/opt/plugins/test-plugin']);
+});
+
+test('verifyServerOwnership rejects owner record with malformed pluginPaths', async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-bad-pluginpaths-'));
+  let fake: FakeServer | null = null;
+  t.after(async () => {
+    if (fake) await fake.cleanup();
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  fake = await startFakeServer(tempRoot);
+  const ownerFile = join(tempRoot, 'omp-server.json');
+  const baseRecord = JSON.parse(await readFile(ownerFile, 'utf8')) as Record<string, unknown>;
+
+  // Non-array pluginPaths
+  baseRecord.pluginPaths = 'not-an-array';
+  await writeFile(ownerFile, JSON.stringify(baseRecord, null, 2), 'utf8');
+  let verification = await verifyServerOwnership(tempRoot);
+  assert.equal(verification.status, 'running-unverified');
+  assert.match(verification.reason ?? '', /invalid pluginPaths/i);
+
+  // Array containing non-string
+  baseRecord.pluginPaths = [12345];
+  await writeFile(ownerFile, JSON.stringify(baseRecord, null, 2), 'utf8');
+  verification = await verifyServerOwnership(tempRoot);
+  assert.equal(verification.status, 'running-unverified');
+  assert.match(verification.reason ?? '', /invalid pluginPaths/i);
+});
+
 test('stopServer: blocked by active connection leases; succeeds after release', async (t) => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-lease-'));
   let fake: { child: ChildProcess; port: number; cleanup: () => Promise<void> } | undefined;
@@ -575,7 +636,87 @@ test('restartServer: stops old server and launches new server under lifecycle lo
     const cachedData = await readFile(join(dataDir, 'index.bin'), 'utf8');
     assert.equal(cachedData, 'important index cache data');
 
+    // Verify omp-server.json records pluginPaths as [] when none configured
+    const ownerFile = join(tempRoot, 'omp-server.json');
+    const ownerRecord = JSON.parse(await readFile(ownerFile, 'utf8')) as ServerOwnerRecord;
+    assert.deepEqual(ownerRecord.pluginPaths, []);
+
     // Clean up new server
+    await stopServer({ systemPath: tempRoot });
+    assert.equal(isProcessAlive(newPidToClean), false);
+  } finally {
+    if (oldFake) await oldFake.cleanup();
+  }
+});
+
+test('restartServer: records effective -Dplugin.path in omp-server.json and avoids secret leakage', async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-restart-pluginpaths-'));
+  const configDir = join(tempRoot, 'agent');
+  await mkdir(configDir, { recursive: true });
+  const configFile = join(configDir, 'intellij.json');
+  const originalConfig = process.env.OMP_INTELLIJ_CONFIG;
+  const originalIjOptions = process.env.IJ_JAVA_OPTIONS;
+  process.env.OMP_INTELLIJ_CONFIG = configFile;
+  process.env.IJ_JAVA_OPTIONS =
+    '-Xmx2g -Dplugin.path="C:/custom/plugin1,C:/custom/plugin2" -Dsecret.token=super-secret-1234 -ea';
+
+  let oldFake: { child: ChildProcess; port: number; cleanup: () => Promise<void> } | undefined;
+  let newPidToClean = 0;
+  t.after(async () => {
+    if (originalConfig === undefined) delete process.env.OMP_INTELLIJ_CONFIG;
+    else process.env.OMP_INTELLIJ_CONFIG = originalConfig;
+    if (originalIjOptions === undefined) delete process.env.IJ_JAVA_OPTIONS;
+    else process.env.IJ_JAVA_OPTIONS = originalIjOptions;
+
+    if (newPidToClean && isProcessAlive(newPidToClean)) {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill.exe', ['/F', '/T', '/PID', String(newPidToClean)], {
+          windowsHide: true,
+        });
+      } else {
+        process.kill(newPidToClean, 'SIGKILL');
+      }
+    }
+    if (oldFake) await oldFake.cleanup();
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  try {
+    oldFake = await startFakeServer(tempRoot);
+    const oldPid = oldFake.child.pid;
+    assert.ok(oldPid);
+
+    const exe = await createFakeServerExecutable(tempRoot);
+    const doc = await readServerEula(exe);
+    await acceptServerEula(doc, { configFile });
+
+    const restartResult = await restartServer({
+      systemPath: tempRoot,
+      executable: exe,
+      timeoutMs: 8000,
+    });
+
+    assert.equal(restartResult.restarted, true);
+    newPidToClean = restartResult.pid;
+
+    const rawOwner = await readFile(join(tempRoot, 'omp-server.json'), 'utf8');
+    const owner = JSON.parse(rawOwner) as ServerOwnerRecord;
+
+    // Never persist entire IJ_JAVA_OPTIONS or secrets
+    assert.equal(rawOwner.includes('super-secret-1234'), false);
+    assert.equal(rawOwner.includes('secret.token'), false);
+    assert.equal(rawOwner.includes('-Xmx2g'), false);
+
+    // Records effective plugin paths as resolved array
+    assert.ok(Array.isArray(owner.pluginPaths));
+    assert.equal(owner.pluginPaths.length, 2);
+    assert.equal(owner.pluginPaths[0].endsWith('custom/plugin1'), true);
+    assert.equal(owner.pluginPaths[1].endsWith('custom/plugin2'), true);
+
+    const verification = await verifyServerOwnership(tempRoot);
+    assert.equal(verification.status, 'running-owned');
+    assert.deepEqual(verification.owner?.pluginPaths, owner.pluginPaths);
+
     await stopServer({ systemPath: tempRoot });
     assert.equal(isProcessAlive(newPidToClean), false);
   } finally {

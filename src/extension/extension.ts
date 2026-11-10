@@ -261,6 +261,9 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     configFile: overrides.configFile,
     configDir: overrides.configDir,
   });
+  if (typeof wsApi.registerSystemPath === 'function') {
+    wsApi.registerSystemPath(activeSystemPath);
+  }
 
   let statusVisible = false;
   let statusText = '';
@@ -524,7 +527,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       const sub = parts[0] || 'status';
 
       if (sub === 'start') {
-        const socket = await ensureServer();
+        const socket = await ensureServer({ systemPath: activeSystemPath });
         socket.destroy();
         startObserver(ctx);
       } else if (sub === 'stop' || sub === 'restart') {
@@ -592,8 +595,8 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         const installDesc = observed ? formatInstallDescription(observed) : '';
 
         let serverDesc: string;
-        if (await status()) {
-          const { host, port } = await endpoint();
+        if (await status(activeSystemPath)) {
+          const { host, port } = await endpoint(activeSystemPath);
           serverDesc = `IntelliJ ${host}:${port}`;
         } else {
           serverDesc = 'IntelliJ shared server stopped';
@@ -838,7 +841,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else if (sub === 'cache') {
         try {
-          const inv = await getCacheInventory(settings.systemPath);
+          const inv = await getCacheInventory(activeSystemPath);
           const count = inv.workspaces.length;
           const confirmed = inv.workspaces.filter((w) => w.mapping.status === 'confirmed').length;
           const unknown = count - confirmed;
@@ -899,7 +902,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       } else if (sub === 'prune') {
         const applyMode = parts[1] === '--apply';
         try {
-          const inv = await getCacheInventory(settings.systemPath);
+          const inv = await getCacheInventory(activeSystemPath);
           const plan = computePruneCandidates(inv, settings.cachePolicy);
 
           if (!applyMode) {
@@ -969,7 +972,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             }
 
             await withLifecycleLock(async () => {
-              const liveServer = await isServerAlive(settings.systemPath);
+              const liveServer = await isServerAlive(activeSystemPath);
               if (liveServer.alive) {
                 ctx.ui?.notify(
                   'Cannot prune cache while shared IntelliJ server is running (PID ' +
@@ -979,7 +982,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 );
                 return;
               }
-              const freshInv = await getCacheInventory(settings.systemPath);
+              const freshInv = await getCacheInventory(activeSystemPath);
               const freshPlan = computePruneCandidates(freshInv, settings.cachePolicy);
 
               const prevHashes = plan.candidates
@@ -998,7 +1001,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 return;
               }
 
-              const result = await applyPrune(freshPlan.candidates, settings.systemPath);
+              const result = await applyPrune(freshPlan.candidates, activeSystemPath);
               ctx.ui?.notify(
                 'IntelliJ cache pruned: deleted ' +
                   formatBytes(result.deletedLogicalBytes) +
@@ -1068,7 +1071,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           }
         } else if (wsSub === 'list') {
           try {
-            const list = await wsApi.listWorkspaces({ systemPath: settings.systemPath });
+            const list = await wsApi.listWorkspaces({ systemPath: activeSystemPath });
             if (!list || list.length === 0) {
               ctx.ui?.notify('No configured IntelliJ workspaces found.', 'info');
               return;
@@ -1097,7 +1100,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           try {
             const projectRoot = findProjectRootFn(ctx.cwd);
             const candidates = await wsApi.discoverJdks(projectRoot, {
-              systemPath: settings.systemPath,
+              systemPath: activeSystemPath,
             });
             if (!candidates || candidates.length === 0) {
               ctx.ui?.notify(
@@ -1135,7 +1138,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             let candidates: DiscoveredJdkItem[] = [];
             try {
               candidates = await wsApi.discoverJdks(projectRoot, {
-                systemPath: settings.systemPath,
+                systemPath: activeSystemPath,
               });
             } catch (err: unknown) {
               ctx.ui.notify(`Failed to discover JDKs: ${getErrorMessage(err)}`, 'warning');
@@ -1168,7 +1171,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           let saved: { javaHome?: string } | undefined;
           try {
             saved = await wsApi.setWorkspaceJdk(projectRoot, targetPath, {
-              systemPath: settings.systemPath,
+              systemPath: activeSystemPath,
             });
           } catch (err: unknown) {
             ctx.ui?.notify(`Failed to save workspace JDK: ${getErrorMessage(err)}`, 'warning');
@@ -1177,7 +1180,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
 
           try {
             const reimport = await wsApi.reimportWorkspace(projectRoot, {
-              systemPath: settings.systemPath,
+              systemPath: activeSystemPath,
             });
             const timeNote = reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
             ctx.ui?.notify(
@@ -1213,7 +1216,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           const projectRoot = findProjectRootFn(ctx.cwd);
           try {
             const reimport = await wsApi.reimportWorkspace(projectRoot, {
-              systemPath: settings.systemPath,
+              systemPath: activeSystemPath,
             });
             const timeNote = reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
             ctx.ui?.notify(`Workspace reimported successfully: index ready${timeNote}.`, 'info');
@@ -1566,7 +1569,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     },
   });
 
-  pi.on?.('session_start', (_event: unknown, ctx: ExtensionContext) => {
+  pi.on?.('session_start', async (_event: unknown, ctx: ExtensionContext) => {
     if (ctx.agent?.kind === 'sub') return;
     const projectRoot = findProjectRootFn(ctx.cwd);
     const markers = [
@@ -1578,7 +1581,10 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       '.idea',
     ];
     if (!markers.some((marker) => existsSync(join(projectRoot, marker)))) return;
-    recordConnection(settings.systemPath, projectRoot, Date.now()).catch(() => {});
+    await recordConnection(activeSystemPath, projectRoot, Date.now()).catch(() => {});
+    if (typeof wsApi.registerSystemPath === 'function') {
+      wsApi.registerSystemPath(activeSystemPath);
+    }
     startObserver(ctx);
   });
 

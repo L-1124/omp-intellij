@@ -217,8 +217,8 @@ fork-1-event-thread
 #### 解决方案与实测对比
 
 在 `src/server/service.ts` 中实现进程四元组强校验（`getProcessInfo` 与 `verifyServerOwnership`）：
-1. 启动服务时，通过 PowerShell（Windows）或 `/proc/<pid>/stat`（Linux）提取进程启动时间戳 `startTime`（毫秒级精度）；
-2. 将 `pid`、`token`、`processStartTime`、`executable` 和规范化后的 `systemPath` 写入 `omp-server.json`；
+1. 启动服务时记录平台提供的启动标识：Windows 为 epoch 毫秒，Linux 为 `/proc/<pid>/stat` 中的启动时钟 tick；
+2. 将 `pid`、`token`、`processStartTime`、`executable`、规范化后的 `systemPath`，以及实际生效的绝对插件目录列表 `pluginPaths` 写入 `omp-server.json`；
 3. 校验进程归属时必须满足以下条件：
    - 进程存活（`isProcessAlive`）；
    - 实时采集的 `procInfo.startTime === owner.processStartTime`（防 PID 重用）；
@@ -514,3 +514,5 @@ test('verify breakpoint setting and evaluation', async (t) => {
 # 4. 若服务端崩溃且存在陈旧端口文件，安全重启共享守护进程
 /intellij restart
 ```
+
+运行缓存清理先用 `npm run clean:runtime -- --dry-run` 查看候选项，再用 `--apply` 删除。脚本按候选缓存路径检查 Bridge/DAP 进程和后台 IntelliJ 的插件目录，无关 Node、Java 或 npm 父进程不阻止清理。存活的旧服务若缺少 `pluginPaths`，会拒绝删除；先正常停止对应服务，新启动的服务会写入完整目录记录。

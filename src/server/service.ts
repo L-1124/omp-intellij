@@ -5,7 +5,7 @@ import net from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from '../project/metadata.js';
-import { mergeIjJavaOptions, resolveAndroidExtension } from './android-extension.js';
+import { getIjPluginPaths, mergeIjJavaOptions, resolveAndroidExtension } from './android-extension.js';
 import { DEFAULT_SERVER_VERSION } from './bundles.js';
 import { readServerConfig, trackInstallation } from './config.js';
 import { requireAcceptedEula } from './eula.js';
@@ -361,6 +361,7 @@ export interface ServerOwnerRecord {
   createdAt?: number;
   processStartTime?: number;
   executable?: string;
+  pluginPaths?: string[];
 }
 
 export interface ServerOwnershipVerification {
@@ -485,6 +486,19 @@ export async function verifyServerOwnership(
         'Server owner record lacks ownership token, processStartTime, executable, or systemPath (legacy PID-only record)',
     };
   }
+  if (
+    owner.pluginPaths !== undefined &&
+    (!Array.isArray(owner.pluginPaths) ||
+      owner.pluginPaths.some((p) => typeof p !== 'string'))
+  ) {
+    return {
+      status: 'running-unverified',
+      pid,
+      owner,
+      reason: 'Server owner record contains invalid pluginPaths (expected string array)',
+    };
+  }
+
 
   const expectedSystemPath = normalizePathForPlatform(systemPath);
   const ownerSystemPath = normalizePathForPlatform(owner.systemPath);
@@ -882,6 +896,11 @@ async function internalStartServer(
       createdAt: Date.now(),
       processStartTime: procInfo.startTime,
       executable: procInfo.executable || resolve(executable),
+      pluginPaths: getIjPluginPaths(
+        process.env.IJ_JAVA_OPTIONS,
+        extension.pluginPath,
+        process.cwd(),
+      ),
     };
     await writeFile(currentOwnerFile, JSON.stringify(ownerRecord, null, 2));
 

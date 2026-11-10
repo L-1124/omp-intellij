@@ -184,11 +184,18 @@ function parseJvmOptionTokens(input: string): string[] {
   return tokens;
 }
 
-export function mergeIjJavaOptions(existing: string | undefined, pluginPath: string): string {
-  if (hasInvalidOptionChars(pluginPath, false)) {
-    throw new Error(`Invalid characters in plugin.path option: "${pluginPath}"`);
+interface ParsedIjPluginOptions {
+  paths: string[];
+  remainingTokens: string[];
+}
+
+function parseIjPluginOptions(
+  existing: string | undefined,
+  additionalPluginPath?: string,
+): ParsedIjPluginOptions {
+  if (additionalPluginPath !== undefined && hasInvalidOptionChars(additionalPluginPath, false)) {
+    throw new Error(`Invalid characters in plugin.path option: "${additionalPluginPath}"`);
   }
-  const normNewPath = pluginPath.replace(/\\/g, '/');
   const tokens = parseJvmOptionTokens(existing ?? '');
   const remainingTokens: string[] = [];
   const paths: string[] = [];
@@ -230,10 +237,42 @@ export function mergeIjJavaOptions(existing: string | undefined, pluginPath: str
     }
   }
 
-  if (!pathKeys.has(windows ? normNewPath.toLowerCase() : normNewPath)) {
-    paths.push(normNewPath);
+  if (additionalPluginPath !== undefined && additionalPluginPath.length > 0) {
+    const normNewPath = additionalPluginPath.replace(/\\/g, '/');
+    const key = windows ? normNewPath.toLowerCase() : normNewPath;
+    if (!pathKeys.has(key)) {
+      paths.push(normNewPath);
+    }
   }
 
+  return { paths, remainingTokens };
+}
+
+export function getIjPluginPaths(
+  existing: string | undefined,
+  additionalPluginPath?: string,
+  baseDir?: string,
+): string[] {
+  const { paths } = parseIjPluginOptions(existing, additionalPluginPath);
+  if (baseDir === undefined) {
+    return paths;
+  }
+  const resolvedPaths: string[] = [];
+  const seen = new Set<string>();
+  const windows = process.platform === 'win32';
+  for (const p of paths) {
+    const resolved = resolve(baseDir, p).replace(/\\/g, '/');
+    const key = windows ? resolved.toLowerCase() : resolved;
+    if (!seen.has(key)) {
+      seen.add(key);
+      resolvedPaths.push(resolved);
+    }
+  }
+  return resolvedPaths;
+}
+
+export function mergeIjJavaOptions(existing: string | undefined, pluginPath: string): string {
+  const { paths, remainingTokens } = parseIjPluginOptions(existing, pluginPath);
   const property = formatPluginOption(paths.join(','));
   return remainingTokens.length > 0 ? `${remainingTokens.join(' ')} ${property}` : property;
 }

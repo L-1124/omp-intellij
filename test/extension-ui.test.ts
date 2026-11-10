@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,9 @@ import test from 'node:test';
 import extension from '../src/extension/extension.js';
 import { formatStatusText, sanitizeDetail } from '../src/extension/install-status.js';
 import type { ProjectStateResult } from '../src/project/connection-state.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
+import type { ExtensionContext } from '../src/shared/extension-types.js';
+import { settings } from '../src/server/service.js';
 import { readServerEula } from '../src/server/eula.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
@@ -590,5 +594,61 @@ test('watchIndex observer notifies on auth denial once and notifies once on reco
   } finally {
     pi.emit('session_shutdown');
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('session_start writes connection record to activeSystemPath override', async () => {
+  const pi = createMockPi();
+  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  const originalOn = pi.on.bind(pi);
+  pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
+    if (event === 'session_start') {
+      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+    }
+    originalOn(event, handler);
+  }) as typeof pi.on;
+
+  const customSystemPath = join(tmpdir(), `omp-custom-sys-start-${Math.random().toString(36).slice(2)}`);
+  const projectDir = join(tmpdir(), `omp-proj-start-${Math.random().toString(36).slice(2)}`);
+  await mkdir(customSystemPath, { recursive: true });
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(join(projectDir, 'pom.xml'), '<project></project>', 'utf8');
+
+  const { id, canonicalPath } = canonicalizeProject(projectDir);
+  const defaultEventsPath = join(settings.systemPath, 'plugin-metadata', 'projects', `${id}.events.jsonl`);
+  const initialDefaultExists = existsSync(defaultEventsPath);
+
+  try {
+    extension(pi, { systemPath: customSystemPath });
+    const ctx = createMockCtx(projectDir);
+    assert.ok(sessionStartHandler, 'session_start handler must be registered');
+    await sessionStartHandler({}, ctx);
+
+    const eventsPath = join(customSystemPath, 'plugin-metadata', 'projects', `${id}.events.jsonl`);
+    assert.ok(existsSync(eventsPath), 'project events file must exist under activeSystemPath');
+
+    const content = (await readFile(eventsPath, 'utf8')).trim();
+    const parsed = JSON.parse(content.split('\n')[0]) as {
+      id?: string;
+      canonicalPath?: string;
+      kind?: string;
+      at?: number;
+    };
+    assert.equal(parsed.id, id);
+    assert.equal(parsed.canonicalPath, canonicalPath);
+    assert.equal(parsed.kind, 'connection');
+    assert.ok(typeof parsed.at === 'number' && parsed.at > 0);
+
+    if (!initialDefaultExists) {
+      assert.equal(
+        existsSync(defaultEventsPath),
+        false,
+        'no connection event record must be written under default systemPath',
+      );
+    }
+  } finally {
+    pi.emit('session_shutdown');
+    await rm(customSystemPath, { recursive: true, force: true });
+    await rm(projectDir, { recursive: true, force: true });
   }
 });

@@ -7,6 +7,7 @@ import test, { type TestContext } from 'node:test';
 import {
   detectServerVersion,
   formatPluginOption,
+  getIjPluginPaths,
   mergeIjJavaOptions,
   resolveAndroidExtension,
 } from '../src/server/android-extension.js';
@@ -375,3 +376,115 @@ for (const name of [
     assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
   });
 }
+
+test('getIjPluginPaths returns empty array when options are undefined, empty, or whitespace-only', () => {
+  assert.deepEqual(getIjPluginPaths(undefined), []);
+  assert.deepEqual(getIjPluginPaths(''), []);
+  assert.deepEqual(getIjPluginPaths('   '), []);
+});
+
+test('getIjPluginPaths returns empty array when options contain other flags but no plugin.path', () => {
+  assert.deepEqual(getIjPluginPaths('-Xmx2048m -ea -Dfoo=bar'), []);
+});
+
+test('getIjPluginPaths extracts single unquoted -Dplugin.path', () => {
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path=/opt/p1'), ['/opt/p1']);
+  assert.deepEqual(getIjPluginPaths('-Xmx1g -Dplugin.path=/opt/p1 -ea'), ['/opt/p1']);
+});
+
+test('getIjPluginPaths extracts quoted -Dplugin.path containing spaces', () => {
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path="/Program Files/My Plugins/p1"'),
+    ['/Program Files/My Plugins/p1'],
+  );
+  assert.deepEqual(
+    getIjPluginPaths('"-Dplugin.path=/Program Files/My Plugins/p1"'),
+    ['/Program Files/My Plugins/p1'],
+  );
+});
+
+test('getIjPluginPaths extracts multiple comma-separated and native list-separated paths', () => {
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path="/opt/p1,/opt/p2"'),
+    ['/opt/p1', '/opt/p2'],
+  );
+  const separator = process.platform === 'win32' ? ';' : ':';
+  assert.deepEqual(
+    getIjPluginPaths(`-Dplugin.path="/opt/p1${separator}/opt/p2"`),
+    ['/opt/p1', '/opt/p2'],
+  );
+});
+
+test('getIjPluginPaths combines multiple -Dplugin.path occurrences', () => {
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"'),
+    ['/opt/p1', '/opt/p2'],
+  );
+});
+
+test('getIjPluginPaths normalizes Windows backslashes in extracted paths', {
+  skip: process.platform !== 'win32',
+}, () => {
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path="C:\\p1\\dir,D:\\p2\\dir"'),
+    ['C:/p1/dir', 'D:/p2/dir'],
+  );
+});
+
+test('getIjPluginPaths merges and deduplicates additional plugin path', () => {
+  assert.deepEqual(getIjPluginPaths(undefined, 'C:\\ext'), ['C:/ext']);
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path=/opt/p1', 'C:\\ext'),
+    ['/opt/p1', 'C:/ext'],
+  );
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path="/opt/p1,/ext"', '/ext'),
+    ['/opt/p1', '/ext'],
+  );
+});
+
+test('getIjPluginPaths deduplicates case-insensitively on Windows', {
+  skip: process.platform !== 'win32',
+}, () => {
+  assert.deepEqual(
+    getIjPluginPaths('-Dplugin.path="c:/existing;C:/EXT"', 'C:\\ext'),
+    ['c:/existing', 'C:/EXT'],
+  );
+});
+
+test('getIjPluginPaths throws on invalid characters in additional plugin path', () => {
+  assert.throws(
+    () => getIjPluginPaths(undefined, 'C:/bad"path'),
+    /Invalid characters in plugin\.path/,
+  );
+  assert.throws(
+    () => getIjPluginPaths(undefined, 'C:/bad,path'),
+    /Invalid characters in plugin\.path/,
+  );
+  assert.throws(
+    () => getIjPluginPaths(undefined, 'C:/bad\npath'),
+    /Invalid characters in plugin\.path/,
+  );
+});
+
+test('getIjPluginPaths resolves relative paths to absolute paths when baseDir is specified', () => {
+  const base = process.platform === 'win32' ? 'C:/workspace' : '/workspace';
+  const resolved = getIjPluginPaths(
+    '-Dplugin.path="relative/plugin1,./relative/plugin2"',
+    'relative/plugin3',
+    base,
+  );
+  assert.deepEqual(resolved, [
+    `${base}/relative/plugin1`,
+    `${base}/relative/plugin2`,
+    `${base}/relative/plugin3`,
+  ]);
+
+  // Relative duplicate deduplicates against absolute
+  const deduplicated = getIjPluginPaths(
+    `-Dplugin.path="${base}/relative/plugin1,./relative/plugin1"`,
+    undefined,
+    base,
+  );
+  assert.deepEqual(deduplicated, [`${base}/relative/plugin1`]);
+});
