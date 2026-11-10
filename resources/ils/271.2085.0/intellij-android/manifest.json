@@ -12,8 +12,8 @@
     {
       "name": "intellij-android.jar",
       "path": "lib/intellij-android.jar",
-      "sha256": "d5318b8766c065a44ef64dddee78c8e548bdaed5343c6717b6afcfe11ada3d5e",
-      "size": 733139
+      "sha256": "9e17f2fda076d1f6aa2b9e9c02804234aa874a95928067fa4d676d25ad93b119",
+      "size": 768482
     },
     {
       "name": "adblib-9.4.1.jar",
@@ -32,6 +32,12 @@
       "path": "lib/common-32.4.1.jar",
       "sha256": "cace5b28f2342119fe1a2db5baa36f8bd3391a086788e04fb8326bb70d6c4989",
       "size": 570281
+    },
+    {
+      "name": "groovy-4.0.29.jar",
+      "path": "lib/groovy-4.0.29.jar",
+      "sha256": "16b1259f5404bc43bf066556e043769b1f7570b2ca23fdaf169f12499677e936",
+      "size": 7714202
     },
     {
       "name": "kxml2-2.3.0.jar",

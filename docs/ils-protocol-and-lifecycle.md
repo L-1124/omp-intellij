@@ -27,8 +27,8 @@
 
 7. **同进程 Android Lint**：
    - `AndroidLintProvider` 已接入标准 `textDocument/diagnostic`，与 ILS 原生 Java/Kotlin 编译诊断合并；工程依赖 AAR 的规则通过官方 `JarFileIssueRegistry` 装载。
-   - 当前发布清单含 12 个 JAR，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
-   - 阶段 H 的 Java/Kotlin 与[阶段 I](../plan.md#15-iandroid-资源-xml-与-manifest-编辑期-lint) 的 XML/Manifest 诊断均已验收。真实独立 ILS 271 完整运行包含无扩展原生对照、实际 AGP 合并来源及缓存切换；既有 Java/Kotlin/Compose 和导航回归通过。
+   - 当前发布清单含 13 个 JAR，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
+   - 阶段 H 的 Java/Kotlin 与[阶段 I 的 XML/Manifest 诊断](android-jvm-extension.md#8-xmlmanifest-lint阶段-i)均已验收。真实独立 ILS 271 完整运行包含无扩展原生对照、实际 AGP 合并来源及缓存切换；既有 Java/Kotlin/Compose 和导航回归通过。
 
 ---
 

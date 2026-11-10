@@ -1,6 +1,7 @@
 package org.jetbrains.android.lint;
 
 import com.android.sdklib.AndroidVersion;
+import com.android.sdklib.AndroidTargetHash;
 import com.android.tools.lint.client.api.LintClient;
 import com.android.tools.lint.detector.api.ApiConstraint;
 import com.android.tools.lint.detector.api.Project;
@@ -95,7 +96,16 @@ public class AndroidLintProject extends Project {
 
     @Override
     public int getBuildSdk() {
-        return model != null && model.compileSdk() != null ? model.compileSdk() : 0;
+        if (model != null && model.compileSdk() != null) {
+            return model.compileSdk();
+        }
+        if (model != null && model.compileTarget() != null) {
+            AndroidVersion version = AndroidTargetHash.getVersionFromHash(model.compileTarget());
+            if (version != null) {
+                return version.getFeatureLevel();
+            }
+        }
+        return 0;
     }
 
     @Override
@@ -104,7 +114,7 @@ public class AndroidLintProject extends Project {
             return model.compileTarget();
         }
         if (model != null && model.compileSdk() != null) {
-            return "android-" + model.compileSdk();
+            return AndroidTargetHash.PLATFORM_HASH_PREFIX + model.compileSdk();
         }
         return null;
     }

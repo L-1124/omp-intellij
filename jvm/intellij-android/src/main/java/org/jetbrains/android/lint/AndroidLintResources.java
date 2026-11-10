@@ -1,6 +1,7 @@
 package org.jetbrains.android.lint;
 
 import com.android.ide.common.rendering.api.ArrayResourceValueImpl;
+import com.android.ide.common.rendering.api.AttributeFormat;
 import com.android.ide.common.rendering.api.AttrResourceValueImpl;
 import com.android.ide.common.rendering.api.PluralsResourceValueImpl;
 import com.android.ide.common.rendering.api.ResourceNamespace;
@@ -16,8 +17,10 @@ import com.android.ide.common.resources.ResourceVisitor;
 import com.android.ide.common.resources.SingleNamespaceResourceRepository;
 import com.android.ide.common.resources.configuration.FolderConfiguration;
 import com.android.ide.common.util.PathString;
+import com.android.ide.common.resources.ValueXmlHelper;
 import com.android.resources.ResourceFolderType;
 import com.android.resources.ResourceType;
+import com.android.resources.ResourceUrl;
 import com.android.tools.lint.client.api.ResourceRepositoryScope;
 import com.android.tools.lint.detector.api.Scope;
 import com.android.tools.lint.model.LintModelAndroidLibrary;
@@ -39,6 +42,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.xml.XmlAttribute;
 import com.intellij.psi.xml.XmlFile;
 import com.intellij.psi.xml.XmlTag;
+import com.intellij.psi.xml.XmlText;
 import org.jetbrains.android.context.AndroidContext;
 import org.jetbrains.android.context.AndroidQueryException;
 import org.jetbrains.android.resource.AndroidSources;
@@ -54,6 +58,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -498,9 +503,10 @@ public final class AndroidLintResources {
         ProgressManager.checkCanceled();
         for (XmlAttribute attr : tag.getAttributes()) {
             String val = AndroidXml.value(attr);
-            if (val != null && val.startsWith("@+id/")) {
-                String idName = val.substring(5);
-                if (!idName.isEmpty()) {
+            if (val != null) {
+                ResourceUrl url = ResourceUrl.parse(val);
+                if (url != null && url.isCreate() && url.type == ResourceType.ID && !url.isFramework() && url.namespace == null && url.hasValidName()) {
+                    String idName = url.name;
                     boolean isPub = publicNames == null || publicNames.contains("id:" + idName);
                     ResourceValueImpl idVal = new ResourceValueImpl(namespace, ResourceType.ID, idName, val, libraryName);
                     LintResourceItem idItem = new LintResourceItem(idName, ResourceType.ID, namespace, libraryName, config, idVal, pathString, false, isPub);
@@ -599,25 +605,24 @@ public final class AndroidLintResources {
                 }
                 resValue = style;
             } else if (type == ResourceType.ATTR) {
-                AttrResourceValueImpl attr = new AttrResourceValueImpl(namespace, name, libraryName);
-                String format = tag.getAttributeValue("format");
-                if (format != null) {
-                    attr.setDescription(format);
-                }
-                resValue = attr;
+                resValue = parseAttrTag(tag, namespace, name, libraryName);
             } else if (type == ResourceType.STYLEABLE) {
                 StyleableResourceValueImpl styleable = new StyleableResourceValueImpl(namespace, name, null, libraryName);
                 for (XmlTag attrTag : tag.getSubTags()) {
                     if ("attr".equals(attrTag.getName())) {
                         String attrName = attrTag.getAttributeValue("name");
-                        if (attrName != null) {
+                        if (attrName != null && !attrName.isEmpty()) {
                             ResourceNamespace attrNs = namespace;
                             if (attrName.startsWith("android:")) {
                                 attrNs = ResourceNamespace.ANDROID;
                                 attrName = attrName.substring(8);
                             }
-                            AttrResourceValueImpl childAttr = new AttrResourceValueImpl(attrNs, attrName, libraryName);
+                            AttrResourceValueImpl childAttr = parseAttrTag(attrTag, attrNs, attrName, libraryName);
                             styleable.addValue(childAttr);
+                            if (attrNs != ResourceNamespace.ANDROID && hasAttrDefinition(attrTag)) {
+                                boolean isChildPub = publicNames == null || publicNames.contains("attr:" + attrName) || fileDeclaredPublic.contains("attr:" + attrName);
+                                repo.add(new LintResourceItem(attrName, ResourceType.ATTR, attrNs, libraryName, config, childAttr, pathString, false, isChildPub));
+                            }
                         }
                     }
                 }
@@ -649,13 +654,76 @@ public final class AndroidLintResources {
 
     private static String parseRawText(XmlTag tag) {
         if (tag == null || tag.getValue() == null) return null;
+        if (tag.getValue().hasCDATA()) {
+            StringBuilder sb = new StringBuilder();
+            for (XmlText text : tag.getValue().getTextElements()) {
+                sb.append(text.getValue());
+            }
+            return sb.toString().trim();
+        }
         String raw = tag.getValue().getText();
         if (raw == null) return null;
-        raw = raw.trim();
-        if (raw.length() >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
-            raw = raw.substring(1, raw.length() - 1);
+        return ValueXmlHelper.unescapeResourceString(raw, true, true);
+    }
+
+    private static AttrResourceValueImpl parseAttrTag(
+            XmlTag tag,
+            ResourceNamespace namespace,
+            String name,
+            String libraryName
+    ) {
+        AttrResourceValueImpl attr = new AttrResourceValueImpl(namespace, name, libraryName);
+        Set<AttributeFormat> formats = EnumSet.noneOf(AttributeFormat.class);
+        String formatString = tag.getAttributeValue("format");
+        if (formatString != null) {
+            formats.addAll(AttributeFormat.parse(formatString));
         }
-        return raw;
+
+        for (XmlTag child : tag.getSubTags()) {
+            String childName = child.getName();
+            if ("enum".equals(childName)) {
+                formats.add(AttributeFormat.ENUM);
+            } else if ("flag".equals(childName)) {
+                formats.add(AttributeFormat.FLAGS);
+            } else {
+                continue;
+            }
+            String valName = child.getAttributeValue("name");
+            if (valName != null && !valName.isEmpty()) {
+                String desc = child.getAttributeValue("description");
+                if (desc == null) desc = child.getAttributeValue("_description");
+                Integer numericValue = null;
+                String valueStr = child.getAttributeValue("value");
+                if (valueStr != null) {
+                    try {
+                        numericValue = Integer.valueOf(Long.decode(valueStr.trim()).intValue());
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                attr.addValue(valName, numericValue, desc);
+            }
+        }
+        attr.setFormats(formats);
+
+        String description = tag.getAttributeValue("description");
+        if (description == null) description = tag.getAttributeValue("_description");
+        if (description != null) {
+            attr.setDescription(description);
+        }
+        String groupName = tag.getAttributeValue("_groupName");
+        if (groupName != null) {
+            attr.setGroupName(groupName);
+        }
+        return attr;
+    }
+
+    private static boolean hasAttrDefinition(XmlTag tag) {
+        if (tag.getAttributeValue("format") != null) return true;
+        for (XmlTag child : tag.getSubTags()) {
+            String name = child.getName();
+            if ("enum".equals(name) || "flag".equals(name)) return true;
+        }
+        return false;
     }
 
     private static void parseRTxt(

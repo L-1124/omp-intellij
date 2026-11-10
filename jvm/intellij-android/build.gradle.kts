@@ -118,6 +118,7 @@ dependencyLocking {
 val adblibVersion = "9.4.1"
 val lintVersion = "32.4.1"
 val kxml2Version = "2.3.0"
+val groovyVersion = "4.0.29"
 
 dependencies {
     compileOnly(compileSdkJars)
@@ -156,6 +157,9 @@ dependencies {
         isTransitive = false
     }
     implementation("com.android.tools.build:manifest-merger:$lintVersion") {
+        isTransitive = false
+    }
+    implementation("org.apache.groovy:groovy:$groovyVersion") {
         isTransitive = false
     }
 
@@ -353,7 +357,8 @@ tasks.register<StageExtensionTask>("stageExtension") {
             "sdklib-$lintVersion.jar",
             "kxml2-$kxml2Version.jar",
             "sdk-common-$lintVersion.jar",
-            "layoutlib-api-$lintVersion.jar"
+            "layoutlib-api-$lintVersion.jar",
+            "groovy-$groovyVersion.jar"
         )
     )
     serverVersion.set(targetVersion)

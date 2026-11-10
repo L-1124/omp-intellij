@@ -1,5 +1,7 @@
 package org.jetbrains.android.resource;
 
+import com.android.resources.ResourceType;
+import com.android.resources.ResourceUrl;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -25,14 +27,13 @@ import com.jetbrains.lsp.protocol.Range;
 import org.jetbrains.android.context.AndroidContext;
 import org.jetbrains.android.context.AndroidQueryException;
 import org.jetbrains.android.xml.AndroidXml;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
 public final class ResourceResolver {
-    private static final java.util.regex.Pattern RESOURCE_TYPE = java.util.regex.Pattern.compile("[a-z][a-z0-9_]*");
-    private static final java.util.regex.Pattern RESOURCE_NAME = java.util.regex.Pattern.compile("[A-Za-z_][A-Za-z0-9_.:]*");
 
     private ResourceResolver() {
     }
@@ -43,20 +44,12 @@ public final class ResourceResolver {
         if (value == null || !value.getValueTextRange().contains(offset)) return null;
         String text = value.getParent() instanceof XmlAttribute attribute ? AndroidXml.value(attribute) : null;
         if (text == null || text.length() < 2 || (text.charAt(0) != '@' && text.charAt(0) != '?')) return null;
-        boolean attribute = text.charAt(0) == '?';
-        String body = text.substring(text.startsWith("@+") ? 2 : 1);
-        int colon = body.indexOf(':');
-        String namespace = colon < 0 ? null : body.substring(0, colon);
-        if (colon >= 0) body = body.substring(colon + 1);
-        int slash = body.indexOf('/');
-        String type = slash < 0 && attribute ? "attr" : slash < 0 ? null : body.substring(0, slash);
-        String name = slash < 0 ? body : body.substring(slash + 1);
-        if (type == null || !RESOURCE_TYPE.matcher(type).matches() || !RESOURCE_NAME.matcher(name).matches())
-            return null;
+        ResourceUrl url = ResourceUrl.parse(text);
+        if (url == null || url.type == null || !url.hasValidName()) return null;
         Document document = file == null ? null : file.getFileDocument();
         if (document == null && file != null) document = PsiDocumentManager.getInstance(file.getProject()).getDocument(file);
         if (document == null) return null;
-        return new ResourceReference(type, name, namespace, "android".equals(namespace), PositionKt.toLspRange(value.getValueTextRange(), document), null);
+        return new ResourceReference(url.type.getName(), url.name, url.namespace, url.isFramework(), PositionKt.toLspRange(value.getValueTextRange(), document), null);
     }
 
     public static ResourceReference findRReferenceAt(Project project, PsiFile file, int offset) {
@@ -203,8 +196,12 @@ public final class ResourceResolver {
             result.computeIfAbsent(identity, ignored -> new ArrayList<>()).add(name.getValueElement().getValueTextRange());
         for (XmlAttribute attribute : tag.getAttributes()) {
             String value = AndroidXml.value(attribute);
-            if (value != null && value.startsWith("@+id/") && attribute.getValueElement() != null)
-                result.computeIfAbsent(key("id", value.substring(5)), ignored -> new ArrayList<>()).add(attribute.getValueElement().getValueTextRange());
+            if (value != null && attribute.getValueElement() != null) {
+                ResourceUrl url = ResourceUrl.parse(value);
+                if (url != null && url.isCreate() && url.type == ResourceType.ID && !url.isFramework() && url.namespace == null && url.hasValidName()) {
+                    result.computeIfAbsent(key("id", url.name), ignored -> new ArrayList<>()).add(attribute.getValueElement().getValueTextRange());
+                }
+            }
         }
         for (XmlTag child : tag.getSubTags()) collect(child, result);
     }
@@ -491,6 +488,7 @@ public final class ResourceResolver {
             for (TextRange range : ranges)
                 result.add(AndroidLocations.at(path, PositionKt.toLspRange(range, document)));
         }
+
         private JsonElement json(Path path) {
             String text = AndroidSources.text(path);
             if (text == null) return null;

@@ -45,6 +45,21 @@ import org.jetbrains.kotlin.psi.KtStringTemplateEntry;
 import org.jetbrains.kotlin.psi.KtStringTemplateExpression;
 import org.jetbrains.kotlin.psi.KtValueArgument;
 
+import org.codehaus.groovy.ast.ModuleNode;
+import org.codehaus.groovy.ast.expr.ArgumentListExpression;
+import org.codehaus.groovy.ast.expr.BinaryExpression;
+import org.codehaus.groovy.ast.expr.ClosureExpression;
+import org.codehaus.groovy.ast.expr.ConstantExpression;
+import org.codehaus.groovy.ast.expr.Expression;
+import org.codehaus.groovy.ast.expr.MapEntryExpression;
+import org.codehaus.groovy.ast.expr.MethodCallExpression;
+import org.codehaus.groovy.ast.expr.NamedArgumentListExpression;
+import org.codehaus.groovy.ast.expr.PropertyExpression;
+import org.codehaus.groovy.ast.expr.TupleExpression;
+import org.codehaus.groovy.ast.stmt.BlockStatement;
+import org.codehaus.groovy.ast.stmt.ExpressionStatement;
+import org.codehaus.groovy.ast.stmt.Statement;
+import org.codehaus.groovy.control.SourceUnit;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -76,7 +91,9 @@ public final class AndroidLintModelResolver {
             String namespace,
             Boolean isLibrary,
             boolean minSdkPremiseMissing,
-            boolean minSdkUnsafe
+            boolean minSdkUnsafe,
+            boolean targetSdkUnsafe,
+            boolean compileSdkUnsafe
     ) {
     }
 
@@ -501,12 +518,21 @@ public final class AndroidLintModelResolver {
         }
         CleanAstResult ast = null;
         if (lintModelModule == null) {
-            PsiFile script = AndroidSources.kotlinScript(project, moduleRootVf);
+            PsiFile script = AndroidSources.gradleScript(project, moduleRootVf);
             if (script instanceof KtFile ktFile) {
                 ast = parseCleanAst(ktFile);
+            } else {
+                ModuleNode groovy = AndroidSources.groovyAst(project, moduleRootVf);
+                if (groovy != null) {
+                    ast = parseCleanAst(groovy);
+                }
+            }
+            if (ast != null) {
                 if (compileSdk == null && ast.compileSdk() != null) {
                     compileSdk = ast.compileSdk();
                     if (compileTarget == null) compileTarget = ast.compileTarget();
+                } else if (compileTarget == null && ast.compileTarget() != null) {
+                    compileTarget = ast.compileTarget();
                 }
                 if (ast.minSdk() != null) {
                     minSdk = ast.minSdk();
@@ -515,12 +541,13 @@ public final class AndroidLintModelResolver {
                     minSdk = null;
                     minSdkPremiseMissing = true;
                 }
-                if (targetSdk == null) targetSdk = ast.targetSdk();
+                if (targetSdk == null && !ast.targetSdkUnsafe()) targetSdk = ast.targetSdk();
                 if (namespace == null) namespace = ast.namespace();
                 if (ast.isLibrary() != null) isLibrary = ast.isLibrary();
             }
 
             boolean allowManifestFallback = (ast == null || !ast.minSdkUnsafe());
+            boolean allowTargetManifestFallback = (ast == null || !ast.targetSdkUnsafe());
             List<Path> confirmedManifests = new ArrayList<>();
             AndroidLayout layout = getLayout(androidModule);
             if (layout != null && layout.manifests != null) {
@@ -546,7 +573,7 @@ public final class AndroidLintModelResolver {
             }
 
             for (Path manifestPath : confirmedManifests) {
-                if ((minSdk == null && allowManifestFallback) || targetSdk == null || namespace == null) {
+                if ((minSdk == null && allowManifestFallback) || (targetSdk == null && allowTargetManifestFallback) || namespace == null) {
                     XmlFile xmlFile = isXml && manifestPath.equals(mainFile.toNioPath().toAbsolutePath().normalize())
                             ? AndroidSources.xml(project, manifestPath) : AndroidSources.diskXml(project, manifestPath);
                     if (xmlFile != null && xmlFile.getRootTag() != null) {
@@ -566,7 +593,7 @@ public final class AndroidLintModelResolver {
                                     }
                                 }
                             }
-                            if (targetSdk == null) {
+                            if (targetSdk == null && allowTargetManifestFallback) {
                                 String targetAttr = usesSdk.getAttributeValue("targetSdkVersion", AndroidContext.ANDROID_NS);
                                 if (targetAttr == null)
                                     targetAttr = usesSdk.getAttributeValue("android:targetSdkVersion");
@@ -664,7 +691,7 @@ public final class AndroidLintModelResolver {
 
     public static CleanAstResult parseCleanAst(KtFile ktFile) {
         if (ktFile == null) {
-            return new CleanAstResult(null, null, null, null, null, null, true, true);
+            return new CleanAstResult(null, null, null, null, null, null, true, true, true, true);
         }
 
         Boolean isApp = detectAppPlugin(ktFile);
@@ -679,7 +706,7 @@ public final class AndroidLintModelResolver {
         }
 
         if (androidBlocks.isEmpty()) {
-            return new CleanAstResult(null, null, null, null, null, isLibrary, true, false);
+            return new CleanAstResult(null, null, null, null, null, isLibrary, true, false, false, false);
         }
 
         boolean hasProductFlavors = false;
@@ -712,6 +739,7 @@ public final class AndroidLintModelResolver {
 
         Integer compileSdk = null;
         String compileTarget = null;
+        boolean compileSdkDynamic = false;
         String namespace = null;
 
         for (KtCallExpression block : androidBlocks) {
@@ -724,8 +752,24 @@ public final class AndroidLintModelResolver {
                     String left = binary.getLeft() != null ? binary.getLeft().getText() : "";
                     if (left.equals("compileSdk") || left.equals("compileSdkVersion")) {
                         Integer val = parseDecimalInteger(binary.getRight());
-                        compileSdk = val;
-                        compileTarget = val != null ? "android-" + val : null;
+                        if (val != null && !compileSdkDynamic) {
+                            compileSdk = val;
+                            compileTarget = "android-" + val;
+                        } else {
+                            compileSdkDynamic = true;
+                            compileSdk = null;
+                            compileTarget = null;
+                        }
+                    } else if (left.equals("compileSdkPreview")) {
+                        String preview = literal(binary.getRight());
+                        if (preview != null && !preview.isBlank() && !compileSdkDynamic) {
+                            compileTarget = "android-" + preview;
+                            compileSdk = null;
+                        } else {
+                            compileSdkDynamic = true;
+                            compileSdk = null;
+                            compileTarget = null;
+                        }
                     } else if (left.equals("namespace")) {
                         String val = literal(binary.getRight());
                         namespace = (val != null && !val.isBlank()) ? val : null;
@@ -735,8 +779,14 @@ public final class AndroidLintModelResolver {
                     if (cName.equals("compileSdk") || cName.equals("compileSdkVersion")) {
                         if (call.getValueArguments().size() == 1) {
                             Integer val = parseDecimalInteger(call.getValueArguments().get(0).getArgumentExpression());
-                            compileSdk = val;
-                            compileTarget = val != null ? "android-" + val : null;
+                            if (val != null && !compileSdkDynamic) {
+                                compileSdk = val;
+                                compileTarget = "android-" + val;
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
+                            }
                         } else {
                             KtBlockExpression csBody = body(call);
                             if (csBody != null) {
@@ -746,9 +796,35 @@ public final class AndroidLintModelResolver {
                                         val = parseDecimalInteger(inner.getValueArguments().get(0).getArgumentExpression());
                                     }
                                 }
-                                compileSdk = val;
-                                compileTarget = val != null ? "android-" + val : null;
+                                if (val != null && !compileSdkDynamic) {
+                                    compileSdk = val;
+                                    compileTarget = "android-" + val;
+                                } else {
+                                    compileSdkDynamic = true;
+                                    compileSdk = null;
+                                    compileTarget = null;
+                                }
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
                             }
+                        }
+                    } else if (cName.equals("compileSdkPreview")) {
+                        if (call.getValueArguments().size() == 1) {
+                            String preview = literal(call.getValueArguments().get(0).getArgumentExpression());
+                            if (preview != null && !preview.isBlank() && !compileSdkDynamic) {
+                                compileTarget = "android-" + preview;
+                                compileSdk = null;
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
+                            }
+                        } else {
+                            compileSdkDynamic = true;
+                            compileSdk = null;
+                            compileTarget = null;
                         }
                     } else if (cName.equals("namespace")) {
                         if (call.getValueArguments().size() == 1) {
@@ -764,6 +840,7 @@ public final class AndroidLintModelResolver {
         Integer targetSdk = null;
         boolean minSdkFound = false;
         boolean minSdkDynamic = false;
+        boolean targetSdkDynamic = false;
 
         for (KtCallExpression block : androidBlocks) {
             KtBlockExpression body = body(block);
@@ -790,7 +867,16 @@ public final class AndroidLintModelResolver {
                                 minSdkDynamic = true;
                                 minSdk = null;
                             } else if (left.equals("targetSdk") || left.equals("targetSdkVersion")) {
-                                targetSdk = parseDecimalInteger(binary.getRight());
+                                Integer val = parseDecimalInteger(binary.getRight());
+                                if (val != null && !targetSdkDynamic) {
+                                    targetSdk = val;
+                                } else {
+                                    targetSdkDynamic = true;
+                                    targetSdk = null;
+                                }
+                            } else if (left.equals("targetSdkPreview")) {
+                                targetSdkDynamic = true;
+                                targetSdk = null;
                             }
                         } else if (dfStatement instanceof KtCallExpression callExpr) {
                             String cName = name(callExpr);
@@ -813,8 +899,233 @@ public final class AndroidLintModelResolver {
                                 minSdk = null;
                             } else if (cName.equals("targetSdk") || cName.equals("targetSdkVersion")) {
                                 if (callExpr.getValueArguments().size() == 1) {
-                                    targetSdk = parseDecimalInteger(callExpr.getValueArguments().get(0).getArgumentExpression());
+                                    Integer val = parseDecimalInteger(callExpr.getValueArguments().get(0).getArgumentExpression());
+                                    if (val != null && !targetSdkDynamic) {
+                                        targetSdk = val;
+                                    } else {
+                                        targetSdkDynamic = true;
+                                        targetSdk = null;
+                                    }
                                 } else {
+                                    targetSdkDynamic = true;
+                                    targetSdk = null;
+                                }
+                            } else if (cName.equals("targetSdkPreview")) {
+                                targetSdkDynamic = true;
+                                targetSdk = null;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        boolean minSdkUnsafe = hasProductFlavors || buildTypesOverridesMinSdk || minSdkDynamic;
+        if (minSdkUnsafe) minSdk = null;
+        boolean minSdkPremiseMissing = minSdkUnsafe || !minSdkFound || (minSdk == null);
+
+        if (compileSdkDynamic) {
+            compileSdk = null;
+            compileTarget = null;
+        }
+        if (targetSdkDynamic) {
+            targetSdk = null;
+        }
+
+        return new CleanAstResult(
+                minSdk,
+                targetSdk,
+                compileSdk,
+                compileTarget,
+                namespace,
+                isLibrary,
+                minSdkPremiseMissing,
+                minSdkUnsafe,
+                targetSdkDynamic,
+                compileSdkDynamic
+        );
+    }
+
+    public static CleanAstResult parseCleanAst(ModuleNode moduleNode) {
+        if (moduleNode == null || moduleNode.getStatementBlock() == null) {
+            return new CleanAstResult(null, null, null, null, null, null, true, true, true, true);
+        }
+
+        Boolean isApp = detectGroovyAppPlugin(moduleNode);
+        Boolean isLibrary = isApp != null ? !isApp : null;
+
+        List<MethodCallExpression> androidBlocks = new ArrayList<>();
+        for (Statement s : moduleNode.getStatementBlock().getStatements()) {
+            if (s instanceof ExpressionStatement es && es.getExpression() instanceof MethodCallExpression mc) {
+                if ("android".equals(mc.getMethodAsString()) && getGroovyClosure(mc) != null) {
+                    androidBlocks.add(mc);
+                }
+            }
+        }
+
+        if (androidBlocks.isEmpty()) {
+            return new CleanAstResult(null, null, null, null, null, isLibrary, true, false, false, false);
+        }
+
+        boolean hasProductFlavors = false;
+        boolean buildTypesOverridesMinSdk = false;
+
+        for (MethodCallExpression block : androidBlocks) {
+            ClosureExpression ce = getGroovyClosure(block);
+            if (ce == null || !(ce.getCode() instanceof BlockStatement body)) continue;
+            for (Statement stmt : body.getStatements()) {
+                if (stmt instanceof ExpressionStatement es && es.getExpression() instanceof MethodCallExpression call) {
+                    String cName = call.getMethodAsString();
+                    if ("productFlavors".equals(cName) && getGroovyClosure(call) != null) {
+                        hasProductFlavors = true;
+                    } else if ("buildTypes".equals(cName) && getGroovyClosure(call) != null) {
+                        ClosureExpression btClosure = getGroovyClosure(call);
+                        if (btClosure != null && btClosure.getCode() instanceof BlockStatement btBody) {
+                            if (containsMinSdkOverride(btBody)) {
+                                buildTypesOverridesMinSdk = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Integer compileSdk = null;
+        String compileTarget = null;
+        boolean compileSdkDynamic = false;
+        String namespace = null;
+
+        for (MethodCallExpression block : androidBlocks) {
+            ClosureExpression ce = getGroovyClosure(block);
+            if (ce == null || !(ce.getCode() instanceof BlockStatement body)) continue;
+            for (Statement statement : body.getStatements()) {
+                ProgressManager.checkCanceled();
+                if (statement instanceof ExpressionStatement es) {
+                    Expression expr = es.getExpression();
+                    if (expr instanceof BinaryExpression binary && "=".equals(binary.getOperation().getText())) {
+                        String left = binary.getLeftExpression().getText();
+                        if ("compileSdk".equals(left) || "compileSdkVersion".equals(left)) {
+                            Integer val = parseGroovyDecimalInteger(binary.getRightExpression());
+                            if (val != null && !compileSdkDynamic) {
+                                compileSdk = val;
+                                compileTarget = "android-" + val;
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
+                            }
+                        } else if ("compileSdkPreview".equals(left)) {
+                            String preview = parseGroovyLiteral(binary.getRightExpression());
+                            if (preview != null && !preview.isBlank() && !compileSdkDynamic) {
+                                compileTarget = "android-" + preview;
+                                compileSdk = null;
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
+                            }
+                        } else if ("namespace".equals(left)) {
+                            String val = parseGroovyLiteral(binary.getRightExpression());
+                            namespace = (val != null && !val.isBlank()) ? val : null;
+                        }
+                    } else if (expr instanceof MethodCallExpression call) {
+                        String cName = call.getMethodAsString();
+                        if ("compileSdk".equals(cName) || "compileSdkVersion".equals(cName)) {
+                            Integer val = parseGroovyDecimalInteger(call.getArguments());
+                            if (val != null && !compileSdkDynamic) {
+                                compileSdk = val;
+                                compileTarget = "android-" + val;
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
+                            }
+                        } else if ("compileSdkPreview".equals(cName)) {
+                            String preview = parseGroovyLiteral(call.getArguments());
+                            if (preview != null && !preview.isBlank() && !compileSdkDynamic) {
+                                compileTarget = "android-" + preview;
+                                compileSdk = null;
+                            } else {
+                                compileSdkDynamic = true;
+                                compileSdk = null;
+                                compileTarget = null;
+                            }
+                        } else if ("namespace".equals(cName)) {
+                            String val = parseGroovyLiteral(call.getArguments());
+                            namespace = (val != null && !val.isBlank()) ? val : null;
+                        }
+                    }
+                }
+            }
+        }
+
+        Integer minSdk = null;
+        Integer targetSdk = null;
+        boolean minSdkFound = false;
+        boolean minSdkDynamic = false;
+        boolean targetSdkDynamic = false;
+
+        for (MethodCallExpression block : androidBlocks) {
+            ClosureExpression ce = getGroovyClosure(block);
+            if (ce == null || !(ce.getCode() instanceof BlockStatement body)) continue;
+            for (Statement stmt : body.getStatements()) {
+                if (stmt instanceof ExpressionStatement es && es.getExpression() instanceof MethodCallExpression call && "defaultConfig".equals(call.getMethodAsString())) {
+                    ClosureExpression dfCe = getGroovyClosure(call);
+                    if (dfCe == null || !(dfCe.getCode() instanceof BlockStatement dfBody)) continue;
+                    for (Statement dfStatement : dfBody.getStatements()) {
+                        ProgressManager.checkCanceled();
+                        if (dfStatement instanceof ExpressionStatement dfEs) {
+                            Expression expr = dfEs.getExpression();
+                            if (expr instanceof BinaryExpression binary && "=".equals(binary.getOperation().getText())) {
+                                String left = binary.getLeftExpression().getText();
+                                if ("minSdk".equals(left) || "minSdkVersion".equals(left)) {
+                                    minSdkFound = true;
+                                    Integer val = parseGroovyDecimalInteger(binary.getRightExpression());
+                                    if (val != null && !minSdkDynamic) {
+                                        minSdk = val;
+                                    } else {
+                                        minSdkDynamic = true;
+                                        minSdk = null;
+                                    }
+                                } else if ("minSdkPreview".equals(left)) {
+                                    minSdkDynamic = true;
+                                    minSdk = null;
+                                } else if ("targetSdk".equals(left) || "targetSdkVersion".equals(left)) {
+                                    Integer val = parseGroovyDecimalInteger(binary.getRightExpression());
+                                    if (val != null && !targetSdkDynamic) {
+                                        targetSdk = val;
+                                    } else {
+                                        targetSdkDynamic = true;
+                                        targetSdk = null;
+                                    }
+                                } else if ("targetSdkPreview".equals(left)) {
+                                    targetSdkDynamic = true;
+                                    targetSdk = null;
+                                }
+                            } else if (expr instanceof MethodCallExpression callExpr) {
+                                String cName = callExpr.getMethodAsString();
+                                if ("minSdk".equals(cName) || "minSdkVersion".equals(cName)) {
+                                    minSdkFound = true;
+                                    Integer val = parseGroovyDecimalInteger(callExpr.getArguments());
+                                    if (val != null && !minSdkDynamic) {
+                                        minSdk = val;
+                                    } else {
+                                        minSdkDynamic = true;
+                                        minSdk = null;
+                                    }
+                                } else if ("minSdkPreview".equals(cName)) {
+                                    minSdkDynamic = true;
+                                    minSdk = null;
+                                } else if ("targetSdk".equals(cName) || "targetSdkVersion".equals(cName)) {
+                                    Integer val = parseGroovyDecimalInteger(callExpr.getArguments());
+                                    if (val != null && !targetSdkDynamic) {
+                                        targetSdk = val;
+                                    } else {
+                                        targetSdkDynamic = true;
+                                        targetSdk = null;
+                                    }
+                                } else if ("targetSdkPreview".equals(cName)) {
+                                    targetSdkDynamic = true;
                                     targetSdk = null;
                                 }
                             }
@@ -828,6 +1139,14 @@ public final class AndroidLintModelResolver {
         if (minSdkUnsafe) minSdk = null;
         boolean minSdkPremiseMissing = minSdkUnsafe || !minSdkFound || (minSdk == null);
 
+        if (compileSdkDynamic) {
+            compileSdk = null;
+            compileTarget = null;
+        }
+        if (targetSdkDynamic) {
+            targetSdk = null;
+        }
+
         return new CleanAstResult(
                 minSdk,
                 targetSdk,
@@ -836,10 +1155,136 @@ public final class AndroidLintModelResolver {
                 namespace,
                 isLibrary,
                 minSdkPremiseMissing,
-                minSdkUnsafe
+                minSdkUnsafe,
+                targetSdkDynamic,
+                compileSdkDynamic
         );
     }
 
+    public static CleanAstResult parseCleanGroovyAst(String script) {
+        if (script == null || script.isBlank()) {
+            return new CleanAstResult(null, null, null, null, null, null, true, true, true, true);
+        }
+        try {
+            SourceUnit unit = SourceUnit.create("build.gradle", script);
+            unit.parse();
+            unit.completePhase();
+            unit.convert();
+            return parseCleanAst(unit.getAST());
+        } catch (Throwable t) {
+            return new CleanAstResult(null, null, null, null, null, null, true, true, true, true);
+        }
+    }
+
+    private static Boolean detectGroovyAppPlugin(ModuleNode moduleNode) {
+        if (moduleNode == null || moduleNode.getStatementBlock() == null) return null;
+        for (Statement s : moduleNode.getStatementBlock().getStatements()) {
+            if (s instanceof ExpressionStatement es) {
+                Expression expr = es.getExpression();
+                if (expr instanceof MethodCallExpression mc && "plugins".equals(mc.getMethodAsString())) {
+                    ClosureExpression ce = getGroovyClosure(mc);
+                    if (ce != null && ce.getCode() instanceof BlockStatement bs) {
+                        for (Statement ps : bs.getStatements()) {
+                            if (ps instanceof ExpressionStatement pes && pes.getExpression() instanceof MethodCallExpression pmc) {
+                                String pName = pmc.getMethodAsString();
+                                if ("id".equals(pName)) {
+                                    String id = parseGroovyLiteral(pmc.getArguments());
+                                    if ("com.android.application".equals(id)) return Boolean.TRUE;
+                                    if ("com.android.library".equals(id)) return Boolean.FALSE;
+                                } else if ("alias".equals(pName)) {
+                                    String text = pmc.getArguments().getText();
+                                    if (text.endsWith(".android.application") || text.equals("libs.plugins.android.application")) {
+                                        return Boolean.TRUE;
+                                    }
+                                    if (text.endsWith(".android.library") || text.equals("libs.plugins.android.library")) {
+                                        return Boolean.FALSE;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (expr instanceof MethodCallExpression mc && "apply".equals(mc.getMethodAsString())) {
+                    Expression args = mc.getArguments();
+                    if (args instanceof TupleExpression te) {
+                        for (Expression arg : te.getExpressions()) {
+                            if (arg instanceof NamedArgumentListExpression nale) {
+                                for (MapEntryExpression entry : nale.getMapEntryExpressions()) {
+                                    if ("plugin".equals(parseGroovyLiteral(entry.getKeyExpression()))) {
+                                        String val = parseGroovyLiteral(entry.getValueExpression());
+                                        if ("com.android.application".equals(val)) return Boolean.TRUE;
+                                        if ("com.android.library".equals(val)) return Boolean.FALSE;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean containsMinSdkOverride(BlockStatement block) {
+        boolean[] found = new boolean[1];
+        block.visit(new org.codehaus.groovy.ast.CodeVisitorSupport() {
+            @Override
+            public void visitMethodCallExpression(MethodCallExpression call) {
+                String m = call.getMethodAsString();
+                if ("minSdk".equals(m) || "minSdkVersion".equals(m) || "minSdkPreview".equals(m)) {
+                    found[0] = true;
+                }
+                super.visitMethodCallExpression(call);
+            }
+
+            @Override
+            public void visitBinaryExpression(BinaryExpression expression) {
+                if ("=".equals(expression.getOperation().getText())) {
+                    String left = expression.getLeftExpression().getText();
+                    if ("minSdk".equals(left) || "minSdkVersion".equals(left) || "minSdkPreview".equals(left)) {
+                        found[0] = true;
+                    }
+                }
+                super.visitBinaryExpression(expression);
+            }
+        });
+        return found[0];
+    }
+
+    private static ClosureExpression getGroovyClosure(MethodCallExpression mc) {
+        if (mc.getArguments() instanceof ArgumentListExpression ale) {
+            for (Expression e : ale.getExpressions()) {
+                if (e instanceof ClosureExpression ce) return ce;
+            }
+        }
+        return null;
+    }
+
+    private static String parseGroovyLiteral(Expression expr) {
+        if (expr instanceof ArgumentListExpression ale && ale.getExpressions().size() == 1) {
+            return parseGroovyLiteral(ale.getExpressions().get(0));
+        }
+        if (expr instanceof ConstantExpression ce && ce.getValue() instanceof String s) {
+            return s;
+        }
+        return null;
+    }
+
+    private static Integer parseGroovyDecimalInteger(Expression expr) {
+        if (expr instanceof ArgumentListExpression ale && ale.getExpressions().size() == 1) {
+            return parseGroovyDecimalInteger(ale.getExpressions().get(0));
+        }
+        if (expr instanceof ConstantExpression ce) {
+            Object val = ce.getValue();
+            if (val instanceof Integer i) return i;
+            if (val instanceof Number n) return n.intValue();
+            if (val instanceof String s && s.matches("^\\d+$")) {
+                try {
+                    return Integer.parseInt(s);
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return null;
+    }
     private static List<KtExpression> topLevelStatements(KtFile ktFile) {
         List<KtExpression> raw = new ArrayList<>();
         if (ktFile.getScript() != null && ktFile.getScript().getBlockExpression() != null) {
@@ -939,10 +1384,16 @@ public final class AndroidLintModelResolver {
         if (module == null || module.isDisposed()) return false;
         VirtualFile root = AndroidContext.findModuleRoot(module);
         if (root == null) return false;
-        PsiFile script = AndroidSources.kotlinScript(project, root);
+        PsiFile script = AndroidSources.gradleScript(project, root);
         if (script instanceof KtFile ktFile) {
             Boolean isApp = detectAppPlugin(ktFile);
             if (isApp != null) return isApp;
+        } else {
+            ModuleNode groovy = AndroidSources.groovyAst(project, root);
+            if (groovy != null) {
+                Boolean isApp = detectGroovyAppPlugin(groovy);
+                if (isApp != null) return isApp;
+            }
         }
         return false;
     }

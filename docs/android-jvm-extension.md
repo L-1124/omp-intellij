@@ -204,7 +204,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
   - 异常响应：若类未定义，返回错误码 `-32803`，错误信息包含 `target_unresolved: <类全限定名>`；若存在多重冲突声明，返回 `ambiguous_target: <类全限定名>`。
   - 引用反查结果：通过 `FindUsagesManager` 检索所有 Kotlin/Java 代码引用（过滤 XML 来源），追加剥离引号后的当前属性位置。若客户端请求带 `context.includeDeclaration: true`，同步追加目标类的源码声明定义位置。
 - **资源 XML 声明 references 查询**：
-  - 标准 XML 请求与 `omp.findResourceFieldReferences` 在 JVM 内共用字段查询，不在 Bridge 转发第二次 RPC。显式命令协议 v1 的精确模块、namespace、R 字段和物理编译来源见 `plan.md` §7.2。
+  - 标准 XML 请求与 `omp.findResourceFieldReferences` 在 JVM 内共用字段查询，不在 Bridge 转发第二次 RPC。显式命令协议 v1 校验精确模块、namespace、R 字段和物理编译来源。
   - 按当前模块、变体与 AGP merger 证明声明身份和编译字段；同名、同 FQN 的独立模块不能仅因名称相同而合并。声明来源缺失或失效返回具体错误，合法零引用返回 `[]`。
   - 官方对照：`ProjectLightResourceClassService.getLightRClassesContainingModuleResources` 枚举 owner 及依赖它的消费模块中的 R 表示；`AndroidResourcesFindUsagesHandlerFactory` 再按资源上下文收缩范围。ILS 适配同样先证明 owner/依赖关系，再枚举真实编译字段副本，不能只搜索 owner 的一个字段或仅按 namespace 扫全工程。
   - `includeDeclaration: false` 仅返回 Java/Kotlin 的真实语义引用；`true` 额外加入当前 XML 声明，不加入其他限定符副本、字节码字段或 XML 使用点。
@@ -259,7 +259,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 6. 构建资产清单与安全替换契约
 
-发布目录为 `resources/ils/271.2085.0/intellij-android/`，`lib/` 中包含下列 12 个 JAR，每个 JAR 都有同名 `.sha256`：
+发布目录为 `resources/ils/271.2085.0/intellij-android/`，`lib/` 中包含下列 13 个 JAR，每个 JAR 都有同名 `.sha256`：
 
 | 依赖 | 固定文件名 |
 | --- | --- |
@@ -270,10 +270,11 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 | Android 工具 API | `common-32.4.1.jar`、`sdklib-32.4.1.jar`、`sdk-common-32.4.1.jar` |
 | 资源类型 API | `layoutlib-api-32.4.1.jar` |
 | XML pull parser | `kxml2-2.3.0.jar` |
+| Groovy 语法 AST | `groovy-4.0.29.jar` |
 
 所有 Maven 运行依赖均关闭传递解析；不分发 `lint-psi`、UAST 或 standalone Kotlin 编译器。ILS 未提供资源仓库类型，`sdk-common` 与 `layoutlib-api` 共同支撑资源仓库接口与值类型，不能只放在编译 classpath。
 
-宿主库存在于 ILS 安装目录不代表插件类加载器可访问。`plugin.xml` 显式声明公共模块 `intellij.libraries.asm`、`intellij.libraries.asm.tools` 与 `intellij.libraries.guava`；ASM Tree 的 `AbstractInsnNode` 位于 `asm.tools`。保留既有插件依赖，不复制这些宿主 JAR。
+宿主库存在于 ILS 安装目录不代表插件类加载器可访问。`plugin.xml` 显式声明公共模块 `intellij.libraries.asm`、`intellij.libraries.asm.tools` 与 `intellij.libraries.guava`；ASM Tree 的 `AbstractInsnNode` 位于 `asm.tools`。Lint 的 `Detector` 和内置规则仍引用 ASM 类型，单文件 Scope 过滤不会消除类链接依赖，因此保留这两个模块声明，不复制宿主 JAR。
 
 `manifest.json` 记录 ILS 版本、插件 ID、Java/classfile 版本、工具链，以及全部资产的名称、相对路径、SHA-256 和大小。实际发布清单见 [manifest.json](../resources/ils/271.2085.0/intellij-android/manifest.json)；Node 校验同时核对固定白名单与上游摘要，拒绝缺失、多余或被替换的文件。
 - **原子替换与回滚契约**：Gradle `stageExtension` 任务先将产物写入随机隔离目录 `.staging-<uuid>/`，备份老资产到 `.rollback-<uuid>/`，再执行原子移动。若中间任何文件校验失败，利用 rollback 目录完全回滚现有资产，最后原子替换 `manifest.json`。
@@ -287,7 +288,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 阶段 H 的 Java/Kotlin 与阶段 I 的资源 XML/Manifest 诊断均已通过真实 ILS 271 验收。完整运行包含原生无扩展对照，并保留既有 Java/Kotlin/Compose 和导航回归。
 
 - `AndroidRequests.diagnosticQuery` 在分析前记录打开文档版本，在挂起读操作内读取快照；发布前重新进入分析上下文，逐字符核对当前未保存内容，并复核版本与关联磁盘输入。缓存只在复核通过后写入。过期返回 `-32801`，取消传播为 `-32800`。
-- `AndroidLintModelResolver` 先读取当前变体的官方 LintModel XML，再回退到 `build.gradle.kts` 的 Kotlin PSI 字面量与主 Manifest。动态 `minSdk`、flavor 或 buildType 覆盖保持前提缺失，不虚构 `minSdk=1`；此时只跳过 `ApiDetector`，其余规则继续运行。
+- `AndroidLintModelResolver` 先读取当前变体的官方 LintModel XML，再回退到 Gradle 脚本字面量与主 Manifest：优先 `build.gradle.kts` 的 Kotlin PSI，不存在时读取 `build.gradle` 的 Groovy AST。动态 `minSdk`、flavor 或 buildType 覆盖保持前提缺失，不虚构 `minSdk=1`；此时只跳过 `ApiDetector`，其余规则继续运行。
 - `AndroidLintIssueRegistry` 按官方 `Implementation.isAdequate` 选择单文件规则，并保留 `NewApi`。`AndroidLintClient` 将编辑器 PSI 转换为 UAST，使用真实模块解析作用域与语言级别；资源查询按当前变体和仓库范围解析，仍不等同于 Gradle 全项目 Lint。
 - AAR 规则跟随当前模块已导入依赖：发现同级 `jars/lint.jar`，按内容摘要复制到缓存后加载。不设 Maven 前缀白名单，不扫描全局规则目录，不联网获取规则。加载失败跳过单个 JAR；复合执行故障时按 Registry 隔离重试，每次使用独立的 Lint 项目状态，失败批次不进入结果。
 - Lint 32.4.1 会吞下 Detector 异常，累计崩溃超过 20 次后连 `client.log` 也会跳过。客户端在官方 `runReadAction` 回调入口记录本次运行的异常，并在 `analyze` 返回后复核，确保日志限流后仍触发 Registry 隔离；取消直接传播，不读写全局崩溃计数。
@@ -297,15 +298,16 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 #### 实施注意事项
 
-- Kotlin PSI 将脚本顶层表达式包装为 `KtScriptInitializer`，读取 `android {}` 前先解包。`minSdk` 未声明时可检查主 Manifest；遇到动态表达式或变体覆盖时，不能再从 Manifest 取值掩盖歧义。
-- `source.properties` 的 API 值可能是 `37.0`。规则使用整数 API 级别，平台目标保留完整标识，例如 `android-37.0`，不能把两者混为一个字段。
+- Kotlin PSI 将脚本顶层表达式包装为 `KtScriptInitializer`，读取 `android {}` 前先解包。`minSdk`、`targetSdk`、`compileSdk` 的动态判定具有粘性，后续字面量不覆盖先前的歧义；`minSdk`、`targetSdk` 未声明时可检查主 Manifest，动态表达式或变体覆盖则禁止该回退。
+- ILS 271 未捆绑 Groovy PSI。扩展使用官方 Groovy 4.0.29，依次调用 `SourceUnit.parse()`、`completePhase()`、`convert()`，仅生成语法 AST，不进入语义分析或 AST 变换，不执行脚本和 `@Grab`。解析结果缓存在请求级 `AndroidSources.Scope`；资源目录、namespace 和 SDK 配置遵守相同的保存态边界。
+- `source.properties` 的 API 值可能是 `37.0`。规则使用整数 API 级别，平台目标保留完整标识，例如 `android-37.0`。正式版、预览版与 Add-on 目标通过官方 `AndroidTargetHash` 解析，不从目标字符串手动截取或猜测 API。
 - `AndroidSources.text` 保留磁盘读取语义，供关联资源、配置和产物来源校验使用；当前诊断文件使用请求的 PSI/Document 快照。缓存指纹与分析必须读取同一来源，避免关联编辑器内容掩盖磁盘更新。
 - ILS 271 的 `ProcessCanceledException` 继承 `CancellationException`。捕获、反射调用和规则隔离均须保留取消，不能把取消当成坏规则或成功空结果。
 - AAR 规则复制到 `${java.io.tmpdir}/android-lint-cache/aar/`，文件名使用内容摘要，再通过宿主 `UrlClassLoader` 加载并关闭 JAR 锁定。复制失败不回退到直接加载 Gradle 缓存原件；模块级弱引用缓存最多保留 32 项，键包含复制路径、原文件大小和修改时间。
 
 ### 8. XML/Manifest Lint（阶段 I）
 
-实现和验收记录见 [总计划 §15](../plan.md)。复用现有 `AndroidLintProvider`，按文件归属选择 `RESOURCE_FILE` 或 `MANIFEST`，保留原生 XML 语法诊断。真实独立 ILS 271 完整矩阵通过，覆盖目录、抑制、API、资源刷新、隔离，以及实际 AGP 合并来源和 Clean→Built 缓存切换。
+复用现有 `AndroidLintProvider`，按文件归属选择 `RESOURCE_FILE` 或 `MANIFEST`，保留原生 XML 语法诊断。真实独立 ILS 271 完整矩阵通过，覆盖目录、抑制、API、资源刷新、隔离，以及实际 AGP 合并来源和 Clean→Built 缓存切换。
 
 独立 JVM 探针已跑通 `ContentDescription`、`HardcodedText`、`HardcodedDebugMode`、祖先 `tools:ignore` 和内存修复，并复现未落盘文件被跳过、默认 merged Manifest 忽略内存修改、多行属性值结束行号错误。探针显式提供项目和规则，结果不等同于真实 ILS 接入或完整资源模型验收。
 
@@ -318,11 +320,14 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 用户确认的保存边界：当前拉取文件的未保存内容即时参与诊断；关联资源、配置和其他清单按磁盘读取，保存后刷新；新文件首次保存后检查。输出前在新分析上下文中复核当前文档内容，避免上下文外访问快照 Document。
 
+编辑期保留这一边界，不调用 `ManifestMerger2` 临时合并。完整合并由 AGP 提供；输入模型缺失或产物过期时，继续执行源文件检查，避免把不完整输入的合并结果当作有效产物。
+
 已修复的适配差异：
 - 自定义 Manifest 按同一 Gradle 模块中的实际源集归属选择生产模块，避免用聚合模块解析类及变体。
 - 无命名空间节点返回 W3C 规定的 `null`，限定属性同时支持 QName 和 namespace URI 查询；官方 Merger 的节点键与源文件保持一致。
 - 合并节点无法映射时不返回源文件位置；源文件未保存或晚于合并产物时回退到当前源 DOM。
 - 资源、关联 Gradle 脚本及配置读取保存态；指纹覆盖依赖文件内容、中间层 `lint.xml`，以及合并清单/merger 日志的存在性、内容和时间戳。生成合并产物后，即使主文档未改动，也会重新运行检查。
+- 资源字符串解码复用 `ValueXmlHelper.unescapeResourceString`，attr 格式与 enum/flag 元数据复用 `AttributeFormat`；资源引用复用 `ResourceUrl.parse` 和官方名称校验。只将无 namespace 的模块自有 `@+id` 收入声明表，避免 `@+android:id` 污染 framework 或模块资源。
 
 
 ---
@@ -429,3 +434,11 @@ SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅
 - 真实 ILS `271.2085.0`：`Android Lint diagnostics integration` 全部通过，无跳过。覆盖 Java/Kotlin 编译诊断共存、12 项 `NewApi` 矩阵、真实 Compose 规则、Clean/Built 模型切换、`lint.xml`、损坏 AAR 与非 AndroidX 规则、缓存命中、取消 `-32800` 及并发编辑复核。
 - 移除临时故障日志后，`tsc -p tsconfig.test.json --noEmit` 通过。根目录 `README.md` 未修改。
 - Lint 工程、规则注册表、XML 解析器及内部 UAST 解析器、Java evaluator 均统一使用 `Android` 前缀，缓存目录为 `${java.io.tmpdir}/android-lint-cache`。命名调整后 JVM Lint 测试与 `stageExtension` 通过，已核对发布 JAR 的类名及源码、测试、文档中的旧名前缀残留。
+
+## 验收记录（2026-11-10）
+
+- 定向 JVM 回归通过，覆盖调试租约、SDK 前提、Groovy 模型、Lint 资源与 Manifest；移除测试专用空守卫后，使用真实 Project 夹具重测 Groovy 模型并重新执行 `stageExtension`。
+- 发布资产、摘要防替换与服务生命周期回归通过。`npm pack --dry-run --json --ignore-scripts` 包含 13 个 JAR、对应 SHA-256 和 `manifest.json`。
+- 真实 ILS `271.2085.0` 的 `android-xml.test.js` 全部通过，覆盖 Java/Kotlin 编译诊断、Compose、XML/Manifest 规则、资源导航及合并来源回退。
+- 独立 Groovy 工程实测：保存的 `minSdk 21` 触发 API 26 的 `NewApi`；未保存缓冲区改为 26 后诊断保留，落盘并发送 `didSave` 后消失。自定义资源根与自定义 Manifest 生效，默认 Manifest 被排除。真实服务的 `owner.pluginPaths` 记录预期的绝对扩展目录；验证后已关闭客户端并清理沙箱。
+- 额外执行的 `engineering.test.js` 中，Gradle 子项目调试通过；两项工程模型用例在 `model.classpath` 断言处失败。ILS 271 未广告 `intellij.java.resolveLaunch`，`exportWorkspace` 回退只提供工程模型，不提供运行 classpath。本轮保留该能力边界，未伪造 classpath 或放宽断言。

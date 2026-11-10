@@ -9,6 +9,20 @@ import com.intellij.psi.util.PsiTreeUtil;
 import org.jetbrains.kotlin.psi.*;
 import java.nio.file.Path;
 import java.util.*;
+import org.codehaus.groovy.ast.CodeVisitorSupport;
+import org.codehaus.groovy.ast.ModuleNode;
+import org.codehaus.groovy.ast.expr.ArgumentListExpression;
+import org.codehaus.groovy.ast.expr.BinaryExpression;
+import org.codehaus.groovy.ast.expr.ClosureExpression;
+import org.codehaus.groovy.ast.expr.ConstantExpression;
+import org.codehaus.groovy.ast.expr.Expression;
+import org.codehaus.groovy.ast.expr.ListExpression;
+import org.codehaus.groovy.ast.expr.MethodCallExpression;
+import org.codehaus.groovy.ast.expr.PropertyExpression;
+import org.codehaus.groovy.ast.expr.TupleExpression;
+import org.codehaus.groovy.ast.stmt.BlockStatement;
+import org.codehaus.groovy.ast.stmt.ExpressionStatement;
+import org.codehaus.groovy.ast.stmt.Statement;
 
 public final class AndroidLayout {
     private static final Set<String> SOURCE_OPERATIONS = Set.of("srcDir", "srcDirs", "setSrcDirs", "srcFile");
@@ -22,8 +36,18 @@ public final class AndroidLayout {
     }
 
     public AndroidLayout(Project project, VirtualFile root, String variant, Set<String> importedSourceSets) {
-        PsiFile script = AndroidSources.kotlinScript(project, root);
+        PsiFile script = AndroidSources.gradleScript(project, root);
         if (!(script instanceof KtFile kotlin)) {
+            ModuleNode groovy = AndroidSources.groovyAst(project, root);
+            if (groovy != null) {
+                Path directory = Path.of(root.getPath()).toAbsolutePath().normalize();
+                GroovyLayoutData data = parseGroovyLayout(groovy, directory, variant, importedSourceSets);
+                android = data.android();
+                namespace = data.namespace();
+                resources = data.resources();
+                manifests = data.manifests();
+                return;
+            }
             android = false;
             namespace = null;
             resources = Set.of();
@@ -181,5 +205,230 @@ public final class AndroidLayout {
             else value.append(entry.getText());
         }
         return value.toString();
+    }
+
+    private record GroovyLayoutData(boolean android, String namespace, Set<Path> resources, Set<Path> manifests) {
+    }
+
+
+    static GroovyLayoutData parseGroovyLayout(ModuleNode ast, Path directory, String variant, Set<String> importedSourceSets) {
+        if (ast == null || ast.getStatementBlock() == null) {
+            return new GroovyLayoutData(false, null, Set.of(), Set.of());
+        }
+        List<MethodCallExpression> androidBlocks = new ArrayList<>();
+        for (Statement s : ast.getStatementBlock().getStatements()) {
+            if (s instanceof ExpressionStatement es && es.getExpression() instanceof MethodCallExpression mc) {
+                if ("android".equals(mc.getMethodAsString()) && getClosure(mc) != null) {
+                    androidBlocks.add(mc);
+                }
+            }
+        }
+        if (androidBlocks.size() != 1) {
+            return new GroovyLayoutData(false, null, Set.of(), Set.of());
+        }
+
+        MethodCallExpression androidCall = androidBlocks.get(0);
+        ClosureExpression closure = getClosure(androidCall);
+        if (closure == null || !(closure.getCode() instanceof BlockStatement body)) {
+            return new GroovyLayoutData(true, null, Set.of(), Set.of());
+        }
+
+        List<String> namespaces = new ArrayList<>();
+        for (Statement s : body.getStatements()) {
+            if (s instanceof ExpressionStatement es) {
+                Expression expr = es.getExpression();
+                if (expr instanceof MethodCallExpression mc && "namespace".equals(mc.getMethodAsString())) {
+                    String val = getLiteral(mc.getArguments());
+                    if (val != null && !val.isBlank()) namespaces.add(val);
+                } else if (expr instanceof BinaryExpression be && "=".equals(be.getOperation().getText())) {
+                    if ("namespace".equals(be.getLeftExpression().getText())) {
+                        String val = getLiteral(be.getRightExpression());
+                        if (val != null && !val.isBlank()) namespaces.add(val);
+                    }
+                }
+            }
+        }
+        String namespace = namespaces.size() == 1 ? namespaces.get(0) : null;
+
+        Map<String, SourceSet> sourceSets = new LinkedHashMap<>();
+        for (String sourceSet : importedSourceSets) sourceSets.put(sourceSet, defaults(directory, sourceSet));
+        if (importedSourceSets.contains("main") && variant != null)
+            sourceSets.putIfAbsent(variant, defaults(directory, variant));
+
+        boolean[] known = new boolean[]{true, true}; // [resourcesKnown, manifestsKnown]
+
+        body.visit(new CodeVisitorSupport() {
+            private final Deque<String> scopeStack = new ArrayDeque<>();
+
+            @Override
+            public void visitMethodCallExpression(MethodCallExpression call) {
+                ProgressManager.checkCanceled();
+                String methodName = call.getMethodAsString();
+                ClosureExpression nestedClosure = getClosure(call);
+                if (nestedClosure != null) {
+                    String scopeName = methodName;
+                    if ("getByName".equals(methodName) || "named".equals(methodName) || "create".equals(methodName)) {
+                        if (call.getArguments() instanceof ArgumentListExpression ale && !ale.getExpressions().isEmpty()) {
+                            String arg = getLiteral(ale.getExpressions().get(0));
+                            if (arg != null) scopeName = arg;
+                        }
+                    }
+                    scopeStack.push(scopeName);
+                    try {
+                        nestedClosure.getCode().visit(this);
+                    } finally {
+                        scopeStack.pop();
+                    }
+                    return;
+                }
+
+                if (SOURCE_OPERATIONS.contains(methodName)) {
+                    handleSourceOperation(call.getObjectExpression(), methodName, call.getArguments(), false, scopeStack, sourceSets, directory, known);
+                }
+                super.visitMethodCallExpression(call);
+            }
+
+            @Override
+            public void visitBinaryExpression(BinaryExpression expression) {
+                ProgressManager.checkCanceled();
+                if ("=".equals(expression.getOperation().getText())) {
+                    Expression left = expression.getLeftExpression();
+                    if (left instanceof PropertyExpression pe) {
+                        String prop = pe.getPropertyAsString();
+                        if ("srcDirs".equals(prop) || "srcFile".equals(prop)) {
+                            handleSourceOperation(pe.getObjectExpression(), prop, expression.getRightExpression(), true, scopeStack, sourceSets, directory, known);
+                        }
+                    }
+                }
+                super.visitBinaryExpression(expression);
+            }
+        });
+
+        Set<Path> res = new LinkedHashSet<>(), manifest = new LinkedHashSet<>();
+        for (SourceSet s : sourceSets.values()) {
+            res.addAll(s.resources);
+            manifest.addAll(s.manifests);
+        }
+
+        return new GroovyLayoutData(
+                true,
+                namespace,
+                known[0] ? Set.copyOf(res) : Set.of(),
+                known[1] ? Set.copyOf(manifest) : Set.of()
+        );
+    }
+
+    private static void handleSourceOperation(
+            Expression receiver,
+            String operation,
+            Expression valueExpr,
+            boolean isAssignment,
+            Deque<String> scopeStack,
+            Map<String, SourceSet> sourceSets,
+            Path directory,
+            boolean[] known
+    ) {
+        String receiverText = receiver.getText();
+        boolean isRes = receiverText.endsWith("res") || "res".equals(receiverText);
+        boolean isManifest = receiverText.endsWith("manifest") || "manifest".equals(receiverText);
+        if (!isRes && !isManifest) return;
+
+        String sourceSetName = determineSourceSet(receiver, scopeStack);
+        if (sourceSetName == null) {
+            if (isRes) known[0] = false;
+            else known[1] = false;
+            return;
+        }
+
+        SourceSet target = sourceSets.get(sourceSetName);
+        if (target == null) return;
+
+        List<String> paths = getLiterals(valueExpr);
+        if (paths == null || (isManifest && paths.size() != 1)) {
+            if (isRes) known[0] = false;
+            else known[1] = false;
+            return;
+        }
+
+        Set<Path> destinations = isRes ? target.resources : target.manifests;
+        boolean replace = isAssignment || operation.equals("setSrcDirs") || operation.equals("srcFile");
+        if (replace) destinations.clear();
+        for (String p : paths) {
+            destinations.add(directory.resolve(p).normalize());
+        }
+    }
+
+    private static String determineSourceSet(Expression receiver, Deque<String> stack) {
+        if (receiver instanceof PropertyExpression pe) {
+            Expression obj = pe.getObjectExpression();
+            if (obj instanceof PropertyExpression objPe) {
+                if ("sourceSets".equals(objPe.getObjectExpression().getText())) {
+                    return objPe.getPropertyAsString();
+                }
+            } else if (obj instanceof BinaryExpression be && "[".equals(be.getOperation().getText())) {
+                if ("sourceSets".equals(be.getLeftExpression().getText())) {
+                    return getLiteral(be.getRightExpression());
+                }
+            }
+        }
+        for (String s : stack) {
+            if (!s.equals("sourceSets") && !s.equals("android")) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    private static List<String> getLiterals(Expression expr) {
+        if (expr instanceof ArgumentListExpression ale) {
+            List<String> list = new ArrayList<>();
+            for (Expression e : ale.getExpressions()) {
+                List<String> sub = getLiterals(e);
+                if (sub == null) return null;
+                list.addAll(sub);
+            }
+            return list;
+        }
+        if (expr instanceof TupleExpression te) {
+            List<String> list = new ArrayList<>();
+            for (Expression e : te.getExpressions()) {
+                List<String> sub = getLiterals(e);
+                if (sub == null) return null;
+                list.addAll(sub);
+            }
+            return list;
+        }
+        if (expr instanceof ListExpression le) {
+            List<String> list = new ArrayList<>();
+            for (Expression e : le.getExpressions()) {
+                String s = getLiteral(e);
+                if (s == null) return null;
+                list.add(s);
+            }
+            return list;
+        }
+        String s = getLiteral(expr);
+        if (s != null) return List.of(s);
+        return null;
+    }
+
+    private static String getLiteral(Expression expr) {
+        if (expr instanceof ArgumentListExpression ale) {
+            if (ale.getExpressions().size() == 1) return getLiteral(ale.getExpressions().get(0));
+            return null;
+        }
+        if (expr instanceof ConstantExpression ce && ce.getValue() instanceof String s) {
+            return s;
+        }
+        return null;
+    }
+
+    private static ClosureExpression getClosure(MethodCallExpression mc) {
+        if (mc.getArguments() instanceof ArgumentListExpression ale) {
+            for (Expression e : ale.getExpressions()) {
+                if (e instanceof ClosureExpression ce) return ce;
+            }
+        }
+        return null;
     }
 }

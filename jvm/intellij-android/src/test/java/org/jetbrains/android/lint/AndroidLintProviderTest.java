@@ -84,8 +84,20 @@ public class AndroidLintProviderTest {
         assertNull(dynamic.compileSdk());
         assertNull(dynamic.targetSdk());
         assertEquals(Integer.valueOf(21), dynamic.minSdk());
-    }
 
+        var dynamicFirst = clean("android { compileSdk = selectedCompileSdk; compileSdk = 37; defaultConfig { minSdk = selectedMin; minSdk = 21; targetSdk = selectedTarget; targetSdk = 37 } }");
+        assertNull(dynamicFirst.compileSdk());
+        assertNull(dynamicFirst.targetSdk());
+        assertNull(dynamicFirst.minSdk());
+        assertTrue(dynamicFirst.compileSdkUnsafe());
+        assertTrue(dynamicFirst.targetSdkUnsafe());
+        assertTrue(dynamicFirst.minSdkUnsafe());
+        assertTrue(dynamicFirst.minSdkPremiseMissing());
+
+        var targetPreview = clean("android { defaultConfig { targetSdk = 37; targetSdkPreview = \"Future\" } }");
+        assertNull(targetPreview.targetSdk());
+        assertTrue(targetPreview.targetSdkUnsafe());
+    }
     @Test
     public void cleanModelDoesNotBorrowConfigurationFromNestedProjects() {
         var nested = clean("subprojects { android { defaultConfig { minSdk = 21 } } }");

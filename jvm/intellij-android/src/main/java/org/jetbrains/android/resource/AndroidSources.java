@@ -12,6 +12,8 @@ import com.intellij.psi.xml.XmlFile;
 import org.jetbrains.android.context.AndroidQueryException;
 import org.jetbrains.kotlin.psi.KtPsiFactory;
 
+import org.codehaus.groovy.ast.ModuleNode;
+import org.codehaus.groovy.control.SourceUnit;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -51,6 +53,7 @@ public final class AndroidSources {
         private final Map<Path, String> texts = new HashMap<>();
         private boolean savedModelInputs;
         public final Map<com.intellij.openapi.module.Module, AndroidLayout> layouts = new HashMap<>();
+        private final Map<Path, ModuleNode> groovyAsts = new HashMap<>();
 
         public Scope(com.jetbrains.ls.api.core.LSServer server, VirtualFile file) {
             this(server, file, openVersions(server));
@@ -223,19 +226,66 @@ public final class AndroidSources {
         }
     }
 
-    public static PsiFile kotlinScript(Project project, VirtualFile root) {
-        Path path = Path.of(root.getPath(), "build.gradle.kts").toAbsolutePath().normalize();
+    public static PsiFile gradleScript(Project project, VirtualFile root) {
+        Path ktsPath = Path.of(root.getPath(), "build.gradle.kts").toAbsolutePath().normalize();
         Scope scope = scope();
         if (!scope.savedModelInputs) {
-            PsiFile current = current(project, path);
+            PsiFile current = current(project, ktsPath);
             if (current != null) return current;
         }
-        if (scope.files.containsKey(path)) return scope.files.get(path);
+        if (scope.files.containsKey(ktsPath)) return scope.files.get(ktsPath);
         // ILS omits Gradle scripts from its source snapshot until didOpen.
-        String text = text(path);
-        PsiFile file = text == null ? null : new KtPsiFactory(project, false).createFile("build.gradle.kts", text);
-        scope.files.put(path, file);
-        return file;
+        String ktsText = text(ktsPath);
+        if (ktsText != null) {
+            PsiFile file = new KtPsiFactory(project, false).createFile("build.gradle.kts", ktsText);
+            scope.files.put(ktsPath, file);
+            return file;
+        }
+
+        // Fallback to Groovy build.gradle
+        Path groovyPath = Path.of(root.getPath(), "build.gradle").toAbsolutePath().normalize();
+        if (!scope.savedModelInputs) {
+            PsiFile current = current(project, groovyPath);
+            if (current != null) return current;
+        }
+        if (scope.files.containsKey(groovyPath)) return scope.files.get(groovyPath);
+        String groovyText = text(groovyPath);
+        if (groovyText != null) {
+            var vFile = virtualFile(groovyPath, com.intellij.openapi.fileTypes.PlainTextFileType.INSTANCE, groovyText);
+            var provider = new com.intellij.psi.SingleRootFileViewProvider(PsiManager.getInstance(project), vFile, false, com.intellij.openapi.fileTypes.PlainTextFileType.INSTANCE);
+            PsiFile file = provider.getPsi(com.intellij.openapi.fileTypes.PlainTextLanguage.INSTANCE);
+            scope.files.put(groovyPath, file);
+            return file;
+        }
+        return null;
+    }
+
+    public static ModuleNode groovyAst(Project project, VirtualFile root) {
+        Path path = Path.of(root.getPath(), "build.gradle").toAbsolutePath().normalize();
+        Scope scope = scope();
+        if (scope.groovyAsts.containsKey(path)) return scope.groovyAsts.get(path);
+        String text = null;
+        if (!scope.savedModelInputs) {
+            PsiFile current = current(project, path);
+            if (current != null) text = current.getText();
+        }
+        if (text == null) text = text(path);
+        if (text == null || text.isBlank()) {
+            scope.groovyAsts.put(path, null);
+            return null;
+        }
+        try {
+            SourceUnit unit = SourceUnit.create("build.gradle", text);
+            unit.parse();
+            unit.completePhase();
+            unit.convert();
+            ModuleNode ast = unit.getAST();
+            scope.groovyAsts.put(path, ast);
+            return ast;
+        } catch (Throwable t) {
+            scope.groovyAsts.put(path, null);
+            return null;
+        }
     }
 
     public static XmlFile xml(Project project, Path path) {

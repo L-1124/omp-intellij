@@ -1,5 +1,7 @@
 package org.jetbrains.android.lint;
 
+import com.android.ide.common.rendering.api.AttrResourceValue;
+import com.android.ide.common.rendering.api.AttributeFormat;
 import com.android.ide.common.rendering.api.ResourceNamespace;
 import com.android.ide.common.rendering.api.ResourceValue;
 import com.android.ide.common.rendering.api.StyleItemResourceValue;
@@ -13,12 +15,27 @@ import com.android.resources.ResourceType;
 import com.android.tools.lint.client.api.ResourceRepositoryScope;
 import com.android.tools.lint.detector.api.Scope;
 import org.jetbrains.android.context.AndroidQueryException;
+import com.intellij.core.CoreApplicationEnvironment;
+import com.intellij.core.CoreProjectEnvironment;
+import com.intellij.ide.highlighter.XmlFileType;
+import com.intellij.lang.xml.XMLLanguage;
+import com.intellij.lang.xml.XMLParserDefinition;
+import com.intellij.openapi.module.Module;
+import com.intellij.openapi.Disposable;
+import com.intellij.openapi.util.Disposer;
+import com.intellij.psi.PsiManager;
+import com.intellij.psi.SingleRootFileViewProvider;
+import com.intellij.psi.xml.XmlFile;
+import com.intellij.testFramework.LightVirtualFile;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.File;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
+import java.lang.reflect.Proxy;
 
 import static org.junit.Assert.*;
 
@@ -201,5 +218,243 @@ public class AndroidLintResourcesTest {
         );
 
         AndroidLintResources.getRepository(model, ResourceRepositoryScope.PROJECT_ONLY);
+    }
+
+    private static Disposable disposable;
+    private static CoreProjectEnvironment environment;
+
+    @BeforeClass
+    public static void setUp() {
+        disposable = Disposer.newDisposable();
+        CoreApplicationEnvironment application = new CoreApplicationEnvironment(disposable);
+        application.registerFileType(XmlFileType.INSTANCE, "xml");
+        application.registerParserDefinition(new XMLParserDefinition());
+        application.registerApplicationService(
+                com.intellij.platform.syntax.psi.PsiSyntaxBuilderFactory.class,
+                new com.intellij.platform.syntax.psi.PsiSyntaxBuilderFactoryImpl());
+        CoreApplicationEnvironment.registerApplicationExtensionPoint(
+                com.intellij.openapi.extensions.ExtensionPointName.create("com.intellij.metaLanguage"),
+                com.intellij.lang.MetaLanguage.class);
+        application.addExplicitExtension(com.intellij.platform.syntax.psi.ElementTypeConverters.getInstance(),
+                XMLLanguage.INSTANCE, new com.intellij.psi.xml.XmlElementTypeConverterExtension());
+        application.addExplicitExtension(com.intellij.platform.syntax.psi.LanguageSyntaxDefinitions.getINSTANCE(),
+                XMLLanguage.INSTANCE, new com.intellij.lang.xml.XmlSyntaxDefinitionExtension());
+        application.addExplicitExtension(com.intellij.lang.LanguageASTFactory.INSTANCE,
+                XMLLanguage.INSTANCE, new com.intellij.lang.xml.XmlASTFactory());
+
+        environment = new CoreProjectEnvironment(disposable, application);
+    }
+
+    @AfterClass
+    public static void tearDown() {
+        Disposer.dispose(disposable);
+    }
+
+    private static XmlFile createXmlFile(String name, String content) {
+        LightVirtualFile virtualFile = new LightVirtualFile(name, XmlFileType.INSTANCE, content);
+        SingleRootFileViewProvider.doNotCheckFileSizeLimit(virtualFile);
+        SingleRootFileViewProvider provider = new SingleRootFileViewProvider(
+                PsiManager.getInstance(environment.getProject()), virtualFile, false, XmlFileType.INSTANCE);
+        return (XmlFile) provider.getPsi(XMLLanguage.INSTANCE);
+    }
+
+    private static Module createLightModule() {
+        return (Module) Proxy.newProxyInstance(
+                Module.class.getClassLoader(),
+                new Class<?>[]{Module.class},
+                (proxy, method, args) -> {
+                    if ("getProject".equals(method.getName())) return environment.getProject();
+                    if ("getName".equals(method.getName())) return "app";
+                    if ("isDisposed".equals(method.getName())) return false;
+                    return null;
+                }
+        );
+    }
+
+    @Test
+    public void valuesXmlParsesEscapedStringsAndCdata() {
+        Path root = Path.of("/app").toAbsolutePath().normalize();
+        Path resDir = root.resolve("src/main/res");
+        Path stringsXmlPath = resDir.resolve("values/strings.xml");
+
+        String xmlContent = """
+                <resources>
+                  <string name="escaped_str">Line 1\\nLine 2\\tTab \\'quote\\' \\"double\\"</string>
+                  <string name="quoted_str">"  leading and trailing  "</string>
+                  <string name="unicode_str">Unicode \\u0041\\u0042</string>
+                  <string name="entities_str">&lt;b&gt;Bold&lt;/b&gt; &amp; &quot;quote&quot;</string>
+                  <string name="cdata_str"><![CDATA[<b>CDATA Content</b> & raw]]></string>
+                  <string name="formatted_str">Hello %1$s, count %2$d</string>
+                  <string name="ref_str">@string/other_str</string>
+                  <string-array name="item_list">
+                    <item>First\\nItem</item>
+                    <item>" Second Item "</item>
+                  </string-array>
+                </resources>
+                """;
+
+        XmlFile xmlFile = createXmlFile("strings.xml", xmlContent);
+        var inputs = new AndroidLintResources.Inputs(
+                List.of(resDir),
+                List.of(root.resolve("src/main/AndroidManifest.xml")),
+                null,
+                null,
+                "fp-values-strings",
+                true
+        );
+        AndroidLintModel model = new AndroidLintModel(
+                createLightModule(), null, root, root, "debug", null, 34, "android-34",
+                21, 34, "com.example.app", false, false, null, null,
+                List.of(), List.of(), "model-fp", "lint-fp", inputs
+        );
+
+        ResourceRepository repo = AndroidLintResources.getRepository(model, ResourceRepositoryScope.PROJECT_ONLY, stringsXmlPath, xmlFile);
+        ResourceNamespace ns = ResourceNamespace.fromPackageName("com.example.app");
+
+        List<ResourceItem> escapedItems = repo.getResources(ns, ResourceType.STRING, "escaped_str");
+        assertEquals(1, escapedItems.size());
+        assertEquals("Line 1\nLine 2\tTab 'quote' \"double\"", escapedItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> quotedItems = repo.getResources(ns, ResourceType.STRING, "quoted_str");
+        assertEquals("  leading and trailing  ", quotedItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> unicodeItems = repo.getResources(ns, ResourceType.STRING, "unicode_str");
+        assertEquals("Unicode AB", unicodeItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> entitiesItems = repo.getResources(ns, ResourceType.STRING, "entities_str");
+        assertEquals("<b>Bold</b> & \"quote\"", entitiesItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> cdataItems = repo.getResources(ns, ResourceType.STRING, "cdata_str");
+        assertEquals("<b>CDATA Content</b> & raw", cdataItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> formattedItems = repo.getResources(ns, ResourceType.STRING, "formatted_str");
+        assertEquals("Hello %1$s, count %2$d", formattedItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> refItems = repo.getResources(ns, ResourceType.STRING, "ref_str");
+        assertEquals("@string/other_str", refItems.get(0).getResourceValue().getValue());
+
+        List<ResourceItem> arrayItems = repo.getResources(ns, ResourceType.ARRAY, "item_list");
+        assertEquals(1, arrayItems.size());
+        var arrayVal = (com.android.ide.common.rendering.api.ArrayResourceValue) arrayItems.get(0).getResourceValue();
+        assertEquals(2, arrayVal.getElementCount());
+        assertEquals("First\nItem", arrayVal.getElement(0));
+        assertEquals(" Second Item ", arrayVal.getElement(1));
+    }
+
+    @Test
+    public void valuesXmlParsesAttrFormatsAndEnumFlagMetadata() {
+        Path root = Path.of("/app").toAbsolutePath().normalize();
+        Path resDir = root.resolve("src/main/res");
+        Path attrsXmlPath = resDir.resolve("values/attrs.xml");
+
+        String xmlContent = """
+                <resources>
+                  <attr name="customColor" format="reference|color" />
+                  <attr name="gravity">
+                    <flag name="top" value="0x01" />
+                    <flag name="bottom" value="0x02" />
+                    <flag name="fill" value="0x80000000" />
+                  </attr>
+                  <attr name="alignment">
+                    <enum name="left" value="1" />
+                    <enum name="right" value="2" />
+                  </attr>
+                  <declare-styleable name="CustomView">
+                    <attr name="customColor" />
+                    <attr name="mode" format="enum">
+                      <enum name="auto" value="0" />
+                      <enum name="manual" value="1" />
+                    </attr>
+                  </declare-styleable>
+                </resources>
+                """;
+
+        XmlFile xmlFile = createXmlFile("attrs.xml", xmlContent);
+        var inputs = new AndroidLintResources.Inputs(
+                List.of(resDir),
+                List.of(root.resolve("src/main/AndroidManifest.xml")),
+                null,
+                null,
+                "fp-values-attrs",
+                true
+        );
+        AndroidLintModel model = new AndroidLintModel(
+                createLightModule(), null, root, root, "debug", null, 34, "android-34",
+                21, 34, "com.example.app", false, false, null, null,
+                List.of(), List.of(), "model-fp", "lint-fp", inputs
+        );
+
+        ResourceRepository repo = AndroidLintResources.getRepository(model, ResourceRepositoryScope.PROJECT_ONLY, attrsXmlPath, xmlFile);
+        ResourceNamespace ns = ResourceNamespace.fromPackageName("com.example.app");
+
+        List<ResourceItem> customColorItems = repo.getResources(ns, ResourceType.ATTR, "customColor");
+        assertEquals(1, customColorItems.size());
+        AttrResourceValue customColor = (AttrResourceValue) customColorItems.get(0).getResourceValue();
+        assertTrue(customColor.getFormats().contains(AttributeFormat.COLOR));
+        assertTrue(customColor.getFormats().contains(AttributeFormat.REFERENCE));
+
+        List<ResourceItem> gravityItems = repo.getResources(ns, ResourceType.ATTR, "gravity");
+        assertEquals(1, gravityItems.size());
+        AttrResourceValue gravity = (AttrResourceValue) gravityItems.get(0).getResourceValue();
+        assertTrue(gravity.getFormats().contains(AttributeFormat.FLAGS));
+        assertEquals(Integer.valueOf(1), gravity.getAttributeValues().get("top"));
+        assertEquals(Integer.valueOf(2), gravity.getAttributeValues().get("bottom"));
+        assertEquals(Integer.valueOf(-2147483648), gravity.getAttributeValues().get("fill"));
+
+        List<ResourceItem> alignmentItems = repo.getResources(ns, ResourceType.ATTR, "alignment");
+        assertEquals(1, alignmentItems.size());
+        AttrResourceValue alignment = (AttrResourceValue) alignmentItems.get(0).getResourceValue();
+        assertTrue(alignment.getFormats().contains(AttributeFormat.ENUM));
+        assertEquals(Integer.valueOf(1), alignment.getAttributeValues().get("left"));
+        assertEquals(Integer.valueOf(2), alignment.getAttributeValues().get("right"));
+
+        List<ResourceItem> modeItems = repo.getResources(ns, ResourceType.ATTR, "mode");
+        assertEquals(1, modeItems.size());
+        AttrResourceValue modeAttr = (AttrResourceValue) modeItems.get(0).getResourceValue();
+        assertTrue(modeAttr.getFormats().contains(AttributeFormat.ENUM));
+        assertEquals(Integer.valueOf(0), modeAttr.getAttributeValues().get("auto"));
+        assertEquals(Integer.valueOf(1), modeAttr.getAttributeValues().get("manual"));
+    }
+
+    @Test
+    public void collectIdsFromTagUsesResourceUrlAndRejectsMalformed() {
+        Path root = Path.of("/app").toAbsolutePath().normalize();
+        Path resDir = root.resolve("src/main/res");
+        Path layoutXmlPath = resDir.resolve("layout/activity_main.xml");
+
+        String layoutContent = """
+                <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                    android:id="@+id/container">
+                  <Button android:id="@+id/btn_ok" />
+                  <Button android:id="@+android:id/button1" />
+                  <TextView android:id="@+id/" />
+                  <TextView android:id="@+id/123invalid" />
+                </LinearLayout>
+                """;
+
+        XmlFile xmlFile = createXmlFile("activity_main.xml", layoutContent);
+        var inputs = new AndroidLintResources.Inputs(
+                List.of(resDir),
+                List.of(root.resolve("src/main/AndroidManifest.xml")),
+                null,
+                null,
+                "fp-layout-ids",
+                true
+        );
+        AndroidLintModel model = new AndroidLintModel(
+                createLightModule(), null, root, root, "debug", null, 34, "android-34",
+                21, 34, "com.example.app", false, false, null, null,
+                List.of(), List.of(), "model-fp", "lint-fp", inputs
+        );
+
+        ResourceRepository repo = AndroidLintResources.getRepository(model, ResourceRepositoryScope.PROJECT_ONLY, layoutXmlPath, xmlFile);
+        ResourceNamespace ns = ResourceNamespace.fromPackageName("com.example.app");
+
+        assertTrue(repo.hasResources(ns, ResourceType.ID, "container"));
+        assertTrue(repo.hasResources(ns, ResourceType.ID, "btn_ok"));
+        assertFalse("App declarations must not inject into framework namespace", repo.hasResources(ResourceNamespace.ANDROID, ResourceType.ID, "button1"));
+        assertFalse(repo.hasResources(ns, ResourceType.ID, "button1"));
+        assertFalse(repo.hasResources(ns, ResourceType.ID, ""));
+        assertFalse(repo.hasResources(ns, ResourceType.ID, "123invalid"));
     }
 }
