@@ -167,18 +167,39 @@ dependencies {
 }
 
 tasks.named<Jar>("jar") {
-    archiveBaseName.set("intellij-android")
+    archiveBaseName.set("language-server.api.features.impl.android")
     archiveVersion.set("")
     archiveClassifier.set("")
+    exclude("META-INF/plugin.xml")
     entryCompression = ZipEntryCompression.STORED
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }
 
+val descriptorJar = tasks.register<Jar>("descriptorJar") {
+    archiveBaseName.set("language-server-plugins-android-lsp")
+    archiveVersion.set("")
+    archiveClassifier.set("")
+    from(tasks.named("processResources")) {
+        include("META-INF/plugin.xml")
+    }
+    entryCompression = ZipEntryCompression.STORED
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+tasks.named("assemble") {
+    dependsOn(descriptorJar)
+}
+
 abstract class StageExtensionTask : DefaultTask() {
     @get:InputFile
     @get:PathSensitive(PathSensitivity.NAME_ONLY)
-    abstract val builtJar: RegularFileProperty
+    abstract val descriptorJar: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NAME_ONLY)
+    abstract val moduleJar: RegularFileProperty
 
     @get:InputFiles
     @get:Classpath
@@ -198,44 +219,67 @@ abstract class StageExtensionTask : DefaultTask() {
 
     @TaskAction
     fun stage() {
-        val jarFile = builtJar.get().asFile
-        if (!jarFile.exists()) {
-            throw GradleException("Built JAR does not exist at: ${jarFile.absolutePath}")
+        val descFile = descriptorJar.get().asFile
+        if (!descFile.exists()) {
+            throw GradleException("Descriptor JAR does not exist at: ${descFile.absolutePath}")
+        }
+        val modFile = moduleJar.get().asFile
+        if (!modFile.exists()) {
+            throw GradleException("Module JAR does not exist at: ${modFile.absolutePath}")
         }
 
-        val upstreamJars = runtimeClasspath.files.filter { it.extension == "jar" && it != jarFile }
+        val upstreamJars = runtimeClasspath.files.filter { it.extension == "jar" && it != descFile && it != modFile }
         val expectedNames = expectedUpstreamNames.get()
         val actualNames = upstreamJars.map { it.name }.toSet()
         if (actualNames != expectedNames) {
             throw GradleException("Unexpected upstream runtime JARs: expected $expectedNames, got $actualNames")
         }
 
-        val allJars = listOf(jarFile) + upstreamJars.sortedBy { it.name }
+        data class StagedAsset(val file: File, val relPath: String)
+
+        val assetList = buildList {
+            add(StagedAsset(descFile, "lib/${descFile.name}"))
+            add(StagedAsset(modFile, "lib/modules/${modFile.name}"))
+            for (jar in upstreamJars.sortedBy { it.name }) {
+                add(StagedAsset(jar, "lib/${jar.name}"))
+            }
+        }
+
         val outDir = extensionDir.get().asFile
-        val targetLibDir = outDir.resolve("lib")
         val targetManifest = outDir.resolve("manifest.json")
 
         val workDir = temporaryDir.resolve("work-${UUID.randomUUID()}")
-        val stagingLibDir = workDir.resolve("staging/lib").apply { mkdirs() }
-        val stagedManifest = workDir.resolve("staging/manifest.json")
-        val rollbackLibDir = workDir.resolve("rollback/lib").apply { mkdirs() }
+        val stagingDir = workDir.resolve("staging").apply { mkdirs() }
+        val stagedManifest = stagingDir.resolve("manifest.json")
+        val rollbackDir = workDir.resolve("rollback").apply { mkdirs() }
+        var retainRollback = false
+
+        fun replaceFile(source: File, target: File) {
+            target.parentFile.mkdirs()
+            try {
+                Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
 
         try {
-            val assetRecords = allJars.map { jar ->
-                val stagedJar = stagingLibDir.resolve(jar.name)
-                jar.copyTo(stagedJar, overwrite = true)
+            val assetRecords = assetList.map { asset ->
+                val stagedJar = stagingDir.resolve(asset.relPath)
+                stagedJar.parentFile.mkdirs()
+                asset.file.copyTo(stagedJar, overwrite = true)
 
                 val bytes = stagedJar.readBytes()
                 val shaHex = MessageDigest.getInstance("SHA-256")
                     .digest(bytes)
                     .joinToString("") { "%02x".format(it) }
 
-                stagingLibDir.resolve("${jar.name}.sha256")
-                    .writeText("$shaHex *${jar.name}\n", Charsets.UTF_8)
+                stagingDir.resolve("${asset.relPath}.sha256")
+                    .writeText("$shaHex *${asset.file.name}\n", Charsets.UTF_8)
 
                 mapOf(
-                    "name" to jar.name,
-                    "path" to "lib/${jar.name}",
+                    "name" to asset.file.name,
+                    "path" to asset.relPath,
                     "sha256" to shaHex,
                     "size" to bytes.size
                 )
@@ -268,82 +312,74 @@ $assetsJson
             stagedManifest.writeText(manifestContent, Charsets.UTF_8)
 
             outDir.mkdirs()
-            targetLibDir.mkdirs()
 
-            val existingFiles = targetLibDir.listFiles()?.filter { it.isFile } ?: emptyList()
-            for (existing in existingFiles) {
-                Files.copy(
-                    existing.toPath(),
-                    rollbackLibDir.resolve(existing.name).toPath(),
-                    StandardCopyOption.REPLACE_EXISTING
-                )
+            if (outDir.exists()) {
+                val existingFiles = outDir.walkTopDown().filter { it.isFile }.toList()
+                for (existing in existingFiles) {
+                    val rel = existing.relativeTo(outDir).invariantSeparatorsPath
+                    val backup = rollbackDir.resolve(rel)
+                    backup.parentFile.mkdirs()
+                    Files.copy(existing.toPath(), backup.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
             }
 
-            var retainRollback = false
             try {
-                val stagedFiles = stagingLibDir.listFiles()?.sortedBy { it.name } ?: emptyList()
-                val stagedNames = stagedFiles.map { it.name }.toSet()
+                val stagedFiles = stagingDir.walkTopDown().filter { it.isFile && it != stagedManifest }.toList()
+                val stagedRelPaths = stagedFiles.map { it.relativeTo(stagingDir).invariantSeparatorsPath }.toSet() + "manifest.json"
 
                 for (stagedFile in stagedFiles) {
-                    val target = targetLibDir.resolve(stagedFile.name)
-                    Files.move(stagedFile.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    val rel = stagedFile.relativeTo(stagingDir).invariantSeparatorsPath
+                    val target = outDir.resolve(rel)
+                    replaceFile(stagedFile, target)
                 }
 
-                for (existing in existingFiles) {
-                    if (existing.name !in stagedNames) {
-                        Files.deleteIfExists(existing.toPath())
+                outDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                    val rel = file.relativeTo(outDir).invariantSeparatorsPath
+                    if (rel !in stagedRelPaths) {
+                        Files.deleteIfExists(file.toPath())
                     }
                 }
 
-                try {
-                    Files.move(
-                        stagedManifest.toPath(),
-                        targetManifest.toPath(),
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING
-                    )
-                } catch (_: AtomicMoveNotSupportedException) {
-                    Files.move(
-                        stagedManifest.toPath(),
-                        targetManifest.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING
-                    )
+                outDir.walkBottomUp().filter { it.isDirectory && it != outDir && it.listFiles()?.isEmpty() == true }.forEach {
+                    it.delete()
                 }
+                replaceFile(stagedManifest, targetManifest)
             } catch (failure: Throwable) {
                 try {
-                    targetLibDir.listFiles()?.forEach { it.delete() }
-                    rollbackLibDir.listFiles()?.forEach { backup ->
-                        Files.move(
-                            backup.toPath(),
-                            targetLibDir.resolve(backup.name).toPath(),
-                            StandardCopyOption.REPLACE_EXISTING
-                        )
+                    outDir.deleteRecursively()
+                    outDir.mkdirs()
+                    if (rollbackDir.exists()) {
+                        val backupFiles = rollbackDir.walkTopDown().filter { it.isFile }.toList()
+                        for (backup in backupFiles) {
+                            val rel = backup.relativeTo(rollbackDir).invariantSeparatorsPath
+                            val target = outDir.resolve(rel)
+                            replaceFile(backup, target)
+                        }
                     }
                 } catch (rollbackFailure: Exception) {
                     retainRollback = true
                     failure.addSuppressed(rollbackFailure)
                 }
                 if (retainRollback) {
-                    logger.error("Asset rollback failed! Manual recovery available at: $rollbackLibDir")
+                    logger.error("Asset rollback failed! Manual recovery available at: $rollbackDir")
                 }
                 throw failure
             }
         } finally {
-            if (!workDir.resolve("rollback/lib").exists() || workDir.listFiles()?.isEmpty() == true) {
-                workDir.deleteRecursively()
-            }
+            if (!retainRollback) workDir.deleteRecursively()
         }
 
-        logger.lifecycle("[stageExtension] Staged ${allJars.size} extension assets successfully to: $outDir")
+        logger.lifecycle("[stageExtension] Staged ${assetList.size} extension assets successfully to: $outDir")
     }
 }
 
 tasks.register<StageExtensionTask>("stageExtension") {
     group = "build"
     description =
-        "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/$targetVersion/intellij-android/"
+        "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/$targetVersion/android.lsp/"
 
-    builtJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
+    descriptorJar.set(tasks.named<Jar>("descriptorJar").flatMap { it.archiveFile })
+    moduleJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
     runtimeClasspath.from(configurations.named("runtimeClasspath"))
     expectedUpstreamNames.set(
         setOf(
@@ -363,5 +399,5 @@ tasks.register<StageExtensionTask>("stageExtension") {
     )
     serverVersion.set(targetVersion)
     gradleVersion.set(gradle.gradleVersion)
-    extensionDir.set(layout.projectDirectory.dir("../../resources/ils/$targetVersion/intellij-android"))
+    extensionDir.set(layout.projectDirectory.dir("../../resources/ils/$targetVersion/android.lsp"))
 }

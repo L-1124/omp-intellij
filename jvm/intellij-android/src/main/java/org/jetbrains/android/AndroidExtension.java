@@ -41,9 +41,11 @@ public final class AndroidExtension implements LanguageServerExtension {
         } catch (Throwable ignored) {
         }
 
-        var plugin = ((com.intellij.ide.plugins.cl.PluginAwareClassLoader) AndroidExtension.class.getClassLoader()).getPluginDescriptor();
-        if (!(plugin instanceof com.intellij.ide.plugins.PluginMainDescriptor descriptor))
-            throw new IllegalStateException("Android extension plugin descriptor unavailable");
+        if (!(AndroidExtension.class.getClassLoader() instanceof com.intellij.ide.plugins.cl.PluginAwareClassLoader loader)
+                || !(loader.getPluginDescriptor() instanceof com.intellij.ide.plugins.ContentModuleDescriptor module)) {
+            throw new IllegalStateException("Android extension content module descriptor unavailable");
+        }
+        com.intellij.ide.plugins.PluginMainDescriptor descriptor = module.parent;
         return new LSConfigurationPiece(
                 List.of(new AndroidDocumentSymbols(XML), new AndroidReferencesProvider(), new AndroidDefinitionProvider(), new ComposeSuppressor.Entry(), new AndroidDebugCommands(), new AndroidResourceCommands(), new org.jetbrains.android.navigation.AndroidCompiledResourceClassFinder.Entry(), new org.jetbrains.android.navigation.AndroidResourceNavigation.Entry(), new AndroidLintProvider()),
                 List.of(descriptor),
