@@ -1,0 +1,21 @@
+package org.jetbrains.android.resource
+
+object AndroidFolders {
+    private val VALUES = Regex(
+        "values" +
+            "(?:-mcc[0-9]{3})?(?:-mnc[0-9]{1,3})?" +
+            "(?:-(?:[a-z]{2,3}(?:-r(?:[A-Z]{2}|[0-9]{3}))?|b\\+[A-Za-z0-9]+(?:\\+[A-Za-z0-9]+)*))?" +
+            "(?:-(?:neuter|feminine|masculine))?(?:-(?:ldltr|ldrtl))?" +
+            "(?:-sw[1-9][0-9]*dp)?(?:-w[1-9][0-9]*dp)?(?:-h[1-9][0-9]*dp)?" +
+            "(?:-(?:small|normal|large|xlarge))?(?:-(?:long|notlong))?(?:-(?:round|notround))?" +
+            "(?:-(?:widecg|nowidecg))?(?:-(?:highdr|lowdr))?(?:-(?:port|land|square))?" +
+            "(?:-(?:car|desk|television|appliance|watch|vrheadset))?(?:-(?:night|notnight))?" +
+            "(?:-(?:ldpi|mdpi|tvdpi|hdpi|xhdpi|xxhdpi|xxxhdpi|nodpi|anydpi|[1-9][0-9]*dpi))?" +
+            "(?:-(?:notouch|finger|stylus))?(?:-(?:keysexposed|keyshidden|keyssoft))?" +
+            "(?:-(?:nokeys|qwerty|12key))?(?:-(?:navexposed|navhidden))?" +
+            "(?:-(?:nonav|dpad|trackball|wheel))?(?:-[1-9][0-9]*x[1-9][0-9]*)?(?:-v[1-9][0-9]*)?"
+    )
+
+    @JvmStatic
+    fun isValues(name: String): Boolean = VALUES.matches(name)
+}
