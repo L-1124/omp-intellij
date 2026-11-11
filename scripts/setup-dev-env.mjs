@@ -19,7 +19,31 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..');
 
-async function loadBundleMetadata() {
+export function resolveTargetVersion() {
+  const sourceMetadataPath = join(REPO_ROOT, 'src', 'server', 'bundle-metadata.ts');
+  if (existsSync(sourceMetadataPath)) {
+    try {
+      const text = readFileSync(sourceMetadataPath, 'utf8');
+      const m = text.match(/export\s+const\s+DEFAULT_SERVER_VERSION\s*=\s*['"]([^'"]+)['"]/);
+      if (m?.[1]) {
+        return m[1].trim();
+      }
+    } catch {}
+  }
+  const compiledBundlesPath = join(REPO_ROOT, 'dist', 'server', 'bundles.js');
+  if (existsSync(compiledBundlesPath)) {
+    try {
+      const text = readFileSync(compiledBundlesPath, 'utf8');
+      const m = text.match(/DEFAULT_SERVER_VERSION\s*=\s*['"]([^'"]+)['"]/);
+      if (m?.[1]) {
+        return m[1].trim();
+      }
+    } catch {}
+  }
+  return '271.2085.0';
+}
+
+export async function loadBundleMetadata() {
   try {
     const bundles = await import('../dist/server/bundles.js');
     const meta = await import('../dist/server/bundle-metadata.js');
@@ -35,8 +59,9 @@ async function loadBundleMetadata() {
   }
 }
 
-function parseArgs(args) {
+export function parseArgs(args) {
   let explicitHome = null;
+  const remaining = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--ils-home') {
@@ -47,12 +72,14 @@ function parseArgs(args) {
       explicitHome = next;
     } else if (arg.startsWith('--ils-home=')) {
       explicitHome = arg.slice('--ils-home='.length);
+    } else {
+      remaining.push(arg);
     }
   }
-  return { explicitHome };
+  return { explicitHome, remaining };
 }
 
-function verifyIlsHome(dir, expectedVersion) {
+export function verifyIlsHome(dir, expectedVersion) {
   if (!dir || !existsSync(dir)) return false;
   const buildTxt = join(dir, 'build.txt');
   if (!existsSync(buildTxt)) return false;
@@ -64,7 +91,28 @@ function verifyIlsHome(dir, expectedVersion) {
   }
 }
 
-function findExistingIlsHome(explicitHome, targetVersion) {
+export function resolveIlsJbr(ilsHome, platform = process.platform) {
+  if (!ilsHome || typeof ilsHome !== 'string') return null;
+  const jbrDir = join(ilsHome, 'jbr');
+  if (!existsSync(jbrDir)) return null;
+
+  if (platform === 'darwin') {
+    const macHome = join(jbrDir, 'Contents', 'Home');
+    const javaBin = join(macHome, 'bin', 'java');
+    if (existsSync(javaBin)) {
+      return macHome;
+    }
+  }
+
+  const isWin = platform === 'win32';
+  const javaExe = join(jbrDir, 'bin', isWin ? 'java.exe' : 'java');
+  if (existsSync(javaExe)) {
+    return jbrDir;
+  }
+  return null;
+}
+
+export function findExistingIlsHome(explicitHome, targetVersion) {
   if (explicitHome) {
     const resolved = resolve(explicitHome);
     if (!verifyIlsHome(resolved, targetVersion)) {
@@ -205,7 +253,7 @@ async function downloadIls(targetDir, { TARGET_VERSION, serverBundle, SERVER_BUN
   }
 }
 
-function updateLocalProperties(localPropsPath, normalizedHome) {
+export function updateLocalProperties(localPropsPath, normalizedHome) {
   mkdirSync(dirname(localPropsPath), { recursive: true });
   const propLine = `ils.home=${normalizedHome}`;
 
@@ -225,24 +273,22 @@ function updateLocalProperties(localPropsPath, normalizedHome) {
   writeFileSync(localPropsPath, content, 'utf8');
 }
 
-async function main() {
-  const metadata = await loadBundleMetadata();
-  const { TARGET_VERSION } = metadata;
-
-  const { explicitHome } = parseArgs(process.argv.slice(2));
-  let resolvedHome = findExistingIlsHome(explicitHome, TARGET_VERSION);
+export async function setupDevEnvironment({ explicitHome } = {}) {
+  const targetVersion = resolveTargetVersion();
+  let resolvedHome = findExistingIlsHome(explicitHome, targetVersion);
 
   if (!resolvedHome) {
     console.log(
-      `[setup-dev-env] ILS ${TARGET_VERSION} not found locally. Initiating fallback download...`,
+      `[setup-dev-env] ILS ${targetVersion} not found locally. Initiating fallback download...`,
     );
+    const metadata = await loadBundleMetadata();
     const finalTargetDir = join(
       homedir(),
       '.omp',
       'servers',
       'intellij',
       'versions',
-      TARGET_VERSION,
+      targetVersion,
     );
 
     await downloadIls(finalTargetDir, metadata);
@@ -258,9 +304,17 @@ async function main() {
   console.log(
     `[setup-dev-env] Development environment is ready for standard Gradle builds and IDE sync.`,
   );
+  return { ilsHome: resolvedHome, targetVersion };
 }
 
-main().catch((err) => {
-  console.error(`[setup-dev-env] ERROR: ${err.message}`);
-  process.exit(1);
-});
+async function main() {
+  const { explicitHome } = parseArgs(process.argv.slice(2));
+  await setupDevEnvironment({ explicitHome });
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((err) => {
+    console.error(`[setup-dev-env] ERROR: ${err.message}`);
+    process.exit(1);
+  });
+}
