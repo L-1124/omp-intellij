@@ -10,6 +10,7 @@ export * from './project/metadata.js';
 export * from './project/readiness.js';
 export * from './project/workspace.js';
 export * from './project/workspace-model.js';
+export * from './project/workspace-reimport.js';
 export * from './server/bundles.js';
 export * from './server/config.js';
 export * from './server/install.js';

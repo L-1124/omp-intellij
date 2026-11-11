@@ -1,5 +1,3 @@
-import type { LspSession } from '../debug/run-core.js';
-
 export const ANDROID_DEBUG_COMMANDS = {
   prepare: 'omp.android.debug.prepare',
   claim: 'omp.android.debug.claim',
@@ -59,7 +57,10 @@ export interface ReleaseAndroidDebugResult {
   reason?: string;
 }
 
-export type LspSessionLike = Pick<LspSession, 'request' | 'serverCapabilities'>;
+export interface LspSessionLike {
+  serverCapabilities?: Record<string, unknown>;
+  request: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
+}
 
 export function supportsAndroidDebugCommand(
   session: { serverCapabilities?: Record<string, unknown> } | null | undefined,

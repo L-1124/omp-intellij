@@ -17,6 +17,12 @@ import {
 } from '../project/readiness.js';
 import type { DiscoveredJdkItem } from '../project/workspace.js';
 import * as defaultWorkspaceApi from '../project/workspace.js';
+import { reimportWorkspace } from '../project/workspace-reimport.js';
+
+export type WorkspaceApi = typeof defaultWorkspaceApi & {
+  reimportWorkspace: typeof reimportWorkspace;
+};
+
 import { DEFAULT_SERVER_VERSION, serverBundle } from '../server/bundles.js';
 import {
   defaultInstallDir as defaultDefaultInstallDir,
@@ -149,7 +155,7 @@ export function formatLicenseSummary(license?: LicenseSummary): string {
 }
 
 export interface ExtensionOverrides {
-  workspaceApi?: typeof defaultWorkspaceApi | Partial<typeof defaultWorkspaceApi>;
+  workspaceApi?: WorkspaceApi | Partial<WorkspaceApi>;
   readinessApi?: Partial<{
     watchIndex: typeof watchIndex;
     findProjectRoot: typeof findProjectRoot;
@@ -189,7 +195,11 @@ export interface ExtensionOverrides {
 }
 
 export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverrides = {}) {
-  const wsApi = { ...defaultWorkspaceApi, ...overrides.workspaceApi };
+  const defaultWs: WorkspaceApi = {
+    ...defaultWorkspaceApi,
+    reimportWorkspace,
+  };
+  const wsApi = { ...defaultWs, ...overrides.workspaceApi };
   const watchIndexFn = overrides.readinessApi?.watchIndex ?? watchIndex;
   const findProjectRootFn = overrides.readinessApi?.findProjectRoot ?? findProjectRoot;
   const configApi = {

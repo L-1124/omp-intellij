@@ -29,6 +29,7 @@ import {
   validateEnvMap,
   validateJdk,
 } from '../src/project/workspace.js';
+import { reimportWorkspace } from '../src/project/workspace-reimport.js';
 import { asyncFramedStream, encode } from '../src/shared/protocol.js';
 
 async function createMockJdk(
@@ -1200,5 +1201,34 @@ test('workspace operations register systemPath for child process exit cleanup', 
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('reimportWorkspace validates project root and records failed connection receipt on unreachable server', async () => {
+  await assert.rejects(async () => reimportWorkspace(''), /Project root is required/);
+
+  const tmpRoot = await mkdtemp(join(tmpdir(), 'omp-reimport-test-'));
+  try {
+    const systemPath = join(tmpRoot, 'system');
+    const projectRoot = join(tmpRoot, 'proj');
+    await mkdir(systemPath, { recursive: true });
+    await mkdir(projectRoot, { recursive: true });
+
+    await assert.rejects(async () =>
+      reimportWorkspace(projectRoot, {
+        systemPath,
+        timeoutMs: 500,
+      }),
+    );
+
+    const receiptsDir = join(systemPath, 'plugin-metadata', 'receipts');
+    const canonical = canonicalizeProject(cleanPath(projectRoot));
+    const receiptFile = join(receiptsDir, `${canonical.id}.import-status.json`);
+    assert.equal(existsSync(receiptFile), true);
+    const receipt = JSON.parse(await readFile(receiptFile, 'utf8'));
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.stage, 'connect');
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
   }
 });

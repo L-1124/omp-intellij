@@ -3,8 +3,6 @@ import { type ProjectStateResult, readProjectState } from '../project/connection
 import { findProjectRoot } from '../project/readiness.js';
 import {
   getWorkspaceInfo as defaultGetWorkspaceInfo,
-  reimportWorkspace as defaultReimportWorkspace,
-  type ReimportWorkspaceResult,
   type WorkspaceInfo,
 } from '../project/workspace.js';
 import {
@@ -13,6 +11,10 @@ import {
   serializeWorkspaceModelError,
   type WorkspaceModelReport,
 } from '../project/workspace-model.js';
+import {
+  reimportWorkspace as defaultReimportWorkspace,
+  type ReimportWorkspaceResult,
+} from '../project/workspace-reimport.js';
 import { settings } from '../server/service.js';
 import type {
   ExtensionContext,
