@@ -247,7 +247,7 @@ com.jetbrains.lsp.implementation.LspResponseErrorException: Timed out waiting fo
 - **依赖组成**：
   - `adblib-9.4.1.jar`
   - `adblib-tools-9.4.1.jar`
-  - 资产位于 `resources/ils/271.2085.0/intellij-android/lib/`，不引入传递依赖，复用宿主运行时类加载器。
+  - 资产位于 `resources/ils/271.2085.0/android.lsp/lib/`，不引入传递依赖；实现模块通过显式依赖访问宿主提供的库。
 - **连接编排**：
   - `AdbSessionHost` 管理父会话，通过 `AdbServerController` 与本地 `adb.exe` 进程建立长连接。
   - 使用 `ConnectedDevicesTracker` 监听在线设备状态流（`StateFlow<ConnectedDeviceList>`）。

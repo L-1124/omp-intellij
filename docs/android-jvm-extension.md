@@ -2,8 +2,8 @@
 
 ## 核心结论
 
-1. **原生导入与 Android 语义扩展分工**：ILS `271.2085.0` 负责 Gradle Android 模型导入和 Java/Kotlin 编译诊断。独立 JVM 插件 `intellij-android.jar` 通过 `LanguageServerExtension` SPI 与 `plugin.xml` 补齐 XML 大纲、Manifest 类及资源声明的引用、`R.*` 源码优先导航、K2 `@Composable` 命名抑制，以及标准 `textDocument/diagnostic` 中的 `android-lint` 诊断。
-2. **插件 ID 对齐与互斥原则**：插件 ID 严格对齐官方 `org.jetbrains.android`。IntelliJ 平台 PluginManager 对同 ID 插件实行单例互斥加载，确保当前轻量级服务端按官方模块语义运行；未来若宿主动态注入官方完整插件，将自动触发单例互斥，杜绝类加载与扩展点双重注册冲突。
+1. **原生导入与 Android 语义扩展分工**：ILS `271.2085.0` 负责 Gradle Android 模型导入和 Java/Kotlin 编译诊断。`android.lsp` 插件通过 `language-server.api.features.impl.android` 内容模块中的 `LanguageServerExtension` SPI 补齐 XML 大纲、Manifest 类及资源声明的引用、`R.*` 源码优先导航、K2 `@Composable` 命名抑制，以及标准 `textDocument/diagnostic` 中的 `android-lint` 诊断。
+2. **插件 ID 与互斥目标**：保留官方 Android 插件 ID `org.jetbrains.android`，有意不支持与官方完整 Android 插件共存。主描述符声明内容模块；SPI、实现类及使用这些类的扩展声明放在实现模块中。
 3. **工程化与构建体系**：使用 `jvm/intellij-android/` 标准 Gradle 9.8.0 Java 工程。目标 ILS 版本从 `src/server/bundle-metadata.ts` 读取，编译工具链使用该 ILS 的 JBR 25（classfile 69）；`gradle.lockfile` 和 `verification-metadata.xml` 锁定依赖及摘要。`stageExtension` 生成 manifest 与 `.sha256`，运行时复用 `verifyExtensionDirectory` 验证清单、ABI、字节大小和哈希，不再依赖独立 `check-assets` 脚本。
 4. **源码审查优先于反编译推测**：本地实测横评 4 款现代反编译器（`jcdc`、`javajive`、`abyssflower`、`vinylite`）表明：`jcdc` 对 Java 21+ 语法（Sealed 类、Record、TWR、模式匹配）和内部类折叠还原度最高；`abyssflower` 凭借 `@Metadata` Protobuf 解析在 Kotlin 语法还原上断层领先；但任何反编译器在字节码脱糖、泛型擦除和架构设计意图上均存在不可逆失真。核心方案必须以官方开源仓库（`JetBrains/intellij-community`、`JetBrains/android` 提交 `544c9ef8`、AOSP `platform/tools/base`）作为第一权威依据，杜绝盲目依靠反编译黑盒猜解协议。
 
@@ -102,38 +102,13 @@
 ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 - **SPI 服务声明**：
-  在扩展 JAR 的 `META-INF/services/com.jetbrains.ls.api.features.LanguageServerExtension` 文件中声明实现类全限定名：
+  在 `lib/modules/language-server.api.features.impl.android.jar` 的 `META-INF/services/com.jetbrains.ls.api.features.LanguageServerExtension` 文件中声明实现类全限定名：
 
   ```text
   org.jetbrains.android.AndroidExtension
   ```
 - **接口定义与返回值**：
-
-  ```java
-  public final class AndroidExtension implements LanguageServerExtension {
-      static final LSLanguage XML = new LSLanguage("xml", XMLLanguage.INSTANCE, List.of("xml"));
-
-      @Override
-      public LSConfigurationPiece getConfiguration() {
-          var plugin = ((PluginAwareClassLoader) AndroidExtension.class.getClassLoader()).getPluginDescriptor();
-          if (!(plugin instanceof PluginMainDescriptor descriptor))
-              throw new IllegalStateException("Android extension plugin descriptor unavailable");
-
-          return new LSConfigurationPiece(
-              List.of(
-                  new AndroidDocumentSymbols(XML),
-                  new AndroidReferencesProvider(),
-                  new AndroidDefinitionProvider(),
-                  new AndroidResourceCommands(),
-                  new ComposeSuppressor.Entry(),
-                  new AndroidDebugCommands()
-              ),
-              List.of(descriptor),
-              List.of()
-          );
-      }
-  }
-  ```
+  `AndroidExtension` 实现 `LanguageServerExtension`，通过 `getConfiguration()` 返回 XML 符号、引用、定义、资源命令、Compose 抑制、Lint 与 Android 调试命令的提供者。实现类由内容模块加载，类加载器返回 `ContentModuleDescriptor`；使用其 `parent` 向 `LSConfigurationPiece` 提供主插件的 `PluginMainDescriptor`。
 - **运行时环境调优契约**：
   在 `getConfiguration()` 加载入口处，针对 Android 调试与运行时特征注入关键注册表项，防止调试挂死：
   1. `Registry.get("debugger.batch.evaluation").setValue(false)` 与 `debugger.batch.evaluation.force` 置为 `false`：防止 Android ART 虚拟机尝试加载宿主 JVM 特有的 `BatchEvaluatorServer.class` 导致类加载异常。
@@ -142,33 +117,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 2. 插件元数据与互斥原则（`plugin.xml`）
 
-- **元数据定义（`src/main/resources/META-INF/plugin.xml`）**：
-
-  ```xml
-  <idea-plugin>
-    <id>org.jetbrains.android</id>
-    <name>Android</name>
-    <version>2026.1107.0</version>
-    <vendor>L-1124</vendor>
-    <idea-version since-build="271"/>
-    <depends>org.jetbrains.ls.core</depends>
-    <depends>com.intellij.modules.platform</depends>
-    <depends>com.intellij.modules.java</depends>
-    <depends>org.jetbrains.ls.plugin.kotlin</depends>
-    <depends>org.jetbrains.ls.feature.xml</depends>
-    <projectListeners>
-      <listener class="org.jetbrains.android.debug.AndroidDebuggerListener"
-                topic="com.intellij.debugger.impl.DebuggerManagerListener"/>
-      <listener class="org.jetbrains.android.debug.AndroidDebuggerListener"
-                topic="com.intellij.xdebugger.XDebuggerManagerListener"/>
-    </projectListeners>
-    <extensions defaultExtensionNs="com.intellij">
-      <lang.directNavigationProvider implementation="org.jetbrains.android.navigation.AndroidResourceNavigation"/>
-      <lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.compose.ComposeSuppressor"/>
-      <debugger.fieldVisibilityProvider implementation="org.jetbrains.android.debug.AndroidFieldVisibilityProvider"/>
-    </extensions>
-  </idea-plugin>
-  ```
+- **主描述符**：`src/main/resources/META-INF/plugin.xml` 定义插件 ID、版本与宿主插件依赖，并通过 `<content>` 声明实现模块 `language-server.api.features.impl.android`。发布到描述符 JAR。
+- **模块描述符**：`src/main/resources/language-server.api.features.impl.android.xml` 声明实现模块的依赖、服务、监听器与扩展点。与实现类、SPI 声明一起发布到模块 JAR，使注册项使用模块类加载器。
 - **版本区间契约**：仅声明 `since-build="271"`，**绝对不设** `until-build`。因为 ILS 运行时的内部构建号固定为 `999.SNAPSHOT`（`idea.plugins.compatible.build=999.SNAPSHOT`），设置 `until-build` 会直接导致插件被平台标记为不兼容而被静默忽略。版本锁定统一交由外部启动层（`detectServerVersion`）精确校验 `271.2085.0`。
 - **插件 ID 互斥原则**：声明 `<id>org.jetbrains.android</id>`。IntelliJ 平台对插件 ID 保证全局唯一单例加载。当前 ILS 纯净无官方 Android 插件，使用该 ID 占位；若环境混入官方 Android 插件，平台会直接触发单插件实例互斥抛出加载异常，杜绝双重注入导致的扩展点与 ClassLoader 混乱。
 
@@ -259,11 +209,12 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 6. 构建资产清单与安全替换契约
 
-发布目录为 `resources/ils/271.2085.0/intellij-android/`，`lib/` 中包含下列 13 个 JAR，每个 JAR 都有同名 `.sha256`：
+发布目录为 `resources/ils/271.2085.0/android.lsp/`，共 14 个 JAR，每个 JAR 都有同目录的 `.sha256`。描述符与第三方依赖位于 `lib/`，实现模块位于 `lib/modules/`：
 
 | 依赖 | 固定文件名 |
 | --- | --- |
-| 自有插件 | `intellij-android.jar` |
+| 插件描述符 | `lib/language-server-plugins-android-lsp.jar` |
+| 实现模块 | `lib/modules/language-server.api.features.impl.android.jar` |
 | ADB | `adblib-9.4.1.jar`、`adblib-tools-9.4.1.jar` |
 | Lint | `lint-api-32.4.1.jar`、`lint-checks-32.4.1.jar`、`lint-model-32.4.1.jar` |
 | Manifest 来源映射 | `manifest-merger-32.4.1.jar` |
@@ -276,10 +227,10 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 依赖校验覆盖二进制、POM、Gradle module metadata、BOM 和 IDE 下载的源码包。新增依赖时，使用 `--write-verification-metadata sha256` 生成候选摘要，再核对官方仓库发布的摘要或签名；普通构建和 IDE 同步保持只校验，不自动接受新摘要。CLI 构建通过后，还需实际导入此 JVM 工程，覆盖 ILS 的模型与源码解析路径。
 
-宿主库存在于 ILS 安装目录不代表插件类加载器可访问。`plugin.xml` 显式声明公共模块 `intellij.libraries.asm`、`intellij.libraries.asm.tools` 与 `intellij.libraries.guava`；ASM Tree 的 `AbstractInsnNode` 位于 `asm.tools`。Lint 的 `Detector` 和内置规则仍引用 ASM 类型，单文件 Scope 过滤不会消除类链接依赖，因此保留这两个模块声明，不复制宿主 JAR。
+宿主库存在于 ILS 安装目录不代表插件类加载器可访问。主描述符与实现模块描述符都显式声明 `intellij.libraries.asm`、`intellij.libraries.asm.tools` 与 `intellij.libraries.guava`。`lib/` 中的 Lint JAR 由主插件加载，主插件需要直接访问这些宿主库；只给子模块声明依赖，无法让主插件反向访问。ASM Tree 的 `AbstractInsnNode` 位于 `asm.tools`，Lint 的 `Detector` 和内置规则仍引用它，单文件 Scope 过滤不会消除类链接依赖；继续使用宿主模块，不复制宿主 JAR。
 
-`manifest.json` 记录 ILS 版本、插件 ID、Java/classfile 版本、工具链，以及全部资产的名称、相对路径、SHA-256 和大小。实际发布清单见 [manifest.json](../resources/ils/271.2085.0/intellij-android/manifest.json)；Node 校验同时核对固定白名单与上游摘要，拒绝缺失、多余或被替换的文件。
-- **原子替换与回滚契约**：Gradle `stageExtension` 任务先将产物写入随机隔离目录 `.staging-<uuid>/`，备份老资产到 `.rollback-<uuid>/`，再执行原子移动。若中间任何文件校验失败，利用 rollback 目录完全回滚现有资产，最后原子替换 `manifest.json`。
+`manifest.json` 记录 ILS 版本、插件 ID、Java/classfile 版本、工具链，以及全部资产的名称、相对路径、SHA-256 和大小。实际发布清单见 [manifest.json](../resources/ils/271.2085.0/android.lsp/manifest.json)；Node 校验同时核对固定路径白名单与上游摘要，拒绝缺失、多余或被替换的文件，包括嵌套模块资产。
+- **替换与回滚契约**：Gradle `stageExtension` 先在任务临时目录的 `work-<uuid>/staging/` 中生成全部资产，并将现有文件备份到同级 `rollback/`。逐文件替换时优先使用原子移动，文件系统不支持时使用普通替换；移除过期文件后，最后替换 `manifest.json`。替换失败会恢复备份；回滚失败时保留临时目录供恢复，因此这不是整个目录的一次性原子切换。
 
 服务端版本升级后，先更新精确绑定的 ILS/VSIX 元数据，再执行 `npm run build:jvm`，最后运行 `npm run update-bundle -- --sync-marketplace --check`。检查失败即保留错误，不能只更新目录名或 manifest 来绕过 ABI 和第三方资产摘要。
 
@@ -352,7 +303,7 @@ cd jvm/intellij-android
 构建流程自动完成：
 1. `build.gradle.kts` 从 `local.properties` 读取 `ils.home`，并在配置阶段容错；
 2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
-3. 生成 STORED（零压缩）的 `intellij-android.jar` 及伴随的 `.sha256` 旁挂文件。
+3. 分别生成 STORED（零压缩）的插件描述符 JAR、实现模块 JAR，以及全部资产的 `.sha256` 旁挂文件。
 
 SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅加入 `java/`、`kotlin/`、`xml/`、`dap-jvm/` 下的 JAR，供 `compileOnly` 与 `testCompileOnly` 共用；`testRuntimeOnly` 仍保留完整 ILS SDK，以满足平台测试的运行时依赖。新增插件 API 依赖须显式扩展该范围并验证构建。此限制用于防止意外引用无关插件，不保证所用内部 API 稳定，也不改变 `plugin.xml` 依赖或发布包；兼容性仍由锁定 ILS 版本与真实集成验收保证。配置职责参见 [Gradle Java Plugin](https://docs.gradle.org/current/userguide/java_plugin.html)。
 
@@ -362,9 +313,9 @@ SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅
 1. `build.gradle.kts` 的 `options.release.set(25)` 强制保证 classfile 为 Java 25（Major 69）；
 2. `entryCompression = ZipEntryCompression.STORED` 保证零压缩；
 3. `gradle/verification-metadata.xml` 自动校验上游官方库的 SHA-256；
-4. `stageExtension` 任务自动生成 `manifest.json` 与伴随的 `.sha256` 签名文件。
+4. `stageExtension` 任务自动生成 `manifest.json` 与伴随的 `.sha256` 摘要文件。
 
-本轮最终回归：`npm test` 501/501；`npm run build:jvm` 成功并暂存三资产；独立 ILS 271 的 `android-xml.test.js` 27/27，无跳过；`npm pack --dry-run --json --ignore-scripts` 成功。实际 Android 导入、PSI 引用、错误/取消恢复均由上述隔离进程执行；共享用户 ILS 与 MyHook 源码保持不变。
+模块化迁移验证：TypeScript 构建与测试编译、JVM 测试及 `stageExtension` 均通过，暂存 14 项资产；资产解析测试 61/61，独立 ILS 271 的 XML、Compose 与 Lint 集成测试 49/49，无跳过。默认路径解析命中新发行目录；真实 ILS 已注册 Android 调试命令，离线设备探针确认 adblib 可加载并返回预期错误。完整真机 JDWP attach 尚未验证。
 
 集成测试同时隔离原生索引：`initialize.initializationOptions.indexDir` 指向测试沙箱的 `index/`，随沙箱统一回收。仅设置服务端 `systemPath` 仍会使用默认的用户索引缓存；验证资源查询时不能因此向共享缓存写入大量临时工程索引。
 
