@@ -5,7 +5,7 @@ import net from 'node:net';
 import { join } from 'node:path';
 import { canonicalizeProject, pathsEqual } from '../project/metadata.js';
 
-function isLoopbackIPv6(hostPart: string): boolean {
+export function isLoopbackIPv6(hostPart: string): boolean {
   if (!net.isIPv6(hostPart)) return false;
   try {
     const url = new URL(`http://[${hostPart}]`);
@@ -13,6 +13,28 @@ function isLoopbackIPv6(hostPart: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isLoopbackHost(host: string): boolean {
+  const trimmed = host.trim();
+  if (!trimmed) return false;
+  if (/[\s/@?#\\]/.test(trimmed)) return false;
+
+  if (trimmed.startsWith('[')) {
+    if (!trimmed.endsWith(']')) return false;
+    const inner = trimmed.slice(1, -1);
+    if (inner.includes('[') || inner.includes(']')) return false;
+    return isLoopbackIPv6(inner);
+  }
+
+  if (trimmed.includes(']')) return false;
+
+  const colonCount = (trimmed.match(/:/g) || []).length;
+  if (colonCount > 0) {
+    return isLoopbackIPv6(trimmed);
+  }
+  const lower = trimmed.toLowerCase();
+  return lower === '127.0.0.1' || lower === 'localhost';
 }
 
 function isValidPort(portStr: string): boolean {
@@ -48,11 +70,9 @@ export function isLoopbackHostHeader(hostHeader: string): boolean {
   } else if (colonCount === 1) {
     const [hostPart, portStr] = trimmed.split(':');
     if (!isValidPort(portStr)) return false;
-    const lower = hostPart.toLowerCase();
-    return lower === '127.0.0.1' || lower === 'localhost';
+    return isLoopbackHost(hostPart);
   } else {
-    const lower = trimmed.toLowerCase();
-    return lower === '127.0.0.1' || lower === 'localhost';
+    return isLoopbackHost(trimmed);
   }
 }
 

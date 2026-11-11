@@ -19,6 +19,8 @@ import {
   type DebugControlHandle,
   type DebugPhase,
   type DebugSnapshot,
+  isLoopbackHost,
+  isLoopbackIPv6,
 } from './control.js';
 import {
   createLspSession,
@@ -183,16 +185,6 @@ export function isDirectExecution(
     }
 
     return false;
-  } catch {
-    return false;
-  }
-}
-
-function isLoopbackIPv6(host: string): boolean {
-  if (!net.isIPv6(host)) return false;
-  try {
-    const url = new URL(`http://[${host}]`);
-    return url.hostname === '[::1]';
   } catch {
     return false;
   }
@@ -1032,7 +1024,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         if (command === 'attach') {
           const session = await openProject(projectRoot);
           if (
-            ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(hostName.toLowerCase()) &&
+            isLoopbackHost(hostName) &&
             supportsAndroidDebugCommand(session, ANDROID_DEBUG_COMMANDS.claim)
           ) {
             androidClaim = claimAndroidDebug(session, {
@@ -1181,21 +1173,17 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             request: 'launch',
             name: mainClass,
             mainClass,
+            file: fileUri,
+            tool: isGradleLaunch ? 'gradle' : 'java',
             ...(isGradleLaunch
               ? {
-                  buildToolTarget: {
-                    uri: fileUri,
-                    moduleName: paths.moduleName,
-                    projectPath:
-                      typeof args.projectPath === 'string' ? args.projectPath : undefined,
-                    sourceSet: typeof args.sourceSet === 'string' ? args.sourceSet : undefined,
-                    toolArgs: gradleArgs,
-                  },
+                  projectPath: typeof args.projectPath === 'string' ? args.projectPath : undefined,
+                  sourceSet: typeof args.sourceSet === 'string' ? args.sourceSet : undefined,
+                  toolArgs: gradleArgs,
                 }
               : {}),
             classPaths: paths.classpath || [],
             modulePaths: paths.modulePath || [],
-            moduleName: paths.moduleName,
             moduleContentPaths: paths.moduleContentPaths || [],
             javaExec: paths.javaExec,
             vmArgs: [

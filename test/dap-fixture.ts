@@ -357,7 +357,7 @@ export async function createDapTestHarness(
             sendLsp({ id: msg.id, result: dapPort }, socket);
             return;
           }
-          if (cmd === 'intellij.java.resolveBuildCommand') {
+          if (cmd === 'omp.jvm.resolveBuildCommand') {
             sendLsp(
               {
                 id: msg.id,
@@ -372,7 +372,7 @@ export async function createDapTestHarness(
             );
             return;
           }
-          if (cmd === 'intellij.java.resolveLaunch') {
+          if (cmd === 'omp.jvm.resolveLaunch') {
             sendLsp(
               {
                 id: msg.id,

@@ -799,7 +799,7 @@ export async function resolveBuildCommand(
 ): Promise<{ supported: boolean; command: string[]; cwd: string; tool: string; reason?: string }> {
   try {
     return (await lspSession.request('workspace/executeCommand', {
-      command: 'intellij.java.resolveBuildCommand',
+      command: 'omp.jvm.resolveBuildCommand',
       arguments: [{ uri: fileUri }],
     })) as { supported: boolean; command: string[]; cwd: string; tool: string; reason?: string };
   } catch (err: unknown) {
@@ -807,7 +807,7 @@ export async function resolveBuildCommand(
     if (altUri && altUri !== fileUri) {
       try {
         return (await lspSession.request('workspace/executeCommand', {
-          command: 'intellij.java.resolveBuildCommand',
+          command: 'omp.jvm.resolveBuildCommand',
           arguments: [{ uri: altUri }],
         })) as {
           supported: boolean;
@@ -835,7 +835,7 @@ export interface LaunchPaths {
 export async function resolveLaunch(lspSession: LspSession, fileUri: string): Promise<LaunchPaths> {
   try {
     return (await lspSession.request('workspace/executeCommand', {
-      command: 'intellij.java.resolveLaunch',
+      command: 'omp.jvm.resolveLaunch',
       arguments: [{ uri: fileUri }],
     })) as LaunchPaths;
   } catch (err: unknown) {
@@ -843,7 +843,7 @@ export async function resolveLaunch(lspSession: LspSession, fileUri: string): Pr
     if (altUri && altUri !== fileUri) {
       try {
         return (await lspSession.request('workspace/executeCommand', {
-          command: 'intellij.java.resolveLaunch',
+          command: 'omp.jvm.resolveLaunch',
           arguments: [{ uri: altUri }],
         })) as LaunchPaths;
       } catch {}
@@ -1380,9 +1380,10 @@ export async function runMain(
       request: 'launch',
       name: mainClass,
       mainClass,
+      file: fileUri,
+      tool: 'java',
       classPaths: paths.classpath || [],
       modulePaths: paths.modulePath || [],
-      moduleName: paths.moduleName,
       moduleContentPaths: paths.moduleContentPaths || [],
       javaExec: paths.javaExec,
       vmArgs,

@@ -138,7 +138,7 @@ test('resolveTestTarget with empty testIds selects CLASS over METHOD to prevent 
         },
       ];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return {
         javaExec: '/jdk-21/bin/java.exe',
         classpath: ['/app/target/classes', '/m2/junit-jupiter-api.jar'],
@@ -198,7 +198,7 @@ test('resolveTestTarget with empty testIds selects runnable METHODs when no runn
         },
       ];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
@@ -233,7 +233,7 @@ test('resolveTestTarget with explicit testIds bypasses file discovery', async ()
         },
       ];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
@@ -278,7 +278,7 @@ test('resolveTestTarget throws exact error when zero test launch specifications 
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
       return [];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
@@ -302,7 +302,7 @@ test('resolveTestTarget throws exact error when multiple launch specifications a
         { mainClass: 'RunnerB', args: [], runtimeClasspath: [] },
       ];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
@@ -332,7 +332,7 @@ test('resolveTestTarget merges classpath in order keeping first occurrence and p
         },
       ];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return {
         javaExec: '/bin/java',
         classpath: ['', '/app/classes', '/shared/common.jar', '/app/classes'],
@@ -356,7 +356,7 @@ test('resolveTestTarget throws when project classpath contains non-string entry'
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
       return [{ mainClass: 'com.example.Runner', args: [], runtimeClasspath: [] }];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return {
         javaExec: '/bin/java',
         classpath: ['/valid', 123 as unknown as string],
@@ -377,7 +377,7 @@ test('resolveTestTarget throws when project launch paths do not contain a valid 
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
       return [{ mainClass: 'com.example.Runner', args: [], runtimeClasspath: [] }];
     }
-    if (cmd.command === 'intellij.java.resolveLaunch') {
+    if (cmd.command === 'omp.jvm.resolveLaunch') {
       return { javaExec: '   ' } as unknown as LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);

@@ -310,7 +310,7 @@ export async function inspectWorkspaceModel(
     let launchPaths: LaunchPaths | null = null;
     const canAttemptLaunch =
       !session.serverCapabilities?.executeCommandProvider ||
-      sessionSupportsCommand(session, 'intellij.java.resolveLaunch');
+      sessionSupportsCommand(session, 'omp.jvm.resolveLaunch');
 
     if (canAttemptLaunch) {
       try {
@@ -340,7 +340,7 @@ export async function inspectWorkspaceModel(
         }
       } catch (err: unknown) {
         const isUnknown =
-          !sessionSupportsCommand(session, 'intellij.java.resolveLaunch') &&
+          !sessionSupportsCommand(session, 'omp.jvm.resolveLaunch') &&
           err &&
           typeof err === 'object' &&
           (('code' in err && (err.code === -32600 || err.code === -32601)) ||
@@ -376,7 +376,7 @@ export async function inspectWorkspaceModel(
 
     const canAttemptBuild =
       !session.serverCapabilities?.executeCommandProvider ||
-      sessionSupportsCommand(session, 'intellij.java.resolveBuildCommand');
+      sessionSupportsCommand(session, 'omp.jvm.resolveBuildCommand');
 
     if (canAttemptBuild) {
       try {
@@ -389,7 +389,7 @@ export async function inspectWorkspaceModel(
         buildResult = res;
       } catch (err: unknown) {
         const isUnknown =
-          !sessionSupportsCommand(session, 'intellij.java.resolveBuildCommand') &&
+          !sessionSupportsCommand(session, 'omp.jvm.resolveBuildCommand') &&
           err &&
           typeof err === 'object' &&
           (('code' in err && (err.code === -32600 || err.code === -32601)) ||

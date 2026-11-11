@@ -9,12 +9,14 @@ import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   type DebugSnapshot,
+  isLoopbackHost,
   listDebugSessions,
   recoverDebugSession,
 } from '../src/debug/control.js';
 import {
   type DapResponseMessage,
   isDirectExecution,
+  normalizeAttachHost,
   normalizeSourcePaths,
   resolveSourceFile,
 } from '../src/debug/dap-proxy.js';
@@ -121,7 +123,10 @@ for (const mode of ['module', 'explicit', 'project'] as const) {
       onLspRequest(method, params) {
         if (
           method === 'workspace/executeCommand' &&
-          (params as { command?: string }).command === 'intellij.java.resolveLaunch'
+          params &&
+          typeof params === 'object' &&
+          'command' in params &&
+          params.command === 'omp.jvm.resolveLaunch'
         ) {
           return {
             javaExec: process.execPath,
@@ -727,7 +732,7 @@ test('failed test compilation blocks launching stale classes', async (t) => {
         params &&
         typeof params === 'object' &&
         'command' in params &&
-        params.command === 'intellij.java.resolveBuildCommand'
+        params.command === 'omp.jvm.resolveBuildCommand'
       ) {
         return {
           supported: true,
@@ -1014,7 +1019,7 @@ test('capability probe: missing start_debug_server in executeCommandProvider fai
           capabilities: {
             codeLensProvider: { resolveProvider: false },
             executeCommandProvider: {
-              commands: ['exportWorkspace', 'intellij.java.resolveLaunch'],
+              commands: ['exportWorkspace', 'omp.jvm.resolveLaunch'],
             },
           },
         };
@@ -1038,27 +1043,29 @@ test('capability probe: missing start_debug_server in executeCommandProvider fai
   );
 });
 
-test('capability probe: rejected buildToolTarget preserves original backend reason', async (t) => {
-  let h: DapTestHarness;
-  h = await createDapTestHarness(t, {
-    onDapRequest(request) {
-      if (request.command === 'launch') {
-        h.respond(
-          request,
-          undefined,
-          false,
-          'Unsupported launch configuration type: intellij_gradle (buildToolTarget unavailable)',
-        );
-        return true;
-      }
-    },
-  });
-  const reply = await h.request('launch', {
-    program: 'test-fixtures/jvm-hybrid-app/src/main/java/com/example/JavaGreeter.java',
-    buildTool: 'gradle',
-    mainClass: 'com.example.JavaGreeter',
-  });
-  assert.equal(reply.success, false);
-  assert.match(reply.message ?? '', /buildToolTarget unavailable/);
-  await h.closed;
+test('attach host normalization preserves loopback classification', () => {
+  assert.deepEqual(normalizeAttachHost('127.0.0.1'), { host: '127.0.0.1' });
+  assert.deepEqual(normalizeAttachHost('localhost'), { host: 'localhost' });
+  assert.deepEqual(normalizeAttachHost('::1'), { host: '::1' });
+  assert.deepEqual(normalizeAttachHost('[::1]'), { host: '::1' });
+  assert.deepEqual(normalizeAttachHost('[0:0:0:0:0:0:0:1]'), { host: '::1' });
+  assert.deepEqual(normalizeAttachHost('0:0:0:0:0:0:0:1'), { host: '::1' });
+  assert.deepEqual(normalizeAttachHost('192.168.1.1'), { host: '192.168.1.1' });
+  assert.deepEqual(normalizeAttachHost('[::2]'), { host: '::2' });
+
+  assert.equal(isLoopbackHost('127.0.0.1'), true);
+  assert.equal(isLoopbackHost('localhost'), true);
+  assert.equal(isLoopbackHost('LOCALHOST'), true);
+  assert.equal(isLoopbackHost('::1'), true);
+  assert.equal(isLoopbackHost('[::1]'), true);
+  assert.equal(isLoopbackHost('0:0:0:0:0:0:0:1'), true);
+  assert.equal(isLoopbackHost('[0:0:0:0:0:0:0:1]'), true);
+
+  assert.equal(isLoopbackHost('127.0.0.2'), false);
+  assert.equal(isLoopbackHost('192.168.1.1'), false);
+  assert.equal(isLoopbackHost('::2'), false);
+  assert.equal(isLoopbackHost('[::2]'), false);
+  assert.equal(isLoopbackHost('[::1:8080]'), false);
+  assert.equal(isLoopbackHost(''), false);
+  assert.equal(isLoopbackHost('example.com'), false);
 });

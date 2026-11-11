@@ -8,6 +8,7 @@
     <plugin id="org.jetbrains.ls.core" />
     <plugin id="org.jetbrains.ls.plugin.xml" />
     <plugin id="org.jetbrains.ls.plugin.kotlin" />
+    <module name="intellij.java.execution" />
     <module name="intellij.libraries.asm" />
     <module name="intellij.libraries.asm.tools" />
     <module name="intellij.libraries.guava" />

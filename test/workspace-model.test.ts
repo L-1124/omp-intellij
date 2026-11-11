@@ -61,7 +61,7 @@ async function createTestServer(
           });
         } else if (msg.method === 'workspace/executeCommand' && msg.id !== undefined) {
           const params = msg.params as { command?: string; arguments?: unknown[] };
-          if (params.command === 'intellij.java.resolveLaunch') {
+          if (params.command === 'omp.jvm.resolveLaunch') {
             const resp = handlers.onLaunch
               ? handlers.onLaunch(msg.id)
               : {
@@ -74,7 +74,7 @@ async function createTestServer(
                 };
             if (resp !== undefined)
               socket.write(encode({ jsonrpc: '2.0', id: msg.id, ...(resp as object) }));
-          } else if (params.command === 'intellij.java.resolveBuildCommand') {
+          } else if (params.command === 'omp.jvm.resolveBuildCommand') {
             const resp = handlers.onBuild
               ? handlers.onBuild(msg.id)
               : {
@@ -711,7 +711,7 @@ test('workspace export failures remain visible instead of returning a complete m
     });
   }
 });
-test('workspace model handles missing intellij.java.resolveLaunch gracefully and enriches from exportWorkspace', async (t: TestContext) => {
+test('workspace model handles missing omp.jvm.resolveLaunch gracefully and enriches from exportWorkspace', async (t: TestContext) => {
   const projectDir = await mkdtemp(join(tmpdir(), 'omp-model-unknown-cmd-'));
   t.after(() => rm(projectDir, { recursive: true, force: true }));
   const sourceFile = join(projectDir, 'src', 'App.java');
@@ -725,7 +725,7 @@ test('workspace model handles missing intellij.java.resolveLaunch gracefully and
       },
     },
     onLaunch: () => ({
-      error: { code: -32600, message: 'Unknown command: intellij.java.resolveLaunch' },
+      error: { code: -32600, message: 'Unknown command: omp.jvm.resolveLaunch' },
     }),
     onExportWorkspace: async (_id, exportDir) => {
       await writeFile(

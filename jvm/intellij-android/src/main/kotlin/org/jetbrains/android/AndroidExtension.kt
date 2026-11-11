@@ -12,6 +12,7 @@ import com.jetbrains.ls.api.features.language.LSConfigurationPiece
 import com.jetbrains.ls.api.features.language.LSLanguage
 import org.jetbrains.android.compose.ComposeSuppressor
 import org.jetbrains.android.debug.AndroidDebugCommands
+import org.jetbrains.android.debug.JvmLaunchCommands
 import org.jetbrains.android.lint.AndroidLintProvider
 import org.jetbrains.android.navigation.AndroidCompiledResourceClassFinder
 import org.jetbrains.android.navigation.AndroidDefinitionProvider
@@ -45,9 +46,16 @@ class AndroidExtension : LanguageServerExtension {
                 ?: error("Android extension content module descriptor unavailable")
             return LSConfigurationPiece(
                 listOf(
-                    AndroidDocumentSymbols(XML), AndroidReferencesProvider(), AndroidDefinitionProvider(),
-                    ComposeSuppressor.Entry(), AndroidDebugCommands(), AndroidResourceCommands(),
-                    AndroidCompiledResourceClassFinder.Entry(), AndroidResourceNavigation.Entry(), AndroidLintProvider()
+                    AndroidDocumentSymbols(XML),
+                    AndroidReferencesProvider(),
+                    AndroidDefinitionProvider(),
+                    ComposeSuppressor.Entry(),
+                    AndroidDebugCommands(),
+                    AndroidResourceCommands(),
+                    AndroidCompiledResourceClassFinder.Entry(),
+                    AndroidResourceNavigation.Entry(),
+                    AndroidLintProvider(),
+                    JvmLaunchCommands()
                 ),
                 listOf(module.parent),
                 emptyList()
