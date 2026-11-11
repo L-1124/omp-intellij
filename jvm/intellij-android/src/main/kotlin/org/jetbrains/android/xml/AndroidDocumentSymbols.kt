@@ -12,7 +12,7 @@ import com.intellij.psi.xml.XmlTag
 import com.jetbrains.ls.api.core.LSServer
 import com.jetbrains.ls.api.core.features.LSDocumentSymbolCustomizer
 import com.jetbrains.ls.api.core.features.mapDeclaration
-import com.jetbrains.ls.api.features.impl.common.symbols.LSDocumentSymbolProviderPsiBase
+import com.jetbrains.ls.api.features.symbols.LSDocumentSymbolProvider
 import com.jetbrains.ls.api.features.language.LSLanguage
 import com.jetbrains.lsp.implementation.LspHandlerContext
 import com.jetbrains.lsp.protocol.DocumentSymbol
@@ -24,16 +24,14 @@ import kotlinx.coroutines.flow.Flow
 import org.jetbrains.android.context.AndroidContext
 import org.jetbrains.android.context.AndroidRequests
 
-class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProviderPsiBase(language) {
+class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProvider {
 
-    override fun createCustomizer(): LSDocumentSymbolCustomizer<PsiElement> {
-        return Customizer()
-    }
+    override val supportedLanguages: Set<LSLanguage> = setOf(language)
 
     context(server: LSServer, handlerContext: LspHandlerContext)
     override fun getDocumentSymbols(params: DocumentSymbolParams): Flow<DocumentSymbol> {
         return AndroidRequests.query(server, params.textDocument, Position(0, 0)) { _, file, _ ->
-            val customizer = createCustomizer()
+            val customizer = Customizer()
             val result = ArrayList<DocumentSymbol>()
             for (root in customizer.getRootDeclarations(file)) {
                 ProgressManager.checkCanceled()

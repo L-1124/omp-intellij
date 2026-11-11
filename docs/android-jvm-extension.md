@@ -4,7 +4,7 @@
 
 1. **原生导入与 Android 语义扩展分工**：ILS `271.2085.0` 负责 Gradle Android 模型导入和 Java/Kotlin 编译诊断。`android.lsp` 插件通过 `language-server.api.features.impl.android` 内容模块中的 `LanguageServerExtension` SPI 补齐 XML 大纲、Manifest 类及资源声明的引用、`R.*` 源码优先导航、K2 `@Composable` 命名抑制，以及标准 `textDocument/diagnostic` 中的 `android-lint` 诊断。
 2. **插件 ID 与互斥目标**：保留官方 Android 插件 ID `org.jetbrains.android`，有意不支持与官方完整 Android 插件共存。主描述符声明内容模块；SPI、实现类及使用这些类的扩展声明放在实现模块中。
-3. **工程化与构建体系**：使用 `jvm/intellij-android/` 标准 Gradle 9.8.0 Java 工程。目标 ILS 版本从 `src/server/bundle-metadata.ts` 读取，编译工具链使用该 ILS 的 JBR 25（classfile 69）；`gradle.lockfile` 和 `verification-metadata.xml` 锁定依赖及摘要。`stageExtension` 生成 manifest 与 `.sha256`，运行时复用 `verifyExtensionDirectory` 验证清单、ABI、字节大小和哈希，不再依赖独立 `check-assets` 脚本。
+3. **工程化与构建体系**：使用 `jvm/intellij-android/` 标准 Gradle 9.8.0 Kotlin/JVM 工程。目标 ILS 版本从 `src/server/bundle-metadata.ts` 读取，编译工具链使用该 ILS 的 JBR 25（classfile 69）；`gradle.lockfile` 和 `verification-metadata.xml` 锁定依赖及摘要。`stageExtension` 生成 manifest 与 `.sha256`，运行时复用 `verifyExtensionDirectory` 验证清单、ABI、字节大小和哈希，不再依赖独立 `check-assets` 脚本。
 4. **源码审查优先于反编译推测**：本地实测横评 4 款现代反编译器（`jcdc`、`javajive`、`abyssflower`、`vinylite`）表明：`jcdc` 对 Java 21+ 语法（Sealed 类、Record、TWR、模式匹配）和内部类折叠还原度最高；`abyssflower` 凭借 `@Metadata` Protobuf 解析在 Kotlin 语法还原上断层领先；但任何反编译器在字节码脱糖、泛型擦除和架构设计意图上均存在不可逆失真。核心方案必须以官方开源仓库（`JetBrains/intellij-community`、`JetBrains/android` 提交 `544c9ef8`、AOSP `platform/tools/base`）作为第一权威依据，杜绝盲目依靠反编译黑盒猜解协议。
 
 ### JVM 包结构
@@ -21,7 +21,9 @@
 | `lint`       | 官方源码级 Lint、模块模型、依赖规则与诊断缓存 |
 | `debug`      | JDWP 附加、调试命令、监听器与字段过滤    |
 
-跨包调用的类和成员显式公开；包内辅助方法保留包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 使用迁移后的入口路径。
+类和成员按调用边界使用 `public`、`internal` 或 `private`，不依赖 Java 的包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 使用迁移后的入口路径。
+
+内容模块仅声明宿主允许跨插件使用的依赖。ILS 271 中的 `language-server.analyzer.xml` 与 `language-server.api.features.impl.common` 为私有模块；跨插件依赖会使实现模块被拒绝加载，进而阻止声明式调试监听器运行。`AndroidDocumentSymbols` 直接实现公开的 `LSDocumentSymbolProvider`，通过 `supportedLanguages` 声明语言，复用公开的 `mapDeclaration` 映射。验收同时覆盖 SPI 功能与声明式扩展的实际加载。
 
 ---
 
@@ -34,21 +36,11 @@
 - **解决方案**：将注册操作延迟到 Application 容器就绪阶段。在 `AndroidExtension` 中暴露实现了 `WorkspaceComponentEntry` 的 `ComposeSuppressor.Entry`，内部绑定 `WorkspaceComponent` 单例；在平台生命周期回调 `registerInApplicationContainer(builder, application, state, kind, continuation)` 被调用时（此时 Application 已完全就绪），再执行 `ComposeSuppressor.registerOnce()`，并在 `plugin.xml` 声明 `<lang.inspectionSuppressor language="kotlin" implementationClass="org.jetbrains.android.compose.ComposeSuppressor"/>` 双重保底。
 - **实测对比**：修复前服务启动直接报 NPE 无法提供任何 Android 功能；修复后扩展在 Application 阶段无感注入，0 报错正常启动。
 
-### 2. K2 Analysis API 在 271 版本下的 API 废弃与编译器警告
+### 2. K2 Analysis API 的 Kotlin 调用边界
 
-- **问题现象**：在将扩展编译目标切至 ILS 271.2085.0 时，`javac -Xlint:deprecation` 抛出过时 API 警告：
+Java 的 JVM facade 类名与 Kotlin 可导入声明并不等价。Kotlin 实现直接使用顶层函数、扩展与会话 receiver；不导入 `AnalyzeKt`、`KaCallInfoKt` 等 facade。符号通过调用签名获取，不使用已废弃的 `partiallyAppliedSymbol`。
 
-  ```text
-  warning: [deprecation] analyze(KtElement,Function1) in AnalyzeKt has been deprecated
-  warning: [deprecation] getPartiallyAppliedSymbol() in KaFunctionCall has been deprecated
-  ```
-- **根因排查**：
-  1. Kotlin Analysis API（K2）在 IntelliJ 2024.3 / 2025.1（对应 271 构建号）进行了包结构收敛，原顶层入口 `org.jetbrains.kotlin.analysis.api.AnalyzeKt.analyze` 已标记废弃，要求统一迁移至 `org.jetbrains.kotlin.analysis.api.session.AnalyzeKt.analyze`。
-  2. `KaFunctionCall.getPartiallyAppliedSymbol()` 带有内部 `@SubclassOptInRequired` 限制，且在 K2 新版中要求直接从函数调用的签名中获取目标符号。
-- **解决方案**：
-  1. 将导入包切换为 `org.jetbrains.kotlin.analysis.api.session.AnalyzeKt.analyze`。
-  2. 简化符号提取路径：当 `session.resolveSymbol(entry)` 为空时，通过 `session.resolveToCall(entry)` 解析为 `KaCallInfo`，调用 `KaCallInfoKt.successfulConstructorCallOrNull(callInfo)` 获得 `KaFunctionCall<KaConstructorSymbol>`，并直接读取 `call.getSignature().getSymbol()`，避免经由 `partiallyAppliedSymbol` 的间接调用。
-- **实测对比**：在 `javac --release 25` 下实现 **0 错误、0 警告** 洁净编译，完全对齐 K2 Analysis API 271 规范。
+`ComposeSuppressor` 从原生 `analyze` 的 context 参数取得 `KaSession`，在该 receiver 上解析注解。文件级 `@OptIn(KaExperimentalApi::class)` 接受公开 API 的实验性契约，不绕过 Kotlin 的 `internal` 可见性。实际调用和空值边界以锁定 ILS 的 Kotlin 声明为准。
 
 ### 3. Manifest 类属性引用反查出现 XML 双引号与重复命中
 
@@ -171,38 +163,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 - **抑制目标**：Kotlin 检查项 `FunctionName` 与 `TestFunctionName`。
 - **判断契约**：
 
-  ```java
-  public boolean isSuppressedFor(PsiElement element, String toolId) {
-      if (!"FunctionName".equals(toolId) && !"TestFunctionName".equals(toolId)) return false;
-      if (element == null) return false;
-      PsiElement parent = element.getParent();
-      if (!(parent instanceof KtNamedFunction function)) return false;
-      if (function.getNameIdentifier() != element) return false;
-      if (function.getAnnotationEntries().isEmpty()) return false;
-      ProgressManager.checkCanceled();
-      Boolean isComposable = AnalyzeKt.analyze(function, session -> {
-          for (KtAnnotationEntry entry : function.getAnnotationEntries()) {
-              ProgressManager.checkCanceled();
-              KaConstructorSymbol constructor = session.resolveSymbol(entry);
-              if (constructor == null) {
-                  KaCallInfo callInfo = session.resolveToCall(entry);
-                  KaFunctionCall<KaConstructorSymbol> call = KaCallInfoKt.successfulConstructorCallOrNull(callInfo);
-                  if (call != null && call.getSignature() != null) {
-                      constructor = call.getSignature().getSymbol();
-                  }
-              }
-              if (constructor != null) {
-                  ClassId classId = constructor.getContainingClassId();
-                  if (classId != null && COMPOSABLE_CLASS_ID.equals(classId)) {
-                      return Boolean.TRUE;
-                  }
-              }
-          }
-          return Boolean.FALSE;
-      });
-      return isComposable != null && isComposable;
-  }
-  ```
+  使用 Kotlin 顶层 `analyze(function) { ... }` 进入 K2 会话，逐个注解调用 `entry.resolveSymbol()`；无法直接获得构造符号时，通过 `entry.resolveToCall()?.successfulConstructorCallOrNull()` 读取签名符号。仅当 `KaConstructorSymbol.containingClassId` 等于 `androidx.compose.runtime.Composable` 时返回 `true`。检查入口与注解遍历均调用 `ProgressManager.checkCanceled()`，保留原生取消传播。
 - **契约约束**：
   1. 仅当待检查元素为函数名标识符（`function.getNameIdentifier() == element`）时介入；
   2. 严格核验注解 ClassId 必须等于 `androidx.compose.runtime.Composable`；普通大写函数（如没有 `@Composable` 的大写函数）严禁放行，继续由原生检查报出警告。
@@ -305,23 +266,25 @@ cd jvm/intellij-android
 2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
 3. 分别生成 STORED（零压缩）的插件描述符 JAR、实现模块 JAR，以及全部资产的 `.sha256` 旁挂文件。
 
-Kotlin 源码使用 Kotlin JVM 2.4.20，与 Java 一同生成 Java 25 字节码；迁移期间两种源码共存。关闭自动添加标准库，编译与运行使用 ILS 自带的 Kotlin、协程及序列化库，不将它们加入发布资产。编译器依赖单独锁定并校验，插件标记 POM 使用 Gradle Plugin Portal 的发布内容；其余 Kotlin 构建资产已与 Maven Central 的原始文件核对 SHA-256。JVM 目标配置参见 [Kotlin compiler options](https://kotlinlang.org/docs/gradle-compiler-options.html)。
+生产实现与 JVM 测试均使用 Kotlin，源码分别位于 `src/main/kotlin` 和 `src/test/kotlin`。Kotlin JVM 2.4.20 编译为 Java 25 字节码，直接使用宿主 Kotlin 扩展函数、context 参数及协程 API。关闭自动添加标准库，编译与运行使用 ILS 自带的 Kotlin、协程及序列化库，不将它们加入发布资产。编译器依赖单独锁定并校验，插件标记 POM 使用 Gradle Plugin Portal 的发布内容；其余 Kotlin 构建资产已与 Maven Central 的原始文件核对 SHA-256。JVM 目标配置参见 [Kotlin compiler options](https://kotlinlang.org/docs/gradle-compiler-options.html)。
 
 SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅加入 `java/`、`kotlin/`、`xml/`、`dap-jvm/` 下的 JAR，供 `compileOnly` 与 `testCompileOnly` 共用；`testRuntimeOnly` 仍保留完整 ILS SDK，以满足平台测试的运行时依赖。新增插件 API 依赖须显式扩展该范围并验证构建。此限制用于防止意外引用无关插件，不保证所用内部 API 稳定，也不改变 `plugin.xml` 依赖或发布包；兼容性仍由锁定 ILS 版本与真实集成验收保证。配置职责参见 [Gradle Java Plugin](https://docs.gradle.org/current/userguide/java_plugin.html)。
 
 ### 2. 构建产物验证
 
 构建产物规范由 Gradle 原生保证：
-1. `build.gradle.kts` 的 `options.release.set(25)` 强制保证 classfile 为 Java 25（Major 69）；
+1. Kotlin 的 `jvmTarget = JVM_25` 与 Java 编译任务的 `options.release.set(25)` 保证 classfile 为 Java 25（Major 69）；
 2. `entryCompression = ZipEntryCompression.STORED` 保证零压缩；
 3. `gradle/verification-metadata.xml` 自动校验上游官方库的 SHA-256；
 4. `stageExtension` 任务自动生成 `manifest.json` 与伴随的 `.sha256` 摘要文件。
 
-模块化迁移验证：TypeScript 构建与测试编译、JVM 测试及 `stageExtension` 均通过，暂存 14 项资产；资产解析测试 61/61，独立 ILS 271 的 XML、Compose 与 Lint 集成测试 49/49，无跳过。默认路径解析命中新发行目录；真实 ILS 已注册 Android 调试命令，离线设备探针确认 adblib 可加载并返回预期错误。完整真机 JDWP attach 尚未验证。
+Kotlin 迁移验证：JVM 测试 96 项通过，`stageExtension` 暂存 14 项资产；资产解析测试 61/61，独立 ILS 271 的 XML、Compose 与 Lint 集成检查分组完成 49/49。`Pixel_10`（`emulator-5554`）上的正常启动调试场景通过：CLI prepare、DAP attach、断点、局部变量、Activity 字段、单步、detach 后原进程存活、幂等清理及无 ADB forward 泄漏。原生日志确认 Android 监听器启用同步 JDI、静音自动渲染器，并在 detach 后恢复 JDI 模式；物理真机尚未验收。
 
 集成测试同时隔离原生索引：`initialize.initializationOptions.indexDir` 指向测试沙箱的 `index/`，随沙箱统一回收。仅设置服务端 `systemPath` 仍会使用默认的用户索引缓存；验证资源查询时不能因此向共享缓存写入大量临时工程索引。
 
 ### 3. 反编译器选型横评与技术适用边界
+
+查询依赖的 Kotlin 声明、可见性和类型时，优先使用 ILS 原生 `workspace/executeCommand("decompile")`，传入定义查询返回的原始 `jar:` 或 `jrt:` URI；调用方式见 [协议文档](ils-protocol-and-lifecycle.md#5-虚拟源码与当前服务端能力)。返回内容标记为声明 stub 时，只能据此确认 API，不能推断方法实现。确需方法体而原生反编译未提供时，再使用下述 CLI 工具。
 
 在前期调研与逆向探索中，我们针对 4 款低 Star / 现代反编译 CLI 工具（3 款 Rust、1 款 Go）在同一基准测试集上进行了全面实测：
 
