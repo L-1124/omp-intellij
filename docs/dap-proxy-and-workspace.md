@@ -31,6 +31,46 @@
 
 ---
 
+## OMP agent 入口与模式选择
+
+OMP 原生 `debug` 的 `launch` 接收 `program`、`args`、`adapter`、`cwd` 和 `timeout` 等固定字段。当前工具 schema 未提供任意启动配置透传；`arguments` 专用于 `custom_request`。因此本插件保留多个模式预设，由 `launchDefaults` 注入 `testMode` 或 `buildTool`，共用一个 stdio 代理。不能直接向 `debug` 顶层添加这些专有字段，也不能通过额外的 `launch` 自定义请求绕过宿主握手。
+
+### 配置与参数边界
+
+- agent 按意图显式选择 `adapter`。自动发现依据文件扩展名和工程标记，无法判断同一源码路径的运行模式；`languages` 是描述元数据。
+- Gradle 参数 `gradleArgs`、`projectPath`、`sourceSet` 由项目 `.omp/dap.json` 中对应适配器的 `launchDefaults` 配置。`args` 始终保留所选模式的目标参数语义，不承担代理选项或 Gradle 命令行选项的传输。
+- `testMode`、`build`、`stopOnEntry`、`noDebug` 必须是布尔值；`args`、`vmArgs`、`gradleArgs` 必须是字符串数组。`buildTool` 仅接受 `"gradle"` 或省略；省略时沿用普通 JVM 构建解析，不代表工程必须使用某个构建工具。
+- `testMode: true` 与 `buildTool: "gradle"` 互斥。`gradleArgs`、`projectPath`、`sourceSet` 仅适用于 Gradle 启动，后两者必须是非空字符串。非法组合在连接 LSP、构建或启动调试器之前返回 DAP 失败响应。
+- 工程配置可以覆盖全局或插件提供的适配器配置，`launchDefaults` 和 `attachDefaults` 按字段合并，仅需声明差异项；显式调用的通用 `program`、`cwd`、`args` 由 OMP 组装到最终请求。覆盖预设时保留对应模式字段的含义，不能用字符串 `"true"` 代替布尔值。
+
+例如将 Gradle 工程属性作为构建工具参数传递，同时保留原有代理命令和模式：
+
+```json
+{
+  "adapters": {
+    "intellij-gradle": {
+      "launchDefaults": {
+        "gradleArgs": ["-PengineeringMessage=agent"]
+      }
+    }
+  }
+}
+```
+
+### 会话与附加
+
+OMP 原生 debug manager 同时维护一棵根调试会话树；多个适配器名称不会增加根会话并发能力。代理和 ILS 的多工程隔离支持多个客户端进程，不改变单个 OMP manager 的限制。
+
+入口暂停通过异步 `stopped` 事件确认。OMP 的初始暂停捕获窗口从发送 `launch` 前开始计算，构建耗时较长时，`launch` 可以先返回 `running`，随后才变为 `stopped`；agent 应通过 `sessions`、`threads` 等确认当前状态，再执行 `continue` 或读取栈帧。不能把一次 `running` 快照视为忽略了入口暂停。
+
+`terminated` 只表示会话结束。部分原生 Gradle 会话不报告 `exited`/`exitCode`；agent 应保留未知退出码，结合构建日志和测试报告判断结果，不能将缺失值当作 `0`。普通 JVM 和测试运行同样应核对实际退出码、失败输出或断言结果。
+
+JVM 或 Android JDWP 附加应显式指定 `adapter: "intellij"` 并提供 `host` 和 `port`。OMP 自动选择远程端口适配器时优先考虑 `debugpy`；本代理需要 JDWP 端口，不支持仅凭 PID 附加。Android 应先执行 prepare，再使用返回的回环代理地址；普通 JVM attach 无需 Android prepare。
+
+工具调用的 `timeout` 单位是秒，由 OMP 限制在 5 到 300 秒并受工具超时配置约束；适配器 `attachDefaults.timeout` 是 DAP 连接预算，两者分别生效。结束外部 JVM/Android 调试会话时保留目标进程，代理只释放自己拥有的连接和资源。
+
+注册声明来自 `.omp-plugin/marketplace.json`；插件加载时根据声明重新物化 `.dap.json` 并展开运行缓存路径。项目定制放在 `.omp/dap.json`，避免编辑会被重新生成的插件根配置。宿主契约参见 [OMP debug 文档](omp://tools/debug.md) 和 [marketplace 安装契约](omp://skills/authoring-marketplaces.md)。
+
 ## 踩坑记录与根因分析
 
 ### 1. IntelliJ Native DAP Disconnect 响应前关闭 Socket 导致虚假崩溃
