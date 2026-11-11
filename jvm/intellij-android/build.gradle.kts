@@ -8,6 +8,7 @@ import java.util.UUID
 
 plugins {
     java
+    kotlin("jvm") version "2.4.20"
 }
 
 val metadataFile = layout.projectDirectory.file("../../src/server/bundle-metadata.ts")
@@ -98,6 +99,12 @@ val compileSdkJars = ilsLibJars + fileTree(ilsHomeDir.resolve("plugins")) {
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(25))
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25)
     }
 }
 
@@ -257,7 +264,12 @@ abstract class StageExtensionTask : DefaultTask() {
         fun replaceFile(source: File, target: File) {
             target.parentFile.mkdirs()
             try {
-                Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                Files.move(
+                    source.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
             } catch (_: AtomicMoveNotSupportedException) {
                 Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
@@ -325,7 +337,8 @@ $assetsJson
 
             try {
                 val stagedFiles = stagingDir.walkTopDown().filter { it.isFile && it != stagedManifest }.toList()
-                val stagedRelPaths = stagedFiles.map { it.relativeTo(stagingDir).invariantSeparatorsPath }.toSet() + "manifest.json"
+                val stagedRelPaths =
+                    stagedFiles.map { it.relativeTo(stagingDir).invariantSeparatorsPath }.toSet() + "manifest.json"
 
                 for (stagedFile in stagedFiles) {
                     val rel = stagedFile.relativeTo(stagingDir).invariantSeparatorsPath
@@ -340,9 +353,10 @@ $assetsJson
                     }
                 }
 
-                outDir.walkBottomUp().filter { it.isDirectory && it != outDir && it.listFiles()?.isEmpty() == true }.forEach {
-                    it.delete()
-                }
+                outDir.walkBottomUp().filter { it.isDirectory && it != outDir && it.listFiles()?.isEmpty() == true }
+                    .forEach {
+                        it.delete()
+                    }
                 replaceFile(stagedManifest, targetManifest)
             } catch (failure: Throwable) {
                 try {

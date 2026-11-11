@@ -305,6 +305,8 @@ cd jvm/intellij-android
 2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
 3. 分别生成 STORED（零压缩）的插件描述符 JAR、实现模块 JAR，以及全部资产的 `.sha256` 旁挂文件。
 
+Kotlin 源码使用 Kotlin JVM 2.4.20，与 Java 一同生成 Java 25 字节码；迁移期间两种源码共存。关闭自动添加标准库，编译与运行使用 ILS 自带的 Kotlin、协程及序列化库，不将它们加入发布资产。编译器依赖单独锁定并校验，插件标记 POM 使用 Gradle Plugin Portal 的发布内容；其余 Kotlin 构建资产已与 Maven Central 的原始文件核对 SHA-256。JVM 目标配置参见 [Kotlin compiler options](https://kotlinlang.org/docs/gradle-compiler-options.html)。
+
 SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅加入 `java/`、`kotlin/`、`xml/`、`dap-jvm/` 下的 JAR，供 `compileOnly` 与 `testCompileOnly` 共用；`testRuntimeOnly` 仍保留完整 ILS SDK，以满足平台测试的运行时依赖。新增插件 API 依赖须显式扩展该范围并验证构建。此限制用于防止意外引用无关插件，不保证所用内部 API 稳定，也不改变 `plugin.xml` 依赖或发布包；兼容性仍由锁定 ILS 版本与真实集成验收保证。配置职责参见 [Gradle Java Plugin](https://docs.gradle.org/current/userguide/java_plugin.html)。
 
 ### 2. 构建产物验证
