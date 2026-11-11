@@ -264,7 +264,10 @@ export class IndexBarrier {
         }
       }
     }
-    if (message.method === 'workspace/didChangeWorkspaceFolders') {
+    if (
+      message.method === 'workspace/didChangeWorkspaceFolders' &&
+      this.state.workspaceFolderChangeNotifications
+    ) {
       this.fail('Workspace folders changed during index-readiness wait; retry after import');
       this.failure = null;
       this.failureKind = undefined;

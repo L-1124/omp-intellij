@@ -139,6 +139,7 @@ export interface StateRecord {
   generation: number;
   indexReadySeen?: boolean;
   indexingTokens?: unknown[];
+  workspaceFolderChangeNotifications?: boolean;
   failure?: FailureDetail;
   license?: LicenseSummary;
   systemPath?: string;
@@ -251,6 +252,7 @@ export function reduceConnectionState(
       next.detail = 'Initializing connection';
       next.indexReadySeen = false;
       next.indexingTokens = [];
+      next.workspaceFolderChangeNotifications = false;
       delete next.failure;
       delete next.license;
       if (message.id !== undefined) {
@@ -258,7 +260,8 @@ export function reduceConnectionState(
       }
       if (rootUri) next.rootUri = rootUri;
     } else if (
-      message.method === 'workspace/didChangeWorkspaceFolders' ||
+      (message.method === 'workspace/didChangeWorkspaceFolders' &&
+        current.workspaceFolderChangeNotifications) ||
       message.method === 'intellij/reloadWorkspace'
     ) {
       next.generation = (next.generation || 0) + 1;
@@ -281,6 +284,17 @@ export function reduceConnectionState(
       current.initializeRequestId !== null &&
       message.id === current.initializeRequestId &&
       !message.method;
+
+    if (isInitResponse && message.result && typeof message.result === 'object') {
+      const result = message.result as {
+        capabilities?: {
+          workspace?: { workspaceFolders?: { changeNotifications?: boolean | string } };
+        };
+      };
+      const changes = result.capabilities?.workspace?.workspaceFolders?.changeNotifications;
+      next.workspaceFolderChangeNotifications =
+        changes === true || (typeof changes === 'string' && changes.length > 0);
+    }
 
     if (
       isInitResponse &&

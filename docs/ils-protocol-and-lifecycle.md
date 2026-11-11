@@ -393,6 +393,8 @@ npm run update-bundle -- --sync-marketplace --check
 
 能力声明必须与实际宿主处理器配套。Bridge 保留宿主的编辑与模板能力，仅为本项目确实处理的进度和状态补充声明；以下示例省略宿主负责的编辑能力：
 
+`workspace/didChangeWorkspaceFolders` 只有在服务端声明 `workspace.workspaceFolders.changeNotifications` 为 `true` 或注册 ID 时才关闭索引屏障并进入重新导入状态。仅声明 `supported: true` 不代表订阅变更；ILS 271 当前不订阅此通知，收到它不会触发导入。显式 `intellij/reloadWorkspace` 仍按原流程等待导入和索引完成。
+
 ```json
 {
   "processId": 1234,

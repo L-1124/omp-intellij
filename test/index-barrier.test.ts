@@ -52,6 +52,61 @@ const query = (id: unknown, uri = 'file:///project/A.java') => ({
 
 const ready = { jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} };
 
+test('unadvertised workspace-folder changes preserve ready queries', () => {
+  const h = harness();
+  try {
+    h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+    h.server({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { capabilities: { workspace: { workspaceFolders: { supported: true } } } },
+    });
+    h.server(ready);
+    h.client({
+      jsonrpc: '2.0',
+      method: 'workspace/didChangeWorkspaceFolders',
+      params: { event: { added: [{ uri: 'file:///project/subdir', name: 'subdir' }], removed: [] } },
+    });
+    h.client(query(2));
+    assert.equal(h.barrier.getState().phase, 'ready');
+    assert.equal(h.barrier.getState().generation, 0);
+    assert.equal(h.barrier.pending.size, 0);
+    assert.ok(h.upstream.some((message) => message.id === 2));
+    assert.equal(h.downstream.some((message) => message.error), false);
+  } finally {
+    h.barrier.dispose();
+  }
+});
+
+test('advertised workspace-folder changes reject stale queries and await new readiness', () => {
+  for (const changeNotifications of [true, 'workspace-folder-registration']) {
+    const h = harness();
+    try {
+      h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
+      h.server({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { capabilities: { workspace: { workspaceFolders: { changeNotifications } } } },
+      });
+      h.client(query(2));
+      h.client({
+        jsonrpc: '2.0',
+        method: 'workspace/didChangeWorkspaceFolders',
+        params: { event: { added: [], removed: [{ uri: 'file:///old', name: 'old' }] } },
+      });
+      assert.equal(h.downstream.find((message) => message.id === 2)?.error?.code, -32803);
+      assert.equal(h.barrier.getState().phase, 'importing');
+      assert.equal(h.barrier.getState().generation, 1);
+      h.client(query(3));
+      assert.equal(h.upstream.some((message) => message.id === 3), false);
+      h.server(ready);
+      assert.ok(h.upstream.some((message) => message.id === 3));
+    } finally {
+      h.barrier.dispose();
+    }
+  }
+});
+
 test('initialize and import completion do not release queries before indexing readiness', () => {
   const h = harness();
   h.client({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { rootUri: 'file:///project' } });
