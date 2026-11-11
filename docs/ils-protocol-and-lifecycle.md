@@ -453,7 +453,11 @@ MyHook 实测：`MainActivity.kt` 的 `ComponentActivity` 定义指向 Gradle �
 
 读取后继续执行 `workspace/symbol("ComponentActivity")` 返回 7 个真实符号，包含相应依赖 URI；直接在该 class URI 上的 documentSymbol、hover、references 本次返回空结果。虚拟源码读取不承诺所有文件级 LSP 方法均支持反编译文档，继续追踪可使用工作区符号及原业务调用位置的语义查询。
 
-ILS `271.2085.0` 的本次实例未广告 `intellij.java.resolveLaunch` 和 `intellij.java.resolveBuildCommand`。模型检查按能力选择 `exportWorkspace`，返回实际模块、源集和 SDK；缺少运行构建接口时明确报告不支持，不伪造 classpath 或运行命令。MyHook 实测模块为 `MyHook.app.debug`，聚合根仍为工程根。
+运行模型通过 JVM 扩展提供的 `omp.jvm.resolveLaunch` 和 `omp.jvm.resolveBuildCommand` 查询。前者沿用 IntelliJ 官方 `JavaParameters` 的 SDK 选择和 `OrderEnumerator` 运行时依赖过滤规则，读取导入模块的实际 JDK、classpath 和工作目录；后者根据导入的 Gradle/Maven 模块确定实际构建目标。TypeScript 只适配协议、执行构建并管理取消与进程所有权。未安装扩展或服务端未广告这些命令时，模型检查可通过 `exportWorkspace` 返回模块、源集和 SDK，但不伪造运行 classpath 或构建命令。
+
+与完整 IDE 不同，ILS 导入的 SDK 可能尚无 home VFS 节点，且未启用 `CompilerModuleExtension` 或注册 `NativeLibraryOrderRootType`。适配器使用显式 SDK 重载并验证其 Java 可执行文件，通过公开 `getEnumeratedEntries()` 保留原生依赖顺序、作用域与 production/test 标志，再从工作区 `JavaModuleSettingsEntity` 读取实际编译输出 URL。这样可保留尚未生成或 VFS 尚未物化的输出路径，不替换为宿主 JBR、PATH Java 或猜测的输出目录。规则来源见 [JavaParameters.java](https://github.com/JetBrains/intellij-community/blob/master/java/execution/openapi/src/com/intellij/execution/configurations/JavaParameters.java) 与 [OrderRootComputer.java](https://github.com/JetBrains/intellij-community/blob/master/platform/projectModel-impl/src/com/intellij/openapi/roots/impl/OrderRootComputer.java)，宿主签名以固定 ILS SDK 为准。
+
+原生 JVM 启动参数中的 `moduleName` 表示 JPMS 模块名，不能传入导入工程的模块标识。适配器以 `file` 消歧所属模块，并将该模块的实际编译输出置于依赖输出之前，避免依赖中同名主类抢占目标。直接 JVM 启动显式指定 `tool: "java"`；Gradle 启动指定 `tool: "gradle"`，并使用原生顶层 `projectPath`、`sourceSet`、`toolArgs`，不发送旧的嵌套 `buildToolTarget`。
 
 ### 6. 构建配置刷新
 
@@ -474,10 +478,3 @@ Windows 源 URI 必须与源工作区初始化使用的 URI 一致。最初重�
 对当前 Windows ILS 官方归档的中央目录进行只读 Range 检查：共 1235 个条目，根目录直接包含 `build.txt` 与 `bin/intellij-server.exe`。当前开发下载脚本按直铺格式验证该发行包成立；这份证据不外推为所有未来归档布局。
 
 `clean-runtime.mjs` 仍按 OMP、Node、Bun、Java 等进程名保守阻断实际删除，可能要求先关闭无关运行时。此策略保留，以避免无法证明未占用时删除运行资产；`--dry-run` 可在消费者活跃时查看候选，`.lsp.json` 和 `.dap.json` 引用的哈希目录始终受保护。
-
-### 9. 本轮验收与保留边界
-
-- `npm test`：501 项通过，无失败、取消或跳过。独立启动 Bridge 验证了握手、请求取消、继续透传与 EOF 退出。
-- 真实 MyHook 模型返回 `MyHook.app.debug` 及对应源码根；当前服务端未提供运行构建接口，Java 执行路径明确返回不支持，不从工作区 SDK 猜测。
-- 隔离连接目录与真实已退出子进程验证：活跃连接优先、过期死亡连接回收、损坏 JSON 隔离并输出诊断。WSL Ubuntu 的实际大小写敏感目录验证了身份隔离与旧配置归属迁移。
-- 受维护源码、脚本及本轮文档的 Biome 检查通过。根目录 README 按用户要求保持原样，其原有格式差异仍会使全仓 `npm run check` 报错；不通过排除文件掩盖该结果。

@@ -11,15 +11,15 @@
 
 `org.jetbrains.android` 根包仅保留 SPI 入口 `AndroidExtension`，其余实现按职责分包：
 
-| 子包         | 职责                                     |
-| ------------ | ---------------------------------------- |
-| `context`    | 模块环境、文件角色、请求上下文与查询异常 |
-| `xml`        | XML 属性解析与文档大纲                   |
-| `navigation` | 定义、引用、Manifest 目标与资源直达导航  |
-| `resource`   | 资源解析、源集目录、布局与源码读取       |
-| `compose`    | Compose 命名检查抑制                     |
+| 子包         | 职责                                          |
+| ------------ | --------------------------------------------- |
+| `context`    | 模块环境、文件角色、请求上下文与查询异常      |
+| `xml`        | XML 属性解析与文档大纲                        |
+| `navigation` | 定义、引用、Manifest 目标与资源直达导航       |
+| `resource`   | 资源解析、源集目录、布局与源码读取            |
+| `compose`    | Compose 命名检查抑制                          |
 | `lint`       | 官方源码级 Lint、模块模型、依赖规则与诊断缓存 |
-| `debug`      | JDWP 附加、调试命令、监听器与字段过滤    |
+| `debug`      | JDWP 附加、调试命令、监听器与字段过滤         |
 
 类和成员按调用边界使用 `public`、`internal` 或 `private`，不依赖 Java 的包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 使用迁移后的入口路径。
 
@@ -116,7 +116,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 3. Android XML DocumentSymbols 协议映射
 
-实现 `LSDocumentSymbolProviderPsiBase`，通过 `LSDocumentSymbolCustomizer<PsiElement>` 遍历 XML PSI 树生成符号：
+实现公开的 `LSDocumentSymbolProvider`，通过 `LSDocumentSymbolCustomizer<PsiElement>` 遍历 XML PSI 树，并用公开的 `mapDeclaration` 生成符号：
 
 | 语义节点         | XML 标签条件                                                               | LSP `SymbolKind` | 名称提取来源            | 说明                      |
 | ---------------- | -------------------------------------------------------------------------- | ---------------- | ----------------------- | ------------------------- |
@@ -172,17 +172,17 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 发布目录为 `resources/ils/271.2085.0/android.lsp/`，共 14 个 JAR，每个 JAR 都有同目录的 `.sha256`。描述符与第三方依赖位于 `lib/`，实现模块位于 `lib/modules/`：
 
-| 依赖 | 固定文件名 |
-| --- | --- |
-| 插件描述符 | `lib/language-server-plugins-android-lsp.jar` |
-| 实现模块 | `lib/modules/language-server.api.features.impl.android.jar` |
-| ADB | `adblib-9.4.1.jar`、`adblib-tools-9.4.1.jar` |
-| Lint | `lint-api-32.4.1.jar`、`lint-checks-32.4.1.jar`、`lint-model-32.4.1.jar` |
-| Manifest 来源映射 | `manifest-merger-32.4.1.jar` |
-| Android 工具 API | `common-32.4.1.jar`、`sdklib-32.4.1.jar`、`sdk-common-32.4.1.jar` |
-| 资源类型 API | `layoutlib-api-32.4.1.jar` |
-| XML pull parser | `kxml2-2.3.0.jar` |
-| Groovy 语法 AST | `groovy-4.0.29.jar` |
+| 依赖              | 固定文件名                                                               |
+| ----------------- | ------------------------------------------------------------------------ |
+| 插件描述符        | `lib/language-server-plugins-android-lsp.jar`                            |
+| 实现模块          | `lib/modules/language-server.api.features.impl.android.jar`              |
+| ADB               | `adblib-9.4.1.jar`、`adblib-tools-9.4.1.jar`                             |
+| Lint              | `lint-api-32.4.1.jar`、`lint-checks-32.4.1.jar`、`lint-model-32.4.1.jar` |
+| Manifest 来源映射 | `manifest-merger-32.4.1.jar`                                             |
+| Android 工具 API  | `common-32.4.1.jar`、`sdklib-32.4.1.jar`、`sdk-common-32.4.1.jar`        |
+| 资源类型 API      | `layoutlib-api-32.4.1.jar`                                               |
+| XML pull parser   | `kxml2-2.3.0.jar`                                                        |
+| Groovy 语法 AST   | `groovy-4.0.29.jar`                                                      |
 
 所有 Maven 运行依赖均关闭传递解析；不分发 `lint-psi`、UAST 或 standalone Kotlin 编译器。ILS 未提供资源仓库类型，`sdk-common` 与 `layoutlib-api` 共同支撑资源仓库接口与值类型，不能只放在编译 classpath。
 
@@ -225,12 +225,12 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 独立 JVM 探针已跑通 `ContentDescription`、`HardcodedText`、`HardcodedDebugMode`、祖先 `tools:ignore` 和内存修复，并复现未落盘文件被跳过、默认 merged Manifest 忽略内存修改、多行属性值结束行号错误。探针显式提供项目和规则，结果不等同于真实 ILS 接入或完整资源模型验收。
 
-| 官方机制 | 本项目适配 |
-| --- | --- |
-| `Implementation.isAdequate` 判定单文件分析范围 | 不扩大为全项目 Scope，Java/Kotlin 保持原有入口 |
-| PSI-backed W3C DOM 与原始节点范围 | 复用当前文档快照；DOM 元数据独立于只读 PSI，不能因“只读”拒绝 Lint 的 `setUserData` |
-| 按范围查询资源仓库 | 当前模块、项目依赖、AAR、framework 分开组织；模型无法确认时返回明确错误 |
-| `BlameFile` 与 Manifest Merger 节点键 | 增加同版本官方 `manifest-merger:32.4.1`，校验变体与输入有效性；Clean 态保留源文件检查，不自行拼接合并清单 |
+| 官方机制                                       | 本项目适配                                                                                                |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `Implementation.isAdequate` 判定单文件分析范围 | 不扩大为全项目 Scope，Java/Kotlin 保持原有入口                                                            |
+| PSI-backed W3C DOM 与原始节点范围              | 复用当前文档快照；DOM 元数据独立于只读 PSI，不能因“只读”拒绝 Lint 的 `setUserData`                        |
+| 按范围查询资源仓库                             | 当前模块、项目依赖、AAR、framework 分开组织；模型无法确认时返回明确错误                                   |
+| `BlameFile` 与 Manifest Merger 节点键          | 增加同版本官方 `manifest-merger:32.4.1`，校验变体与输入有效性；Clean 态保留源文件检查，不自行拼接合并清单 |
 
 用户确认的保存边界：当前拉取文件的未保存内容即时参与诊断；关联资源、配置和其他清单按磁盘读取，保存后刷新；新文件首次保存后检查。输出前在新分析上下文中复核当前文档内容，避免上下文外访问快照 Document。
 
@@ -242,7 +242,6 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 - 合并节点无法映射时不返回源文件位置；源文件未保存或晚于合并产物时回退到当前源 DOM。
 - 资源、关联 Gradle 脚本及配置读取保存态；指纹覆盖依赖文件内容、中间层 `lint.xml`，以及合并清单/merger 日志的存在性、内容和时间戳。生成合并产物后，即使主文档未改动，也会重新运行检查。
 - 资源字符串解码复用 `ValueXmlHelper.unescapeResourceString`，attr 格式与 enum/flag 元数据复用 `AttributeFormat`；资源引用复用 `ResourceUrl.parse` 和官方名称校验。只将无 namespace 的模块自有 `@+id` 收入声明表，避免 `@+android:id` 污染 framework 或模块资源。
-
 
 ---
 
@@ -278,9 +277,9 @@ SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅
 3. `gradle/verification-metadata.xml` 自动校验上游官方库的 SHA-256；
 4. `stageExtension` 任务自动生成 `manifest.json` 与伴随的 `.sha256` 摘要文件。
 
-Kotlin 迁移验证：JVM 测试 96 项通过，`stageExtension` 暂存 14 项资产；资产解析测试 61/61，独立 ILS 271 的 XML、Compose 与 Lint 集成检查分组完成 49/49。`Pixel_10`（`emulator-5554`）上的正常启动调试场景通过：CLI prepare、DAP attach、断点、局部变量、Activity 字段、单步、detach 后原进程存活、幂等清理及无 ADB forward 泄漏。原生日志确认 Android 监听器启用同步 JDI、静音自动渲染器，并在 detach 后恢复 JDI 模式；物理真机尚未验收。
+集成测试同时隔离原生索引：共享 LSP 测试驱动默认将 `initialize.initializationOptions.indexDir` 设置为沙箱的 `index/<project-id>/`，保留显式初始化选项；CLI/DAP 创建的会话从沙箱工程配置中读取相同的 `rawInitializationOptions`。不同工程使用独立索引目录，索引随沙箱统一回收。仅设置服务端 `systemPath` 不会改变原生索引位置。Gradle 分发包与依赖缓存从已有缓存复制到沙箱，排除锁与未完成下载；构建、导入和清理始终使用沙箱拥有的 Gradle User Home。
 
-集成测试同时隔离原生索引：`initialize.initializationOptions.indexDir` 指向测试沙箱的 `index/`，随沙箱统一回收。仅设置服务端 `systemPath` 仍会使用默认的用户索引缓存；验证资源查询时不能因此向共享缓存写入大量临时工程索引。
+沙箱统一将现有 `OMP_ANDROID_LS_EXTENSION_DIR` 指向本仓库当前暂存的扩展资产，同时覆盖进程内模型查询与 Bridge/DAP 子进程，避免 `dist-test/src` 的相对路径误用 `dist-test/resources`。原生基线显式使用空扩展目录，不能依赖资产路径缺失来禁用插件。
 
 ### 3. 反编译器选型横评与技术适用边界
 
@@ -342,22 +341,3 @@ Kotlin 迁移验证：JVM 测试 96 项通过，`stageExtension` 暂存 14 项�
 - **Android Studio 调试与 ADB 链路**：
   查阅 Google AOSP `platform/tools/base`（分支 `mirror-goog-studio-main`）：
   - `adblib` / `adblib-tools`：查阅 `AdbSession`、`ConnectedDevicesTracker`、`JdwpProcessTracker` 和 JDWP proxy loopback 的协程生命周期与关闭释放规则，杜绝自行手写 ADB forward 导致的端口泄漏。
-
-## 验收记录（2026-11-09）
-
-- `jvm/intellij-android/gradlew.bat -p jvm/intellij-android test stageExtension --rerun-tasks --no-daemon`：通过，包含字面量/动态/变体前提、XML 配置、规则隔离、UTF-16 映射和空资源仓库测试，生成 11 项资产。
-- `npm test`：549 项通过，包含全部上游资产的固定摘要、防替换与多余文件拒绝校验。
-- `npm pack --dry-run --json --ignore-scripts`：11 个 JAR、11 个伴生 SHA-256 与 `manifest.json` 均在发布清单中。
-- 最终客户端命名为 `AndroidLintClient`，重新执行 `test --tests org.jetbrains.android.lint.AndroidLintProviderTest stageExtension --no-daemon` 通过；资产门禁单独回归通过。
-- 真实 ILS `271.2085.0`：`Android Lint diagnostics integration` 全部通过，无跳过。覆盖 Java/Kotlin 编译诊断共存、12 项 `NewApi` 矩阵、真实 Compose 规则、Clean/Built 模型切换、`lint.xml`、损坏 AAR 与非 AndroidX 规则、缓存命中、取消 `-32800` 及并发编辑复核。
-- 移除临时故障日志后，`tsc -p tsconfig.test.json --noEmit` 通过。根目录 `README.md` 未修改。
-- Lint 工程、规则注册表、XML 解析器及内部 UAST 解析器、Java evaluator 均统一使用 `Android` 前缀，缓存目录为 `${java.io.tmpdir}/android-lint-cache`。命名调整后 JVM Lint 测试与 `stageExtension` 通过，已核对发布 JAR 的类名及源码、测试、文档中的旧名前缀残留。
-
-## 验收记录（2026-11-10）
-
-- 定向 JVM 回归通过，覆盖调试租约、SDK 前提、Groovy 模型、Lint 资源与 Manifest；移除测试专用空守卫后，使用真实 Project 夹具重测 Groovy 模型并重新执行 `stageExtension`。
-- 发布资产、摘要防替换与服务生命周期回归通过。`npm pack --dry-run --json --ignore-scripts` 包含 13 个 JAR、对应 SHA-256 和 `manifest.json`。
-- 真实 ILS `271.2085.0` 的 `android-xml.test.js` 全部通过，覆盖 Java/Kotlin 编译诊断、Compose、XML/Manifest 规则、资源导航及合并来源回退。
-- 独立 Groovy 工程实测：保存的 `minSdk 21` 触发 API 26 的 `NewApi`；未保存缓冲区改为 26 后诊断保留，落盘并发送 `didSave` 后消失。自定义资源根与自定义 Manifest 生效，默认 Manifest 被排除。真实服务的 `owner.pluginPaths` 记录预期的绝对扩展目录；验证后已关闭客户端并清理沙箱。
-- 额外执行的 `engineering.test.js` 中，Gradle 子项目调试通过；两项工程模型用例在 `model.classpath` 断言处失败。ILS 271 未广告 `intellij.java.resolveLaunch`，`exportWorkspace` 回退只提供工程模型，不提供运行 classpath。本轮保留该能力边界，未伪造 classpath 或放宽断言。
-- 当前 JVM 工程的真实导入验证已通过：Groovy BOM 的 `.pom`、`.module` 及 Groovy 源码包摘要与 Maven Central 发布值一致，补齐后执行工作区重导入，原连接恢复 `ready`。严格依赖校验保持启用。

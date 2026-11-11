@@ -46,6 +46,7 @@ omp plugin install --force omp-intellij@omp-intellij
 在目标工程根目录下启动 OMP，按以下步骤初始化服务端：
 
 1. **安装服务端与查看协议**：
+
    ```text
    /intellij install
    /intellij eula status
@@ -53,6 +54,7 @@ omp plugin install --force omp-intellij@omp-intellij
    ```
 
 2. **接受许可协议并校验运行环境**：
+
    ```text
    /intellij eula accept <status 显示的哈希>
    /intellij doctor
@@ -62,6 +64,7 @@ omp plugin install --force omp-intellij@omp-intellij
    > 许可协议（EULA）按安装包内置文本核对，插件不会代为自动接受。必须传入 `status` 查看到的实际哈希值。
 
 3. **配置工程 JDK（可选）**：
+
    ```text
    /intellij workspace jdks
    /intellij workspace jdk <目标 JDK 路径>
@@ -103,11 +106,11 @@ omp plugin install --force omp-intellij@omp-intellij
 
 通过 OMP 原生 `debug` 工具启动调试会话，支持以下适配器：
 
-| 适配器 | 说明 |
-| :--- | :--- |
-| `intellij` | 构建并启动主类，或附加到外部调试进程 |
-| `intellij-test` | 运行测试；可通过 `args` 指定测试类或 `ClassName#methodName` |
-| `intellij-gradle` | 走服务端的 Gradle 任务链路启动调试 |
+| 适配器            | 说明                                                        |
+| :---------------- | :---------------------------------------------------------- |
+| `intellij`        | 构建并启动主类，或附加到外部调试进程                        |
+| `intellij-test`   | 运行测试；可通过 `args` 指定测试类或 `ClassName#methodName` |
+| `intellij-gradle` | 走服务端的 Gradle 任务链路启动调试                          |
 
 启动配置示例（写入 `xd://debug`）：
 
@@ -129,13 +132,16 @@ omp plugin install --force omp-intellij@omp-intellij
 针对运行在 Android 模拟器或真实设备上的应用，插件提供进程发现、端口代理与 JDWP Attach 编排：
 
 1. **准备附加并建立本地回环代理**：
+
    ```sh
    node dist/android/debug-attach-cli.js prepare --package com.example.app --device emulator-5554
    ```
-   *也支持 `--pid <PID>` 精确指定进程。成功时输出包含目标 `host`、`port` 与 `cleanupKey` 的 JSON。*
+
+   _也支持 `--pid <PID>` 精确指定进程。成功时输出包含目标 `host`、`port` 与 `cleanupKey` 的 JSON。_
 
 2. **附加调试器**：
    将返回的连接参数传入原生 `debug` 工具：
+
    ```json
    {
      "action": "attach",
@@ -148,6 +154,7 @@ omp plugin install --force omp-intellij@omp-intellij
 
 3. **结束调试并清理资源**：
    调试器分离时默认保持 `terminateDebuggee: false`，避免终止目标应用进程。如需提前手动释放代理端口：
+
    ```sh
    node dist/android/debug-attach-cli.js cleanup --key <cleanupKey>
    ```
@@ -161,49 +168,38 @@ omp plugin install --force omp-intellij@omp-intellij
 
 在 OMP 对话中可通过斜杠命令管理服务端状态：
 
-| 命令 | 用途 |
-| :--- | :--- |
-| `/intellij status` | 查看当前服务端运行状态与活动工程 |
-| `/intellij doctor` | 检查安装完整性、网络、协议、JDK 与日志路径 |
-| `/intellij install [--version <build\|latest>]` | 安装指定或最新服务端版本 |
-| `/intellij versions [--remote]` | 查看本地已安装版本或查询远程可用版本 |
-| `/intellij use <build>` | 切换或回滚服务端版本 |
-| `/intellij start`、`stop`、`restart` | 控制共享服务端进程的启停 |
-| `/intellij workspace status`、`list` | 查看当前工作区状态或已注册工程列表 |
-| `/intellij workspace jdk <path>` | 设置当前工程专用 JDK |
-| `/intellij workspace reload` | 重新导入工程构建模型 |
-| `/intellij cache`、`prune [--apply]` | 查看或清理过期缓存目录 |
+| 命令                                            | 用途                                       |
+| :---------------------------------------------- | :----------------------------------------- |
+| `/intellij status`                              | 查看当前服务端运行状态与活动工程           |
+| `/intellij doctor`                              | 检查安装完整性、网络、协议、JDK 与日志路径 |
+| `/intellij install [--version <build\|latest>]` | 安装指定或最新服务端版本                   |
+| `/intellij versions [--remote]`                 | 查看本地已安装版本或查询远程可用版本       |
+| `/intellij use <build>`                         | 切换或回滚服务端版本                       |
+| `/intellij start`、`stop`、`restart`            | 控制共享服务端进程的启停                   |
+| `/intellij workspace status`、`list`            | 查看当前工作区状态或已注册工程列表         |
+| `/intellij workspace jdk <path>`                | 设置当前工程专用 JDK                       |
+| `/intellij workspace reload`                    | 重新导入工程构建模型                       |
+| `/intellij cache`、`prune [--apply]`            | 查看或清理过期缓存目录                     |
 
 ---
 
-## 开发者构建
+## 从源码构建
 
-如需修改扩展或本地从源码构建打包：
-
-服务端目标版本统一维护在 `src/server/bundle-metadata.ts`，运行时加载器与 Gradle 构建共同消费。开发环境配置脚本读取编译后的元数据，因此首次构建先编译 TypeScript。
-
-官方 OMP SDK 与 omptype 固定为 `18.18.7`，仅作开发依赖。`npm run typecheck` 同时检查扩展 factory 与官方 `ExtensionFactory` 的兼容性；测试使用真实 schema builder。生产代码仅通过类型导入引用 SDK，Bridge/DAP 的 Node 启动链路保持不变。
-
-交互确认按官方 `confirm(title, message)` 契约分别传递标题与操作详情；工具进度回调保留完整的 details 类型。
+使用 Node.js 22 或更新版本，在仓库根目录执行：
 
 ```sh
-npm run typecheck
-# 1. 编译 TypeScript 桥接层与 bundle 元数据
+npm ci
 npm run build
-# 2. 配置本地环境并编译 JVM 扩展资产
 npm run build:jvm
-# 3. 执行测试
-npm test
-
-# 4. 验证 npm 包分发清单
-npm pack --dry-run --json --ignore-scripts
 ```
+
+开发环境、分层测试和修改约束见 [AGENTS.md](AGENTS.md)。
 
 ---
 
-## 技术经验与规范文档
+## 技术文档
 
-开发、调试、协议接入与工程化排障的完整实测经验记录在 `docs/` 目录中：
+`docs/` 说明架构、协议契约和常见故障的排查方法：
 
 - [**Android JDWP 调试与运行时排障**](docs/android-jdwp-debugging.md)：ART 运行时特性、adblib proxy 编排、`variables` 10.3s 超时根因与会话级静默渲染解决方案。
 - [**Android JVM 扩展与工程化体系**](docs/android-jvm-extension.md)：ILS 插件 SPI、`plugin.xml` 声明、K2 Compose 命名豁免、Gradle 9.8.0 规范化与反编译器实测横评。
