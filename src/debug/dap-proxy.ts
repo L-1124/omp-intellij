@@ -979,6 +979,46 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           respond(request, false, undefined, 'IntelliJ launch timeout must be a positive number');
           return;
         }
+        for (const field of ['testMode', 'build', 'stopOnEntry', 'noDebug']) {
+          if (args[field] !== undefined && typeof args[field] !== 'boolean') {
+            respond(request, false, undefined, `${field} must be a boolean`);
+            return;
+          }
+        }
+        for (const field of ['args', 'vmArgs', 'gradleArgs']) {
+          const value = args[field];
+          if (
+            value !== undefined &&
+            (!Array.isArray(value) || !value.every((item) => typeof item === 'string'))
+          ) {
+            respond(request, false, undefined, `${field} must be an array of strings`);
+            return;
+          }
+        }
+        if (args.buildTool !== undefined && args.buildTool !== 'gradle') {
+          respond(request, false, undefined, 'buildTool must be "gradle" or omitted');
+          return;
+        }
+        if (args.buildTool === 'gradle' && args.testMode === true) {
+          respond(
+            request,
+            false,
+            undefined,
+            'Gradle launch expects a main class, not a test target',
+          );
+          return;
+        }
+        for (const field of ['gradleArgs', 'projectPath', 'sourceSet']) {
+          if (args[field] === undefined) continue;
+          if (args.buildTool !== 'gradle') {
+            respond(request, false, undefined, `${field} requires buildTool: "gradle"`);
+            return;
+          }
+          if (field !== 'gradleArgs' && (typeof args[field] !== 'string' || !args[field].trim())) {
+            respond(request, false, undefined, `${field} must be a non-empty string`);
+            return;
+          }
+        }
         const program =
           typeof args.program === 'string'
             ? args.program
@@ -1087,13 +1127,6 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         }
         const isGradleLaunch = args.buildTool === 'gradle';
         const gradleArgs = args.gradleArgs ?? [];
-        if (isGradleLaunch) {
-          if (isTestLaunch)
-            throw new Error('Gradle launch expects a main class, not a test target');
-          if (!Array.isArray(gradleArgs) || !gradleArgs.every((arg) => typeof arg === 'string')) {
-            throw new Error('gradleArgs must be an array of strings');
-          }
-        }
         if (args.build !== false && !isGradleLaunch) {
           output(`--- IntelliJ: resolving build for ${basename(resolvedFile)} ---\n`, 'console');
           const build = await resolveBuildCommand(session, fileUri);
@@ -1112,16 +1145,9 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         }
         sessionAbortController.signal.throwIfAborted();
         let paths: LaunchPaths;
-        let applicationArgs: unknown[] = Array.isArray(args.args) ? args.args : [];
+        let applicationArgs = (args.args ?? []) as string[];
         if (isTestLaunch) {
-          const testIds = args.args ?? [];
-          if (
-            !Array.isArray(testIds) ||
-            !testIds.every((id): id is string => typeof id === 'string')
-          ) {
-            throw new Error('Test IDs must be an array of strings');
-          }
-          const target = await resolveTestTarget(session, fileUri, testIds);
+          const target = await resolveTestTarget(session, fileUri, applicationArgs);
           mainClass = target.mainClass;
           applicationArgs = target.args;
           paths = target.paths;
@@ -1162,9 +1188,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         }
         activeRunMarker = randomUUID();
         activeJavaExec = paths.javaExec;
-        const extraVmArgs = Array.isArray(args.vmArgs)
-          ? args.vmArgs.filter((arg): arg is string => typeof arg === 'string')
-          : [];
+        const extraVmArgs = (args.vmArgs ?? []) as string[];
         if (args.noDebug === true) clientConfigurationDone = true;
         await startNative(
           'launch',

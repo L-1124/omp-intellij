@@ -466,6 +466,45 @@ test('attach rejects invalid ports and PID-only targets before opening a backend
   assert.equal(h.backendRequests.length, 0);
 });
 
+test('launch rejects malformed and conflicting preset arguments before opening a backend', async (t) => {
+  const h = await createDapTestHarness(t);
+  const cases: Array<{ args: Record<string, unknown>; error: RegExp }> = [
+    { args: { testMode: 'true' }, error: /testMode must be a boolean/ },
+    { args: { build: 0 }, error: /build must be a boolean/ },
+    { args: { stopOnEntry: 'false' }, error: /stopOnEntry must be a boolean/ },
+    { args: { noDebug: null }, error: /noDebug must be a boolean/ },
+    { args: { args: ['valid', 1] }, error: /args must be an array of strings/ },
+    { args: { vmArgs: '-Xmx1g' }, error: /vmArgs must be an array of strings/ },
+    { args: { buildTool: 'maven' }, error: /buildTool must be "gradle" or omitted/ },
+    {
+      args: { buildTool: 'gradle', testMode: true },
+      error: /Gradle launch expects a main class, not a test target/,
+    },
+    { args: { gradleArgs: [] }, error: /gradleArgs requires buildTool: "gradle"/ },
+    { args: { projectPath: ':app' }, error: /projectPath requires buildTool: "gradle"/ },
+    { args: { sourceSet: 'main' }, error: /sourceSet requires buildTool: "gradle"/ },
+    {
+      args: { buildTool: 'gradle', gradleArgs: [false] },
+      error: /gradleArgs must be an array of strings/,
+    },
+    {
+      args: { buildTool: 'gradle', projectPath: '' },
+      error: /projectPath must be a non-empty string/,
+    },
+    {
+      args: { buildTool: 'gradle', sourceSet: 1 },
+      error: /sourceSet must be a non-empty string/,
+    },
+  ];
+  for (const { args, error } of cases) {
+    const result = await h.request('launch', { program: javaTestProgram, ...args });
+    assert.equal(result.success, false);
+    assert.match(result.message ?? '', error);
+  }
+  assert.equal(h.lspRequests.length, 0);
+  assert.equal(h.backendRequests.length, 0);
+});
+
 for (const ending of ['disconnect', 'terminate', 'eof', 'backend-close'] as const) {
   test(`attach ${ending} releases the debugger without terminating its external JVM`, async (t) => {
     let externalTargetAlive = true;
