@@ -243,7 +243,7 @@ export interface ExecuteIntellijOptions {
 export async function executeIntellij(
   params: IntellijParams,
   signal: AbortSignal | undefined,
-  onUpdate: ((update: ToolUpdate) => void) | undefined,
+  onUpdate: ((update: ToolUpdate<IntellijDetails>) => void) | undefined,
   ctx: ExtensionContext,
   options: ExecuteIntellijOptions = {},
 ): Promise<ToolResult<IntellijDetails>> {
@@ -502,7 +502,7 @@ export async function executeIntellij(
               text: `Waiting for IntelliJ index: ${current.phase}${current.detail ? ` (${current.detail})` : ''}`,
             },
           ],
-          details: { phase: current.phase, project: projectRoot },
+          details: { phase: current.phase, detail: current.detail, project: projectRoot },
         });
       }
 
@@ -650,7 +650,7 @@ export async function executeIntellij(
           text: `Reloading IntelliJ workspace model for project ${projectRoot}...`,
         },
       ],
-      details: { phase: 'importing', project: projectRoot },
+      details: { phase: 'importing', detail: 'Reloading workspace model', project: projectRoot },
     });
 
     try {
@@ -837,7 +837,7 @@ export function registerIntellij(
   options: ExecuteIntellijOptions = {},
 ): void {
   const z = pi.zod;
-  pi.registerTool<IntellijParams, IntellijDetails>({
+  pi.registerTool({
     name: 'intellij',
     approval: 'exec',
     label: 'IntelliJ',
@@ -872,7 +872,7 @@ export function registerIntellij(
       _id: string,
       params: IntellijParams,
       signal: AbortSignal | undefined,
-      onUpdate: ((update: ToolUpdate) => void) | undefined,
+      onUpdate: ((update: ToolUpdate<IntellijDetails>) => void) | undefined,
       ctx: ExtensionContext,
     ) {
       return executeIntellij(params, signal, onUpdate, ctx, options);

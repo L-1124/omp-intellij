@@ -1,17 +1,10 @@
+import * as zod from '@oh-my-pi/omptype/zod';
 import type {
   CommandDefinition,
   ExtensionContext,
   ExtensionPluginInstance,
   SelectItem,
   ToolDefinition,
-  ZodArrayLike,
-  ZodBooleanLike,
-  ZodEnumLike,
-  ZodLike,
-  ZodNumberLike,
-  ZodObjectLike,
-  ZodRecordLike,
-  ZodStringLike,
 } from '../src/shared/extension-types.js';
 
 export interface MockNotification {
@@ -27,7 +20,7 @@ export interface MockStatusCall {
 export interface MockUI {
   setStatus(key: string, value: string): void;
   notify(msg: string, level?: string): void;
-  confirm?(message: string): Promise<boolean>;
+  confirm?(title: string, message: string): Promise<boolean>;
   select?(prompt: string, items: SelectItem[]): Promise<SelectItem | string | undefined | null>;
   theme?: unknown;
 }
@@ -45,135 +38,9 @@ export interface MockPi extends ExtensionPluginInstance {
   getLabel(): string;
   registerCommand(name: string, def: CommandDefinition): void;
   getCommand(name: string): CommandDefinition | undefined;
-  registerTool<TParams = unknown, TDetails = Record<string, unknown>>(
-    tool: ToolDefinition<TParams, TDetails>,
-  ): void;
   getTool(name: string): ToolDefinition | undefined;
-  on: NonNullable<ExtensionPluginInstance['on']>;
+  on(event: string, handler: (...args: never[]) => void): void;
   emit(event: string, ...args: unknown[]): void;
-}
-
-export function createMockZod(): ZodLike {
-  const schemaBase = {
-    describe() {
-      return this;
-    },
-    optional() {
-      return this;
-    },
-    default() {
-      return this;
-    },
-  };
-
-  const stringSchema: ZodStringLike = {
-    ...schemaBase,
-    describe() {
-      return this;
-    },
-    optional() {
-      return this;
-    },
-  };
-
-  const numberSchema: ZodNumberLike = {
-    ...schemaBase,
-    int() {
-      return this;
-    },
-    min() {
-      return this;
-    },
-    max() {
-      return this;
-    },
-    default() {
-      return this;
-    },
-    describe() {
-      return this;
-    },
-    optional() {
-      return this;
-    },
-  };
-
-  const booleanSchema: ZodBooleanLike = {
-    ...schemaBase,
-    default() {
-      return this;
-    },
-    describe() {
-      return this;
-    },
-    optional() {
-      return this;
-    },
-  };
-
-  const arraySchema: ZodArrayLike = {
-    ...schemaBase,
-    optional() {
-      return this;
-    },
-    describe() {
-      return this;
-    },
-  };
-
-  const recordSchema: ZodRecordLike = {
-    ...schemaBase,
-    optional() {
-      return this;
-    },
-    describe() {
-      return this;
-    },
-  };
-
-  const enumSchema: ZodEnumLike = {
-    ...schemaBase,
-    default() {
-      return this;
-    },
-    describe() {
-      return this;
-    },
-    optional() {
-      return this;
-    },
-  };
-
-  const objectSchema: ZodObjectLike = {
-    ...schemaBase,
-    describe() {
-      return this;
-    },
-  };
-
-  return {
-    object(_shape: Record<string, unknown>): ZodObjectLike {
-      return { ...objectSchema };
-    },
-    string(): ZodStringLike {
-      return { ...stringSchema };
-    },
-    number(): ZodNumberLike {
-      return { ...numberSchema };
-    },
-    boolean(): ZodBooleanLike {
-      return { ...booleanSchema };
-    },
-    array(_inner: unknown): ZodArrayLike {
-      return { ...arraySchema };
-    },
-    record(_keyOrVal: unknown, _val?: unknown): ZodRecordLike {
-      return { ...recordSchema };
-    },
-    enum(_values: readonly string[] | string[]): ZodEnumLike {
-      return { ...enumSchema };
-    },
-  };
 }
 
 export function createMockPi(): MockPi {
@@ -195,9 +62,7 @@ export function createMockPi(): MockPi {
     getCommand(name: string) {
       return commands.get(name);
     },
-    registerTool<TParams = unknown, TDetails = Record<string, unknown>>(
-      tool: ToolDefinition<TParams, TDetails>,
-    ) {
+    registerTool(tool) {
       tools.set(tool.name, tool as unknown as ToolDefinition);
     },
     getTool(name: string) {
@@ -214,7 +79,7 @@ export function createMockPi(): MockPi {
         Reflect.apply(h, undefined, args);
       }
     },
-    zod: createMockZod(),
+    zod,
   };
 }
 
@@ -222,7 +87,7 @@ export interface CreateMockCtxOptions {
   agent?: { kind: string; [key: string]: unknown };
   theme?: unknown;
   select?: (prompt: string, items: SelectItem[]) => Promise<SelectItem | string | undefined | null>;
-  confirm?: (message: string) => Promise<boolean>;
+  confirm?: (title: string, message: string) => Promise<boolean>;
 }
 
 export function createMockCtx(cwd: string, options: CreateMockCtxOptions = {}): MockContext {

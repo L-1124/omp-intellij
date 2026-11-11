@@ -8,9 +8,9 @@ import extension from '../src/extension/extension.js';
 import { formatStatusText, sanitizeDetail } from '../src/extension/install-status.js';
 import type { ProjectStateResult } from '../src/project/connection-state.js';
 import { canonicalizeProject } from '../src/project/metadata.js';
-import type { ExtensionContext } from '../src/shared/extension-types.js';
-import { settings } from '../src/server/service.js';
 import { readServerEula } from '../src/server/eula.js';
+import { settings } from '../src/server/service.js';
+import type { ExtensionContext } from '../src/shared/extension-types.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
 test('session_start ignores subagents', async () => {
@@ -326,7 +326,7 @@ test('/intellij eula accept writes actual acceptance file and preserves other co
 
     // 2. User refusal -> no write
     const ctxRefused = createMockCtx(baseDir, {
-      confirm: async (msg: string) => {
+      confirm: async (_title: string, msg: string) => {
         assert.match(msg, new RegExp(doc.hash));
         assert.match(msg, /By accepting, you agree to JetBrains EULA terms/);
         return false;
@@ -487,11 +487,16 @@ test('/intellij eula accept aborts and does not write old acceptance if file cha
 test('watchIndex observer notifies on auth denial once and notifies once on recovery', async () => {
   const pi = createMockPi();
   let listener!: (state: ProjectStateResult) => void;
-  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  let sessionStartHandler:
+    | ((event: unknown, ctx: ExtensionContext) => Promise<void> | void)
+    | undefined;
   const originalOn = pi.on.bind(pi);
   pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
     if (event === 'session_start') {
-      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+      sessionStartHandler = handler as (
+        event: unknown,
+        ctx: ExtensionContext,
+      ) => Promise<void> | void;
     }
     originalOn(event, handler);
   }) as typeof pi.on;
@@ -605,23 +610,36 @@ test('watchIndex observer notifies on auth denial once and notifies once on reco
 
 test('session_start writes connection record to activeSystemPath override', async () => {
   const pi = createMockPi();
-  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  let sessionStartHandler:
+    | ((event: unknown, ctx: ExtensionContext) => Promise<void> | void)
+    | undefined;
   const originalOn = pi.on.bind(pi);
   pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
     if (event === 'session_start') {
-      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+      sessionStartHandler = handler as (
+        event: unknown,
+        ctx: ExtensionContext,
+      ) => Promise<void> | void;
     }
     originalOn(event, handler);
   }) as typeof pi.on;
 
-  const customSystemPath = join(tmpdir(), `omp-custom-sys-start-${Math.random().toString(36).slice(2)}`);
+  const customSystemPath = join(
+    tmpdir(),
+    `omp-custom-sys-start-${Math.random().toString(36).slice(2)}`,
+  );
   const projectDir = join(tmpdir(), `omp-proj-start-${Math.random().toString(36).slice(2)}`);
   await mkdir(customSystemPath, { recursive: true });
   await mkdir(projectDir, { recursive: true });
   await writeFile(join(projectDir, 'pom.xml'), '<project></project>', 'utf8');
 
   const { id, canonicalPath } = canonicalizeProject(projectDir);
-  const defaultEventsPath = join(settings.systemPath, 'plugin-metadata', 'projects', `${id}.events.jsonl`);
+  const defaultEventsPath = join(
+    settings.systemPath,
+    'plugin-metadata',
+    'projects',
+    `${id}.events.jsonl`,
+  );
   const initialDefaultExists = existsSync(defaultEventsPath);
 
   try {
@@ -662,11 +680,16 @@ test('session_start writes connection record to activeSystemPath override', asyn
 test('watchIndex observer notifies on fresh structured import failure once and deduplicates progress details', async () => {
   const pi = createMockPi();
   let listener!: (state: ProjectStateResult) => void;
-  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  let sessionStartHandler:
+    | ((event: unknown, ctx: ExtensionContext) => Promise<void> | void)
+    | undefined;
   const originalOn = pi.on.bind(pi);
   pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
     if (event === 'session_start') {
-      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+      sessionStartHandler = handler as (
+        event: unknown,
+        ctx: ExtensionContext,
+      ) => Promise<void> | void;
     }
     originalOn(event, handler);
   }) as typeof pi.on;
@@ -727,7 +750,11 @@ test('watchIndex observer notifies on fresh structured import failure once and d
         message: 'Maven sync failed: unresolved dependency',
       },
     });
-    assert.equal(notifications.length, 1, 'same structured failure with different detail must not re-notify');
+    assert.equal(
+      notifications.length,
+      1,
+      'same structured failure with different detail must not re-notify',
+    );
 
     listener({
       phase: 'failed',
@@ -761,7 +788,11 @@ test('watchIndex observer notifies on fresh structured import failure once and d
         message: 'POM parse error: invalid XML',
       },
     });
-    assert.equal(notifications.length, 3, 'new failure after importing phase must notify even with same failure content');
+    assert.equal(
+      notifications.length,
+      3,
+      'new failure after importing phase must notify even with same failure content',
+    );
     assert.equal(notifications[2].level, 'warning');
     assert.match(notifications[2].msg, /POM parse error: invalid XML/);
   } finally {
@@ -773,11 +804,16 @@ test('watchIndex observer notifies on fresh structured import failure once and d
 test('watchIndex observer failure action guidance distinguishes import vs non-import', async () => {
   const pi = createMockPi();
   let listener!: (state: ProjectStateResult) => void;
-  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  let sessionStartHandler:
+    | ((event: unknown, ctx: ExtensionContext) => Promise<void> | void)
+    | undefined;
   const originalOn = pi.on.bind(pi);
   pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
     if (event === 'session_start') {
-      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+      sessionStartHandler = handler as (
+        event: unknown,
+        ctx: ExtensionContext,
+      ) => Promise<void> | void;
     }
     originalOn(event, handler);
   }) as typeof pi.on;
@@ -850,11 +886,16 @@ test('watchIndex observer failure action guidance distinguishes import vs non-im
 test('watchIndex observer unstructured failure falls back to phase and detail changes', async () => {
   const pi = createMockPi();
   let listener!: (state: ProjectStateResult) => void;
-  let sessionStartHandler: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
+  let sessionStartHandler:
+    | ((event: unknown, ctx: ExtensionContext) => Promise<void> | void)
+    | undefined;
   const originalOn = pi.on.bind(pi);
   pi.on = ((event: string, handler: (...args: unknown[]) => void) => {
     if (event === 'session_start') {
-      sessionStartHandler = handler as (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
+      sessionStartHandler = handler as (
+        event: unknown,
+        ctx: ExtensionContext,
+      ) => Promise<void> | void;
     }
     originalOn(event, handler);
   }) as typeof pi.on;

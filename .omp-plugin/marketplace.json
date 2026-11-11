@@ -3,11 +3,20 @@
   "owner": {
     "name": "L-1124"
   },
+  "metadata": {
+    "description": "IntelliJ language intelligence and JVM/Android debugging for OMP"
+  },
   "plugins": [
     {
       "name": "omp-intellij",
       "description": "IntelliJ language intelligence, JVM execution and debugging, with Android JDWP attach for OMP",
       "source": "./",
+      "author": { "name": "L-1124" },
+      "homepage": "https://github.com/L-1124/omp-intellij#readme",
+      "repository": "https://github.com/L-1124/omp-intellij",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["omp", "intellij", "lsp", "dap", "jvm", "java", "kotlin", "android"],
       "lspServers": {
         "intellij-server": {
           "command": "node",

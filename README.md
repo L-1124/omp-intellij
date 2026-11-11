@@ -182,7 +182,12 @@ omp plugin install --force omp-intellij@omp-intellij
 
 服务端目标版本统一维护在 `src/server/bundle-metadata.ts`，运行时加载器与 Gradle 构建共同消费。开发环境配置脚本读取编译后的元数据，因此首次构建先编译 TypeScript。
 
+官方 OMP SDK 与 omptype 固定为 `18.18.7`，仅作开发依赖。`npm run typecheck` 同时检查扩展 factory 与官方 `ExtensionFactory` 的兼容性；测试使用真实 schema builder。生产代码仅通过类型导入引用 SDK，Bridge/DAP 的 Node 启动链路保持不变。
+
+交互确认按官方 `confirm(title, message)` 契约分别传递标题与操作详情；工具进度回调保留完整的 details 类型。
+
 ```sh
+npm run typecheck
 # 1. 编译 TypeScript 桥接层与 bundle 元数据
 npm run build
 # 2. 配置本地环境并编译 JVM 扩展资产

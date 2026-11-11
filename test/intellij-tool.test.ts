@@ -6,7 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createLspSession } from '../src/debug/run-core.js';
-import { executeIntellij, registerIntellij } from '../src/extension/intellij-tool.js';
+import {
+  executeIntellij,
+  type IntellijDetails,
+  registerIntellij,
+} from '../src/extension/intellij-tool.js';
 import type { ProjectStateResult } from '../src/project/connection-state.js';
 import type { WorkspaceInfo } from '../src/project/workspace.js';
 import type { ToolUpdate } from '../src/shared/extension-types.js';
@@ -215,8 +219,8 @@ test('wait action transitions from indexing to ready', async () => {
     return s;
   };
 
-  const updates: ToolUpdate[] = [];
-  const onUpdate = (u: ToolUpdate) => {
+  const updates: ToolUpdate<IntellijDetails>[] = [];
+  const onUpdate = (u: ToolUpdate<IntellijDetails>) => {
     updates.push(u);
   };
 
@@ -340,8 +344,8 @@ test('wait action avoids per-poll onUpdate spam', async () => {
     return { phase: 'indexing', detail: 'Steady state' };
   };
 
-  const updates: ToolUpdate[] = [];
-  const onUpdate = (u: ToolUpdate) => {
+  const updates: ToolUpdate<IntellijDetails>[] = [];
+  const onUpdate = (u: ToolUpdate<IntellijDetails>) => {
     updates.push(u);
   };
 
@@ -944,8 +948,8 @@ test('reload action with auth denial returns error immediately without attemptin
 });
 
 test('reload action emits onUpdate progress', async () => {
-  const updates: ToolUpdate[] = [];
-  const onUpdate = (u: ToolUpdate) => {
+  const updates: ToolUpdate<IntellijDetails>[] = [];
+  const onUpdate = (u: ToolUpdate<IntellijDetails>) => {
     updates.push(u);
   };
   const reimportWorkspace = async () => ({

@@ -28,7 +28,6 @@ import {
   unsetWorkspaceEnvVar,
   validateEnvMap,
   validateJdk,
-  registerSystemPath,
 } from '../src/project/workspace.js';
 import { asyncFramedStream, encode } from '../src/shared/protocol.js';
 
@@ -1194,7 +1193,11 @@ test('workspace operations register systemPath for child process exit cleanup', 
     });
 
     const childLease = join(leasesDir, 'child.json');
-    assert.equal(existsSync(childLease), false, 'lease in workspace-registered systemPath must be cleaned up on exit');
+    assert.equal(
+      existsSync(childLease),
+      false,
+      'lease in workspace-registered systemPath must be cleaned up on exit',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

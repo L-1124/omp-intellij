@@ -964,6 +964,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               )
               .join(', ');
             const ok = await ctx.ui.confirm(
+              'Prune IntelliJ cache',
               'Prune ' +
                 plan.candidates.length +
                 ' workspace(s) (' +
@@ -1526,6 +1527,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             return;
           }
           const ok = await ctx.ui.confirm(
+            'Accept IntelliJ Language Server EULA',
             `Accept IntelliJ Language Server EULA?\nPath: ${doc.path}\nHash: ${doc.hash}\nBy accepting, you agree to JetBrains EULA terms.`,
           );
           if (!ok) {
