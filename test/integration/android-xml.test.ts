@@ -1,22 +1,26 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { executeIntellij } from '../../src/extension/intellij-tool.js';
 import type { ExtensionContext } from '../../src/shared/extension-types.js';
 import { encode } from '../../src/shared/protocol.js';
 import {
-  copyCachedWrapper,
+  copyCachedDependencies,
   createIntegrationSandbox,
   createLspClientDriver,
   type IntegrationSandbox,
   type LspClientDriver,
+  seedSandboxProjectConfig,
   verifyPrerequisites,
 } from './fixture.js';
+
+const INITIAL_GRADLE_USER_HOME = process.env.GRADLE_USER_HOME;
+const prereqs = await verifyPrerequisites();
 
 interface LspPosition {
   line: number;
@@ -88,15 +92,6 @@ const SymbolKind = {
   Boolean: 17,
   Array: 18,
 } as const;
-
-function hasPrerequisitesEnvironment(): boolean {
-  return Boolean(
-    process.env.OMP_INTELLIJ_TEST_SERVER &&
-      process.env.OMP_INTELLIJ_TEST_JDK17 &&
-      process.env.OMP_INTELLIJ_TEST_JDK21 &&
-      process.env.OMP_INTELLIJ_TEST_ACCEPTED_EULA_HASH,
-  );
-}
 
 function findPositionInText(text: string, target: string, occurrence = 1): LspPosition {
   let index = -1;
@@ -189,19 +184,7 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
   ].join('\n');
   await writeFile(join(targetDir, 'gradle.properties'), gradleProps, 'utf8');
 
-  const cache = process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE;
-  if (cache) {
-    await cp(
-      join(cache, 'caches', 'modules-2'),
-      join(sandbox.gradleUserHome, 'caches', 'modules-2'),
-      {
-        recursive: true,
-        filter: (source) => !source.endsWith('.lock') && basename(source) !== 'gc.properties',
-      },
-    );
-  }
-
-  await copyCachedWrapper(sandbox);
+  await copyCachedDependencies(sandbox);
 
   const wrapperJarSrc = resolve(
     'test-fixtures',
@@ -286,7 +269,7 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
       ':independent:generateDebugRFile',
       ':independent:generateReleaseRFile',
       '--offline',
-      '--no-daemon',
+      '--daemon',
     ],
     {
       cwd: targetDir,
@@ -301,6 +284,7 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
     );
   }
 
+  await seedSandboxProjectConfig(targetDir, sandbox);
   return targetDir;
 }
 async function startLspClient(
@@ -317,7 +301,6 @@ async function startLspClient(
     processId: process.pid,
     rootUri: pathToFileURL(projectDir).href,
     rootPath: projectDir,
-    initializationOptions: { indexDir: join(sandbox.sandboxDir, 'index') },
     capabilities: {
       textDocument: {
         documentSymbol: { hierarchicalDocumentSymbolSupport: hierarchical },
@@ -335,12 +318,8 @@ async function startLspClient(
   return driver;
 }
 
-test('Android XML symbols and manifest references integration', {
-  skip: !hasPrerequisitesEnvironment(),
-}, async (t) => {
-  const prereqs = await verifyPrerequisites();
+test('Android XML symbols and manifest references integration', async (t) => {
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   let projectDir = '';
   let driver: LspClientDriver | null = null;
   let flatDriver: LspClientDriver | null = null;
@@ -2406,8 +2385,8 @@ test('Android XML symbols and manifest references integration', {
 
 const GLOBAL_GRADLE_USER_HOME =
   process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE ||
-  process.env.GRADLE_USER_HOME ||
-  (process.platform === 'win32' ? 'F:/cache/gradle' : join(homedir(), '.gradle'));
+  INITIAL_GRADLE_USER_HOME ||
+  join(homedir(), '.gradle');
 
 async function pullDiagnostics(
   client: LspClientDriver,
@@ -2974,18 +2953,7 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
   ].join('\n');
   await writeFile(join(targetDir, 'gradle.properties'), gradleProps, 'utf8');
 
-  // Copy Gradle caches
-  if (existsSync(GLOBAL_GRADLE_USER_HOME)) {
-    const modulesSource = join(GLOBAL_GRADLE_USER_HOME, 'caches', 'modules-2');
-    if (existsSync(modulesSource)) {
-      await cp(modulesSource, join(sandbox.gradleUserHome, 'caches', 'modules-2'), {
-        recursive: true,
-        filter: (source) => !source.endsWith('.lock') && basename(source) !== 'gc.properties',
-      });
-    }
-  }
-
-  await copyCachedWrapper(sandbox);
+  await copyCachedDependencies(sandbox);
 
   const wrapperJarSrc = resolve(
     'test-fixtures',
@@ -3123,7 +3091,7 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
       ':independent:generateDebugRFile',
       ':independent:generateReleaseRFile',
       '--offline',
-      '--no-daemon',
+      '--daemon',
     ],
     {
       cwd: targetDir,
@@ -3355,15 +3323,12 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
     ].join('\n'),
     'utf8',
   );
+  await seedSandboxProjectConfig(targetDir, sandbox);
   return targetDir;
 }
 
-test('Android Lint diagnostics integration', {
-  skip: !hasPrerequisitesEnvironment(),
-}, async (t) => {
-  const prereqs = await verifyPrerequisites();
+test('Android Lint diagnostics integration', async (t) => {
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   let projectDir = '';
   let driver: InitializedLspClientDriver | null = null;
 
@@ -4655,11 +4620,8 @@ test('Android Lint diagnostics integration', {
 });
 
 test('Android XML and Manifest Lint diagnostics integration', {
-  skip: !hasPrerequisitesEnvironment(),
   timeout: 600000,
 }, async (t) => {
-  const prereqs = await verifyPrerequisites();
-
   // 1. Native baseline in isolated session (WITHOUT extension)
   await t.test(
     'Baseline: Isolated native ILS session without extension preserves native XML diagnostics and emits no Lint issues',
@@ -4668,6 +4630,9 @@ test('Android XML and Manifest Lint diagnostics integration', {
       let nativeProjectDir = '';
       let nativeDriver: InitializedLspClientDriver | null = null;
       try {
+        const nativeExtensionDir = join(nativeSandbox.sandboxDir, 'no-extension');
+        await mkdir(nativeExtensionDir);
+        nativeSandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = nativeExtensionDir;
         nativeProjectDir = await copyAndroidLintFixture(nativeSandbox);
         nativeDriver = await startLspClient(nativeProjectDir, nativeSandbox);
 
@@ -4769,7 +4734,6 @@ test('Android XML and Manifest Lint diagnostics integration', {
 
   // 2. Full XML & Manifest Lint acceptance suite in isolated session (WITH extension)
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   let projectDir = '';
   let driver: InitializedLspClientDriver | null = null;
 
@@ -5847,7 +5811,6 @@ test('Android XML and Manifest Lint diagnostics integration', {
 
       // B. Two Workspaces isolation
       const workspace2 = await createIntegrationSandbox(prereqs);
-      workspace2.env.OMP_ANDROID_LS_EXTENSION_DIR = sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR;
       const workspace2Dir = await copyAndroidLintFixture(workspace2);
       let client2: InitializedLspClientDriver | null = null;
       try {
@@ -6089,7 +6052,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
               'org.gradle.wrapper.GradleWrapperMain',
               ':app:processDebugManifest',
               '--offline',
-              '--no-daemon',
+              '--daemon',
               '--rerun-tasks',
             ],
             { cwd: projectDir, env: sandbox.env, encoding: 'utf8', timeout: 180000 },

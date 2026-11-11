@@ -18,7 +18,6 @@ import { readProjectState } from '../../src/project/connection-state.js';
 import { canonicalizeProject } from '../../src/project/metadata.js';
 import type { ExtensionContext } from '../../src/shared/extension-types.js';
 import {
-  copyCachedWrapper,
   copyWorkspaceFixture,
   createDapClientDriver,
   createIntegrationSandbox,
@@ -270,7 +269,6 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
-    await copyCachedWrapper(sandbox);
     const largeProjectDir = await copyWorkspaceFixture('jdk21', sandbox);
     await generateLargeJavaProject(largeProjectDir, 5000);
     const referenceFile = join(largeProjectDir, 'src/main/java/com/example/bigtree/UseBig.java');
@@ -393,7 +391,6 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
-    await copyCachedWrapper(sandbox);
     const jdk17Dir = await copyWorkspaceFixture('jdk17', sandbox);
     const jdk21Dir = await copyWorkspaceFixture('jdk21', sandbox);
 
@@ -790,7 +787,6 @@ test('build gate timeout: long-running Gradle launch resolves upon gate release'
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
-    await copyCachedWrapper(sandbox);
     const jdk17Dir = await copyWorkspaceFixture('jdk17', sandbox);
     const buildDir = join(jdk17Dir, 'build');
     await mkdir(buildDir, { recursive: true });

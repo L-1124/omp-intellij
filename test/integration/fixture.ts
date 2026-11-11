@@ -1,18 +1,23 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { terminateMarkedProcess } from '../../src/debug/run-core.js';
-import { getActiveLeases } from '../../src/project/metadata.js';
+import { saveProjectConfiguration } from '../../src/project/configuration.js';
+import { canonicalizeProject, getActiveLeases } from '../../src/project/metadata.js';
+import { setWorkspaceJdk } from '../../src/project/workspace.js';
+import { DEFAULT_SERVER_VERSION } from '../../src/server/bundle-metadata.js';
 import { acceptServerEula, type EulaDocument, readServerEula } from '../../src/server/eula.js';
 import { encode, frameParser } from '../../src/shared/protocol.js';
 import { sanitizeString } from '../../src/shared/runtime-status.js';
 
 export { readServerEula };
+
+const initialGradleUserHome = process.env.GRADLE_USER_HOME;
 
 export interface IntegrationPrerequisites {
   serverExecutable: string;
@@ -203,6 +208,12 @@ export async function createIntegrationSandbox(
     ...process.env,
     OMP_INTELLIJ_CONFIG: configFile,
     OMP_INTELLIJ_SETTINGS: settingsFile,
+    OMP_ANDROID_LS_EXTENSION_DIR: resolve(
+      'resources',
+      'ils',
+      DEFAULT_SERVER_VERSION,
+      'android.lsp',
+    ),
     GRADLE_USER_HOME: gradleUserHome,
     JAVA_HOME: prerequisites.jdk21Path,
     IJ_JAVA_OPTIONS: `-Dintellij.server.eula.persistence=false -Didea.config.path=${configDir.replace(/\\/g, '/')} -Didea.log.path=${logDir.replace(/\\/g, '/')}`,
@@ -211,11 +222,13 @@ export async function createIntegrationSandbox(
     OMP_INTELLIJ_CONFIG: process.env.OMP_INTELLIJ_CONFIG,
     OMP_INTELLIJ_SETTINGS: process.env.OMP_INTELLIJ_SETTINGS,
     GRADLE_USER_HOME: process.env.GRADLE_USER_HOME,
+    OMP_ANDROID_LS_EXTENSION_DIR: process.env.OMP_ANDROID_LS_EXTENSION_DIR,
     JAVA_HOME: process.env.JAVA_HOME,
     IJ_JAVA_OPTIONS: process.env.IJ_JAVA_OPTIONS,
   };
   process.env.OMP_INTELLIJ_CONFIG = configFile;
   process.env.OMP_INTELLIJ_SETTINGS = settingsFile;
+  process.env.OMP_ANDROID_LS_EXTENSION_DIR = env.OMP_ANDROID_LS_EXTENSION_DIR;
   process.env.GRADLE_USER_HOME = gradleUserHome;
   process.env.JAVA_HOME = prerequisites.jdk21Path;
   process.env.IJ_JAVA_OPTIONS = env.IJ_JAVA_OPTIONS;
@@ -285,7 +298,10 @@ export async function createIntegrationSandbox(
         ],
         {
           cwd: resolve('test-fixtures/concurrency/jdk21'),
-          env,
+          env: {
+            ...env,
+            GRADLE_USER_HOME: gradleUserHome,
+          },
           encoding: 'utf8',
           timeout: 30000,
           windowsHide: true,
@@ -325,6 +341,7 @@ export async function createIntegrationSandbox(
     trackServer,
     cleanup,
   };
+  await copyCachedWrapper(sandbox);
   return sandbox;
 }
 
@@ -388,18 +405,78 @@ export function killProcessSafely(pid: number, sandbox: IntegrationSandbox): voi
   }
 }
 
-export async function copyCachedWrapper(sandbox: IntegrationSandbox): Promise<void> {
+async function copyGradleCache(source: string, target: string): Promise<void> {
+  const entries = await readdir(source, { recursive: true, withFileTypes: true });
+  let next = 0;
+  // Bound disk concurrency while avoiding serial copies of every cached artifact.
+  await Promise.all(
+    Array.from({ length: 32 }, async () => {
+      while (next < entries.length) {
+        const entry = entries[next++];
+        if (!entry || /(?:\.(?:lock|lck|part)$|^gc\.properties$)/.test(entry.name)) continue;
+        const input = join(entry.parentPath, entry.name);
+        const output = join(target, relative(source, input));
+        if (entry.isDirectory()) {
+          await mkdir(output, { recursive: true });
+        } else {
+          await mkdir(dirname(output), { recursive: true });
+          if (entry.isFile()) await copyFile(input, output);
+          else await cp(input, output);
+        }
+      }
+    }),
+  );
+}
+
+export async function copyCachedDependencies(sandbox: IntegrationSandbox): Promise<void> {
   const candidates = [
-    process.env.GRADLE_USER_HOME,
     process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE,
+    initialGradleUserHome,
+    join(homedir(), '.gradle'),
+  ].filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
+  const relativePath = join('caches', 'modules-2');
+  const cache = candidates.find(
+    (dir) =>
+      resolve(dir) !== resolve(sandbox.gradleUserHome) && existsSync(join(dir, relativePath)),
+  );
+  if (cache) {
+    await copyGradleCache(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath));
+  }
+}
+
+async function copyCachedWrapper(sandbox: IntegrationSandbox): Promise<void> {
+  const candidates = [
+    process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE,
+    initialGradleUserHome,
     join(homedir(), '.gradle'),
   ].filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
   const relativePath = join('wrapper', 'dists', 'gradle-9.8.0-bin');
   const cache = candidates.find((dir) => existsSync(join(dir, relativePath)));
   if (!cache) return;
-  await cp(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath), {
-    recursive: true,
-    filter: (source) => !source.endsWith('.lck') && !source.endsWith('.part'),
+  await copyGradleCache(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath));
+}
+export async function seedSandboxProjectConfig(
+  projectPath: string,
+  sandbox: IntegrationSandbox,
+  rawInitializationOptions: Record<string, unknown> = {},
+  javaHome = sandbox.prerequisites.jdk21Path,
+): Promise<void> {
+  const canonical = canonicalizeProject(projectPath);
+  const indexDir = join(sandbox.sandboxDir, 'index', canonical.id);
+  await saveProjectConfiguration(sandbox.systemPath, {
+    id: canonical.id,
+    projectPath: canonical.nativePath,
+    rootUri: canonical.rootUri,
+    updatedAt: Date.now(),
+    settings: {},
+    rawInitializationOptions: {
+      indexDir,
+      ...rawInitializationOptions,
+    },
+  });
+  await setWorkspaceJdk(projectPath, javaHome, {
+    systemPath: sandbox.systemPath,
+    configDir: sandbox.configDir,
   });
 }
 
@@ -424,6 +501,12 @@ export async function copyWorkspaceFixture(
   ].join('\n');
 
   await writeFile(propPath, content, 'utf8');
+  await seedSandboxProjectConfig(
+    targetDir,
+    sandbox,
+    {},
+    fixtureName === 'jdk17' ? sandbox.prerequisites.jdk17Path : sandbox.prerequisites.jdk21Path,
+  );
   return targetDir;
 }
 
@@ -560,8 +643,24 @@ export function createLspClientDriver(
     params?: unknown,
     timeoutMs = method === 'initialize' ? 60000 : 30000,
   ): Promise<unknown> => {
+    let finalParams = params;
+    if (method === 'initialize') {
+      const initParams =
+        params && typeof params === 'object' ? (params as Record<string, unknown>) : {};
+      const existingOptions =
+        initParams.initializationOptions && typeof initParams.initializationOptions === 'object'
+          ? (initParams.initializationOptions as Record<string, unknown>)
+          : {};
+      finalParams = {
+        ...initParams,
+        initializationOptions: {
+          indexDir: join(sandbox.sandboxDir, 'index', canonicalizeProject(projectPath).id),
+          ...existingOptions,
+        },
+      };
+    }
     const id = nextId++;
-    child.stdin?.write(encode({ jsonrpc: '2.0', id, method, params }));
+    child.stdin?.write(encode({ jsonrpc: '2.0', id, method, params: finalParams }));
     const resp = await waitFor((message) => message.id === id && !message.method, timeoutMs);
     if (resp.error) {
       throw new Error(

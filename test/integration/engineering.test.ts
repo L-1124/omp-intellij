@@ -12,12 +12,12 @@ import { canonicalizeProject } from '../../src/project/metadata.js';
 import { setWorkspaceJdk } from '../../src/project/workspace.js';
 import type { ExtensionContext } from '../../src/shared/extension-types.js';
 import {
-  copyCachedWrapper,
   copyWorkspaceFixture,
   createDapClientDriver,
   createIntegrationSandbox,
   createLspClientDriver,
   type IntegrationSandbox,
+  seedSandboxProjectConfig,
   verifyPrerequisites,
 } from './fixture.js';
 
@@ -112,7 +112,6 @@ test('multi-module Maven reactor & Gradle: model inspection (sourceRoots, SDKs, 
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
-    await copyCachedWrapper(sandbox);
     const rootDir = await copyWorkspaceFixture('jdk21', sandbox);
 
     const alphaMainDir = join(rootDir, 'alpha', 'src', 'main', 'java', 'com', 'example');
@@ -306,6 +305,7 @@ application {
     await mkdir(mvnAlphaSrc, { recursive: true });
     await mkdir(mvnBetaSrc, { recursive: true });
 
+    await seedSandboxProjectConfig(mavenRoot, sandbox);
     await writeFile(
       join(mavenRoot, 'pom.xml'),
       `<project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -443,7 +443,6 @@ test('workspace reload: adding dependency jar and switching project JDK updates 
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
-    await copyCachedWrapper(sandbox);
     const projectDir = await copyWorkspaceFixture('jdk21', sandbox);
     const appSource = join(projectDir, 'src', 'main', 'java', 'com', 'example', 'App.java');
 
@@ -632,7 +631,6 @@ test('Gradle subproject test debug: custom debugOptions port, --tests filter, DA
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
-    await copyCachedWrapper(sandbox);
     const localM2 = await prepareJUnitRepository(sandbox);
     const rootDir = await copyWorkspaceFixture('jdk21', sandbox);
     const customDebugPort = await getFreePort();

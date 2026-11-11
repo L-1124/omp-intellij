@@ -301,3 +301,74 @@ test('malformed release responses cannot report resource cleanup', async () => {
     );
   }
 });
+
+test('CLI parameter validation: rejects invalid args, selector conflicts, and bad UUIDs with code 2', () => {
+  const cliScript = scriptPath;
+  const testPackage = 'com.example.ompattachfixture';
+
+  // Missing subcommand
+  const noArgs = spawnSync(process.execPath, [cliScript], {
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  });
+  assert.equal(noArgs.status, 2);
+  const parsedNoArgs = JSON.parse(noArgs.stdout.trim());
+  assert.equal(parsedNoArgs.success, false);
+  assert.equal(parsedNoArgs.error.code, 'INVALID_ARGUMENTS');
+
+  // Both package and pid specified
+  const bothSelectors = spawnSync(
+    process.execPath,
+    [cliScript, 'prepare', '--package', testPackage, '--pid', '1234'],
+    { encoding: 'utf8', timeout: 5000, windowsHide: true },
+  );
+  assert.equal(bothSelectors.status, 2);
+  const parsedBoth = JSON.parse(bothSelectors.stdout.trim());
+  assert.equal(parsedBoth.success, false);
+  assert.equal(parsedBoth.error.code, 'INVALID_ARGUMENTS');
+
+  // Missing package value
+  const missingPkg = spawnSync(process.execPath, [cliScript, 'prepare', '--package'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  });
+  assert.equal(missingPkg.status, 2);
+  const parsedMissingPkg = JSON.parse(missingPkg.stdout.trim());
+  assert.equal(parsedMissingPkg.success, false);
+  assert.equal(parsedMissingPkg.error.code, 'INVALID_ARGUMENTS');
+
+  // Both timeout and timeout-ms
+  const bothTimeouts = spawnSync(
+    process.execPath,
+    [cliScript, 'prepare', '--package', testPackage, '--timeout', '10', '--timeout-ms', '10000'],
+    { encoding: 'utf8', timeout: 5000, windowsHide: true },
+  );
+  assert.equal(bothTimeouts.status, 2);
+  const parsedTimeouts = JSON.parse(bothTimeouts.stdout.trim());
+  assert.equal(parsedTimeouts.success, false);
+  assert.equal(parsedTimeouts.error.code, 'INVALID_ARGUMENTS');
+
+  // Unknown flag
+  const unknownFlag = spawnSync(
+    process.execPath,
+    [cliScript, 'prepare', '--package', testPackage, '--bogus'],
+    { encoding: 'utf8', timeout: 5000, windowsHide: true },
+  );
+  assert.equal(unknownFlag.status, 2);
+  const parsedUnknown = JSON.parse(unknownFlag.stdout.trim());
+  assert.equal(parsedUnknown.success, false);
+  assert.equal(parsedUnknown.error.code, 'INVALID_ARGUMENTS');
+
+  // Cleanup with invalid UUID
+  const badUuid = spawnSync(process.execPath, [cliScript, 'cleanup', '--key', 'not-a-valid-uuid'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  });
+  assert.equal(badUuid.status, 2);
+  const parsedBadUuid = JSON.parse(badUuid.stdout.trim());
+  assert.equal(parsedBadUuid.success, false);
+  assert.equal(parsedBadUuid.error.code, 'INVALID_ARGUMENTS');
+});

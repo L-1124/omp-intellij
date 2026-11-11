@@ -12,14 +12,16 @@ import { pathToFileURL } from 'node:url';
 import type { PreparedAndroidDebug } from '../../src/android/debug-attach.js';
 import { encode } from '../../src/shared/protocol.js';
 import {
-  copyCachedWrapper,
+  copyCachedDependencies,
   copyWorkspaceFixture,
   createDapClientDriver,
   createIntegrationSandbox,
   createLspClientDriver,
+  type IntegrationPrerequisites,
   type IntegrationSandbox,
   killProcessSafely,
   type LspClientDriver,
+  seedSandboxProjectConfig,
   verifyPrerequisites,
 } from './fixture.js';
 
@@ -88,14 +90,33 @@ function parseVariablesResponse(body: unknown): VariablesResponse {
   return {};
 }
 
-function hasPrerequisitesEnvironment(): boolean {
-  return Boolean(
-    process.env.OMP_INTELLIJ_TEST_SERVER &&
-      process.env.OMP_INTELLIJ_TEST_JDK17 &&
-      process.env.OMP_INTELLIJ_TEST_JDK21 &&
-      process.env.OMP_INTELLIJ_TEST_ACCEPTED_EULA_HASH &&
-      (process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT),
-  );
+export interface AndroidAttachPrerequisites extends IntegrationPrerequisites {
+  androidHome: string;
+  deviceId: string;
+}
+
+export async function verifyAndroidAttachPrerequisites(): Promise<AndroidAttachPrerequisites> {
+  const prereqs = await verifyPrerequisites();
+  const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
+  if (!sdk || !existsSync(sdk)) {
+    throw new Error(
+      'Android attach suite missing valid ANDROID_HOME or ANDROID_SDK_ROOT directory',
+    );
+  }
+  const deviceId = getTestDevice();
+  if (!deviceId) {
+    throw new Error(
+      'Android attach suite missing required OMP_INTELLIJ_TEST_ANDROID_DEVICE environment variable',
+    );
+  }
+  if (!isDeviceOnline(deviceId)) {
+    throw new Error(`Android attach suite required Android device ${deviceId} is not online`);
+  }
+  return {
+    ...prereqs,
+    androidHome: sdk,
+    deviceId,
+  };
 }
 
 function getTestDevice(): string | undefined {
@@ -124,6 +145,9 @@ function isDeviceOnline(deviceId: string): boolean {
   const res = runAdb(['-s', deviceId, 'get-state'], 5000);
   return res.status === 0 && res.stdout.trim() === 'device';
 }
+
+const prerequisites = await verifyAndroidAttachPrerequisites();
+const deviceId = prerequisites.deviceId;
 
 function getAdbForwardList(deviceId: string): string {
   const res = runAdb(['-s', deviceId, 'forward', '--list'], 5000);
@@ -292,7 +316,6 @@ async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
   apkPath: string;
   mainActivityPath: string;
 }> {
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   const sourceDir = resolve('test-fixtures', 'android-attach');
   const targetDir = join(sandbox.workspacesDir, 'android-attach');
   await cp(sourceDir, targetDir, { recursive: true });
@@ -321,13 +344,7 @@ async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
   ].join('\n');
   await writeFile(join(targetDir, 'gradle.properties'), gradleProps, 'utf8');
 
-  const cache = process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE;
-  if (cache && existsSync(cache)) {
-    sandbox.gradleUserHome = resolve(cache);
-    sandbox.env.GRADLE_USER_HOME = sandbox.gradleUserHome;
-  } else {
-    await copyCachedWrapper(sandbox);
-  }
+  await copyCachedDependencies(sandbox);
 
   const wrapperJarSrc = resolve(
     'test-fixtures',
@@ -353,6 +370,7 @@ async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
     'MainActivity.java',
   );
 
+  await seedSandboxProjectConfig(targetDir, sandbox);
   return { targetDir, apkPath, mainActivityPath };
 }
 
@@ -406,98 +424,11 @@ async function ensureApkBuilt(
   return apkPath;
 }
 
-test('CLI parameter validation: rejects invalid args, selector conflicts, and bad UUIDs with code 2', async () => {
-  const cliScript = resolveCliScript();
-
-  // Missing subcommand
-  const noArgs = spawnSync(process.execPath, [cliScript], {
-    encoding: 'utf8',
-    timeout: 5000,
-    windowsHide: true,
-  });
-  assert.equal(noArgs.status, 2);
-  const parsedNoArgs = JSON.parse(noArgs.stdout.trim());
-  assert.equal(parsedNoArgs.success, false);
-  assert.equal(parsedNoArgs.error.code, 'INVALID_ARGUMENTS');
-
-  // Both package and pid specified
-  const bothSelectors = spawnSync(
-    process.execPath,
-    [cliScript, 'prepare', '--package', TEST_PACKAGE, '--pid', '1234'],
-    { encoding: 'utf8', timeout: 5000, windowsHide: true },
+test('Scenario 1: normal launch -> CLI prepare -> DAP attach -> tick breakpoint -> frame variables (after = before + 1) -> step counter -> detach (original PID survives) -> release & idempotence -> adb forward unchanged', async () => {
+  assert.ok(
+    isDeviceOnline(deviceId),
+    `Android device ${deviceId} must remain online during acceptance`,
   );
-  assert.equal(bothSelectors.status, 2);
-  const parsedBoth = JSON.parse(bothSelectors.stdout.trim());
-  assert.equal(parsedBoth.success, false);
-  assert.equal(parsedBoth.error.code, 'INVALID_ARGUMENTS');
-
-  // Missing package value
-  const missingPkg = spawnSync(process.execPath, [cliScript, 'prepare', '--package'], {
-    encoding: 'utf8',
-    timeout: 5000,
-    windowsHide: true,
-  });
-  assert.equal(missingPkg.status, 2);
-  const parsedMissingPkg = JSON.parse(missingPkg.stdout.trim());
-  assert.equal(parsedMissingPkg.success, false);
-  assert.equal(parsedMissingPkg.error.code, 'INVALID_ARGUMENTS');
-
-  // Both timeout and timeout-ms
-  const bothTimeouts = spawnSync(
-    process.execPath,
-    [cliScript, 'prepare', '--package', TEST_PACKAGE, '--timeout', '10', '--timeout-ms', '10000'],
-    { encoding: 'utf8', timeout: 5000, windowsHide: true },
-  );
-  assert.equal(bothTimeouts.status, 2);
-  const parsedTimeouts = JSON.parse(bothTimeouts.stdout.trim());
-  assert.equal(parsedTimeouts.success, false);
-  assert.equal(parsedTimeouts.error.code, 'INVALID_ARGUMENTS');
-
-  // Unknown flag
-  const unknownFlag = spawnSync(
-    process.execPath,
-    [cliScript, 'prepare', '--package', TEST_PACKAGE, '--bogus'],
-    { encoding: 'utf8', timeout: 5000, windowsHide: true },
-  );
-  assert.equal(unknownFlag.status, 2);
-  const parsedUnknown = JSON.parse(unknownFlag.stdout.trim());
-  assert.equal(parsedUnknown.success, false);
-  assert.equal(parsedUnknown.error.code, 'INVALID_ARGUMENTS');
-
-  // Cleanup with invalid UUID
-  const badUuid = spawnSync(process.execPath, [cliScript, 'cleanup', '--key', 'not-a-valid-uuid'], {
-    encoding: 'utf8',
-    timeout: 5000,
-    windowsHide: true,
-  });
-  assert.equal(badUuid.status, 2);
-  const parsedBadUuid = JSON.parse(badUuid.stdout.trim());
-  assert.equal(parsedBadUuid.success, false);
-  assert.equal(parsedBadUuid.error.code, 'INVALID_ARGUMENTS');
-});
-
-test('Scenario 1: normal launch -> CLI prepare -> DAP attach -> tick breakpoint -> frame variables (after = before + 1) -> step counter -> detach (original PID survives) -> release & idempotence -> adb forward unchanged', async (t) => {
-  if (!hasPrerequisitesEnvironment()) {
-    t.skip('Missing general integration suite prerequisites (server, JDKs, EULA)');
-    return;
-  }
-  const deviceId = getTestDevice();
-  if (!deviceId) {
-    console.warn(
-      'SKIPPED: OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete',
-    );
-    t.skip('OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete');
-    return;
-  }
-  if (!isDeviceOnline(deviceId)) {
-    console.warn(
-      `SKIPPED: Android device ${deviceId} is not online; Android device acceptance incomplete`,
-    );
-    t.skip(`Android device ${deviceId} is not online; Android device acceptance incomplete`);
-    return;
-  }
-
-  const prerequisites = await verifyPrerequisites();
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -659,28 +590,11 @@ test('Scenario 1: normal launch -> CLI prepare -> DAP attach -> tick breakpoint 
   }
 });
 
-test('Scenario 2: am start -D (Waiting for Debugger) -> prepare & attach -> dismiss waiting dialog -> tick breakpoint hit -> frame variables -> step -> detach', async (t) => {
-  if (!hasPrerequisitesEnvironment()) {
-    t.skip('Missing general integration suite prerequisites (server, JDKs, EULA)');
-    return;
-  }
-  const deviceId = getTestDevice();
-  if (!deviceId) {
-    console.warn(
-      'SKIPPED: OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete',
-    );
-    t.skip('OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete');
-    return;
-  }
-  if (!isDeviceOnline(deviceId)) {
-    console.warn(
-      `SKIPPED: Android device ${deviceId} is not online; Android device acceptance incomplete`,
-    );
-    t.skip(`Android device ${deviceId} is not online; Android device acceptance incomplete`);
-    return;
-  }
-
-  const prerequisites = await verifyPrerequisites();
+test('Scenario 2: am start -D (Waiting for Debugger) -> prepare & attach -> dismiss waiting dialog -> tick breakpoint hit -> frame variables -> step -> detach', async () => {
+  assert.ok(
+    isDeviceOnline(deviceId),
+    `Android device ${deviceId} must remain online during acceptance`,
+  );
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -783,28 +697,11 @@ test('Scenario 2: am start -D (Waiting for Debugger) -> prepare & attach -> dism
   }
 });
 
-test('Scenario 3: strong proxy kill (SIGKILL) -> LSP EOF auto resource recovery without subsequent prepare -> port freed -> sibling project unaffected -> new prepare succeeds', async (t) => {
-  if (!hasPrerequisitesEnvironment()) {
-    t.skip('Missing general integration suite prerequisites (server, JDKs, EULA)');
-    return;
-  }
-  const deviceId = getTestDevice();
-  if (!deviceId) {
-    console.warn(
-      'SKIPPED: OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete',
-    );
-    t.skip('OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete');
-    return;
-  }
-  if (!isDeviceOnline(deviceId)) {
-    console.warn(
-      `SKIPPED: Android device ${deviceId} is not online; Android device acceptance incomplete`,
-    );
-    t.skip(`Android device ${deviceId} is not online; Android device acceptance incomplete`);
-    return;
-  }
-
-  const prerequisites = await verifyPrerequisites();
+test('Scenario 3: strong proxy kill (SIGKILL) -> LSP EOF auto resource recovery without subsequent prepare -> port freed -> sibling project unaffected -> new prepare succeeds', async () => {
+  assert.ok(
+    isDeviceOnline(deviceId),
+    `Android device ${deviceId} must remain online during acceptance`,
+  );
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -872,28 +769,11 @@ test('Scenario 3: strong proxy kill (SIGKILL) -> LSP EOF auto resource recovery 
   }
 });
 
-test('Scenario 4: target cancellation & exit -> stopping app on device releases proxy port & handle closes cleanly', async (t) => {
-  if (!hasPrerequisitesEnvironment()) {
-    t.skip('Missing general integration suite prerequisites (server, JDKs, EULA)');
-    return;
-  }
-  const deviceId = getTestDevice();
-  if (!deviceId) {
-    console.warn(
-      'SKIPPED: OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete',
-    );
-    t.skip('OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete');
-    return;
-  }
-  if (!isDeviceOnline(deviceId)) {
-    console.warn(
-      `SKIPPED: Android device ${deviceId} is not online; Android device acceptance incomplete`,
-    );
-    t.skip(`Android device ${deviceId} is not online; Android device acceptance incomplete`);
-    return;
-  }
-
-  const prerequisites = await verifyPrerequisites();
+test('Scenario 4: target cancellation & exit -> stopping app on device releases proxy port & handle closes cleanly', async () => {
+  assert.ok(
+    isDeviceOnline(deviceId),
+    `Android device ${deviceId} must remain online during acceptance`,
+  );
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -931,28 +811,11 @@ test('Scenario 4: target cancellation & exit -> stopping app on device releases 
   }
 });
 
-test('Scenario 5: prepare and release without DAP -> port released, cleanup is idempotent, and second release returns already_cleaned', async (t) => {
-  if (!hasPrerequisitesEnvironment()) {
-    t.skip('Missing general integration suite prerequisites (server, JDKs, EULA)');
-    return;
-  }
-  const deviceId = getTestDevice();
-  if (!deviceId) {
-    console.warn(
-      'SKIPPED: OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete',
-    );
-    t.skip('OMP_INTELLIJ_TEST_ANDROID_DEVICE not set; Android device acceptance incomplete');
-    return;
-  }
-  if (!isDeviceOnline(deviceId)) {
-    console.warn(
-      `SKIPPED: Android device ${deviceId} is not online; Android device acceptance incomplete`,
-    );
-    t.skip(`Android device ${deviceId} is not online; Android device acceptance incomplete`);
-    return;
-  }
-
-  const prerequisites = await verifyPrerequisites();
+test('Scenario 5: prepare and release without DAP -> port released, cleanup is idempotent, and second release returns already_cleaned', async () => {
+  assert.ok(
+    isDeviceOnline(deviceId),
+    `Android device ${deviceId} must remain online during acceptance`,
+  );
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -993,15 +856,12 @@ test('Scenario 5: prepare and release without DAP -> port released, cleanup is i
   }
 });
 
-test('cancelling a real pending prepare releases its child and preserves subsequent device use', async (t) => {
-  const deviceId = getTestDevice();
-  if (!hasPrerequisitesEnvironment() || !deviceId || !isDeviceOnline(deviceId)) {
-    t.skip(
-      'Explicit online Android device and integration prerequisites required; device acceptance incomplete',
-    );
-    return;
-  }
-  const sandbox = await createIntegrationSandbox(await verifyPrerequisites());
+test('cancelling a real pending prepare releases its child and preserves subsequent device use', async () => {
+  assert.ok(
+    isDeviceOnline(deviceId),
+    `Android device ${deviceId} must remain online during acceptance`,
+  );
+  const sandbox = await createIntegrationSandbox(prerequisites);
   let lsp: LspClientDriver | undefined;
   try {
     const { targetDir, apkPath } = await copyAndroidAttachFixture(sandbox);
