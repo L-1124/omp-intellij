@@ -292,7 +292,7 @@ async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
   apkPath: string;
   mainActivityPath: string;
 }> {
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/intellij-android');
+  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   const sourceDir = resolve('test-fixtures', 'android-attach');
   const targetDir = join(sandbox.workspacesDir, 'android-attach');
   await cp(sourceDir, targetDir, { recursive: true });

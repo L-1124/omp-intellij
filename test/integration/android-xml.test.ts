@@ -28,7 +28,6 @@ interface LspRange {
   end: LspPosition;
 }
 
-
 interface LspDiagnostic {
   range: LspRange;
   severity?: number;
@@ -341,7 +340,7 @@ test('Android XML symbols and manifest references integration', {
 }, async (t) => {
   const prereqs = await verifyPrerequisites();
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/intellij-android');
+  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   let projectDir = '';
   let driver: LspClientDriver | null = null;
   let flatDriver: LspClientDriver | null = null;
@@ -2524,14 +2523,7 @@ async function findLayoutlibApiJar(gradleCacheDir: string): Promise<string> {
 }
 
 async function findGuavaJar(gradleCacheDir: string): Promise<string> {
-  const dir = join(
-    gradleCacheDir,
-    'caches',
-    'modules-2',
-    'files-2.1',
-    'com.google.guava',
-    'guava',
-  );
+  const dir = join(gradleCacheDir, 'caches', 'modules-2', 'files-2.1', 'com.google.guava', 'guava');
   if (existsSync(dir)) {
     const versions = await readdir(dir);
     for (const v of versions) {
@@ -2576,10 +2568,16 @@ async function createCustomExternalAar(
   );
 
   const dummySrc = join(staging, 'ExternalDummy.java');
-  await writeFile(dummySrc, 'package com.example.external; public final class ExternalDummy {}\n', 'utf8');
+  await writeFile(
+    dummySrc,
+    'package com.example.external; public final class ExternalDummy {}\n',
+    'utf8',
+  );
   spawnSync(javac, ['-d', classesStaging, dummySrc], { encoding: 'utf8' });
   const classesJar = join(aarContent, 'classes.jar');
-  spawnSync(jar, ['--create', '--file', classesJar, '-C', classesStaging, '.'], { encoding: 'utf8' });
+  spawnSync(jar, ['--create', '--file', classesJar, '-C', classesStaging, '.'], {
+    encoding: 'utf8',
+  });
 
   const detectorSrc = join(staging, 'CustomExternalDetector.java');
   await writeFile(
@@ -2682,30 +2680,34 @@ async function createCustomExternalAar(
   );
 
   const manifestDetectorSrc = join(staging, 'CustomManifestDetector.java');
-  await writeFile(manifestDetectorSrc, [
-    'package com.example.external;',
-    'import com.android.tools.lint.client.api.LintClient;',
-    'import com.android.tools.lint.detector.api.*;',
-    'import org.w3c.dom.*;',
-    'import java.util.*;',
-    'public class CustomManifestDetector extends Detector implements XmlScanner {',
-    '  public static final Issue ISSUE = Issue.create("CustomManifestRule", "Manifest source mapping",',
-    '      "Reports the merged label through its original source location.", Category.CORRECTNESS, 5,',
-    '      Severity.WARNING, new Implementation(CustomManifestDetector.class, Scope.MANIFEST_SCOPE));',
-    '  public Collection<String> getApplicableElements() { return Collections.singleton("application"); }',
-    '  public void visitElement(XmlContext context, Element source) {',
-    '    Document merged = context.getClient().getMergedManifest(context.getProject());',
-    '    if (merged == null) return;',
-    '    NodeList apps = merged.getElementsByTagName("application");',
-    '    if (apps.getLength() == 0) return;',
-    '    Attr label = ((Element) apps.item(0)).getAttributeNodeNS("http://schemas.android.com/apk/res/android", "label");',
-    '    if (label == null) return;',
-    '    boolean built = merged.getUserData(LintClient.MERGED_MANIFEST) != null;',
-    '    Location location = context.getLocation(label);',
-    '    context.report(ISSUE, label, location, "ManifestSnapshot: merged=" + built + "; label=" + label.getValue());',
-    '  }',
-    '}',
-  ].join('\n'), 'utf8');
+  await writeFile(
+    manifestDetectorSrc,
+    [
+      'package com.example.external;',
+      'import com.android.tools.lint.client.api.LintClient;',
+      'import com.android.tools.lint.detector.api.*;',
+      'import org.w3c.dom.*;',
+      'import java.util.*;',
+      'public class CustomManifestDetector extends Detector implements XmlScanner {',
+      '  public static final Issue ISSUE = Issue.create("CustomManifestRule", "Manifest source mapping",',
+      '      "Reports the merged label through its original source location.", Category.CORRECTNESS, 5,',
+      '      Severity.WARNING, new Implementation(CustomManifestDetector.class, Scope.MANIFEST_SCOPE));',
+      '  public Collection<String> getApplicableElements() { return Collections.singleton("application"); }',
+      '  public void visitElement(XmlContext context, Element source) {',
+      '    Document merged = context.getClient().getMergedManifest(context.getProject());',
+      '    if (merged == null) return;',
+      '    NodeList apps = merged.getElementsByTagName("application");',
+      '    if (apps.getLength() == 0) return;',
+      '    Attr label = ((Element) apps.item(0)).getAttributeNodeNS("http://schemas.android.com/apk/res/android", "label");',
+      '    if (label == null) return;',
+      '    boolean built = merged.getUserData(LintClient.MERGED_MANIFEST) != null;',
+      '    Location location = context.getLocation(label);',
+      '    context.report(ISSUE, label, location, "ManifestSnapshot: merged=" + built + "; label=" + label.getValue());',
+      '  }',
+      '}',
+    ].join('\n'),
+    'utf8',
+  );
 
   const registrySrc = join(staging, 'CustomExternalIssueRegistry.java');
   await writeFile(
@@ -2736,8 +2738,14 @@ async function createCustomExternalAar(
     'utf8',
   );
 
-  const cp = [lintApiJar, commonJar, sdkCommonJar, layoutlibApiJar, guavaJar].join(process.platform === 'win32' ? ';' : ':');
-  const compileRes = spawnSync(javac, ['-cp', cp, '-d', lintStaging, detectorSrc, xmlDetectorSrc, manifestDetectorSrc, registrySrc], { encoding: 'utf8' });
+  const cp = [lintApiJar, commonJar, sdkCommonJar, layoutlibApiJar, guavaJar].join(
+    process.platform === 'win32' ? ';' : ':',
+  );
+  const compileRes = spawnSync(
+    javac,
+    ['-cp', cp, '-d', lintStaging, detectorSrc, xmlDetectorSrc, manifestDetectorSrc, registrySrc],
+    { encoding: 'utf8' },
+  );
   assert.equal(compileRes.status, 0, `compileCustomExternal: ${compileRes.stderr}`);
 
   const servicesDir = join(lintStaging, 'META-INF', 'services');
@@ -2758,7 +2766,9 @@ async function createCustomExternalAar(
   );
 
   await mkdir(join(targetAarPath, '..'), { recursive: true });
-  spawnSync(jar, ['--create', '--file', targetAarPath, '-C', aarContent, '.'], { encoding: 'utf8' });
+  spawnSync(jar, ['--create', '--file', targetAarPath, '-C', aarContent, '.'], {
+    encoding: 'utf8',
+  });
 }
 
 async function createCorruptedAar(
@@ -2791,7 +2801,9 @@ async function createCorruptedAar(
   await writeFile(dummySrc, 'package com.example.corrupt; public final class Dummy {}\n', 'utf8');
   spawnSync(javac, ['-d', classesStaging, dummySrc], { encoding: 'utf8' });
   const classesJar = join(aarContent, 'classes.jar');
-  spawnSync(jar, ['--create', '--file', classesJar, '-C', classesStaging, '.'], { encoding: 'utf8' });
+  spawnSync(jar, ['--create', '--file', classesJar, '-C', classesStaging, '.'], {
+    encoding: 'utf8',
+  });
 
   // 1. CorruptConstructorIssueRegistry (loading phase LinkageError)
   const corruptConstructorSrc = join(staging, 'CorruptConstructorIssueRegistry.java');
@@ -2903,7 +2915,11 @@ async function createCorruptedAar(
   );
 
   const cp = [lintApiJar, commonJar].join(process.platform === 'win32' ? ';' : ':');
-  const compileCorrupt = spawnSync(javac, ['-cp', cp, '-d', lintStaging, corruptConstructorSrc, corruptExecutionSrc, corruptXmlSrc], { encoding: 'utf8' });
+  const compileCorrupt = spawnSync(
+    javac,
+    ['-cp', cp, '-d', lintStaging, corruptConstructorSrc, corruptExecutionSrc, corruptXmlSrc],
+    { encoding: 'utf8' },
+  );
   assert.equal(compileCorrupt.status, 0, `compileCorrupt: ${compileCorrupt.stderr}`);
 
   const servicesDir = join(lintStaging, 'META-INF', 'services');
@@ -2924,7 +2940,9 @@ async function createCorruptedAar(
   );
 
   await mkdir(join(targetAarPath, '..'), { recursive: true });
-  spawnSync(jar, ['--create', '--file', targetAarPath, '-C', aarContent, '.'], { encoding: 'utf8' });
+  spawnSync(jar, ['--create', '--file', targetAarPath, '-C', aarContent, '.'], {
+    encoding: 'utf8',
+  });
 }
 
 async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<string> {
@@ -2960,14 +2978,10 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
   if (existsSync(GLOBAL_GRADLE_USER_HOME)) {
     const modulesSource = join(GLOBAL_GRADLE_USER_HOME, 'caches', 'modules-2');
     if (existsSync(modulesSource)) {
-      await cp(
-        modulesSource,
-        join(sandbox.gradleUserHome, 'caches', 'modules-2'),
-        {
-          recursive: true,
-          filter: (source) => !source.endsWith('.lock') && basename(source) !== 'gc.properties',
-        },
-      );
+      await cp(modulesSource, join(sandbox.gradleUserHome, 'caches', 'modules-2'), {
+        recursive: true,
+        filter: (source) => !source.endsWith('.lock') && basename(source) !== 'gc.properties',
+      });
     }
   }
 
@@ -3067,16 +3081,22 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
   const appSrc = join(targetDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app');
   await mkdir(appSrc, { recursive: true });
   const probePlaceholders: Record<string, string> = {
-    'CoexistActivity.java': 'package com.example.app;\npublic class CoexistActivity extends android.app.Activity {}\n',
+    'CoexistActivity.java':
+      'package com.example.app;\npublic class CoexistActivity extends android.app.Activity {}\n',
     'CoexistKt.kt': 'package com.example.app\nclass CoexistKt\n',
-    'MatrixJavaActivity.java': 'package com.example.app;\npublic class MatrixJavaActivity extends android.app.Activity {}\n',
+    'MatrixJavaActivity.java':
+      'package com.example.app;\npublic class MatrixJavaActivity extends android.app.Activity {}\n',
     'MatrixKotlin.kt': 'package com.example.app\nclass MatrixKotlin\n',
     'ComposeLintProbe.kt': 'package com.example.app\nclass ComposeLintProbe\n',
-    'ModelTransitionActivity.java': 'package com.example.app;\npublic class ModelTransitionActivity extends android.app.Activity {}\n',
-    'LintXmlOverrideActivity.java': 'package com.example.app;\npublic class LintXmlOverrideActivity extends android.app.Activity {}\n',
+    'ModelTransitionActivity.java':
+      'package com.example.app;\npublic class ModelTransitionActivity extends android.app.Activity {}\n',
+    'LintXmlOverrideActivity.java':
+      'package com.example.app;\npublic class LintXmlOverrideActivity extends android.app.Activity {}\n',
     'CorruptIsolationProbe.kt': 'package com.example.app\nclass CorruptIsolationProbe\n',
-    'CacheCancelProbe.java': 'package com.example.app;\npublic class CacheCancelProbe extends android.app.Activity {}\n',
-    'CustomExternalProbe.java': 'package com.example.app;\npublic class CustomExternalProbe extends android.app.Activity {}\n',
+    'CacheCancelProbe.java':
+      'package com.example.app;\npublic class CacheCancelProbe extends android.app.Activity {}\n',
+    'CustomExternalProbe.java':
+      'package com.example.app;\npublic class CustomExternalProbe extends android.app.Activity {}\n',
   };
   for (const [name, content] of Object.entries(probePlaceholders)) {
     await writeFile(join(appSrc, name), content, 'utf8');
@@ -3217,7 +3237,7 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
       '    <TextView',
       '        android:layout_width="wrap_content"',
       '        android:layout_height="wrap_content"',
-      '        android:text=\'Single quote hardcoded\' />',
+      "        android:text='Single quote hardcoded' />",
       '    <TextView',
       '        android:layout_width="wrap_content"',
       '        android:layout_height="wrap_content"',
@@ -3343,7 +3363,7 @@ test('Android Lint diagnostics integration', {
 }, async (t) => {
   const prereqs = await verifyPrerequisites();
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/intellij-android');
+  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   let projectDir = '';
   let driver: InitializedLspClientDriver | null = null;
 
@@ -3368,645 +3388,901 @@ test('Android Lint diagnostics integration', {
     );
 
     // 2. Compiler errors coexist (Java and Kotlin)
-    await t.test('Diagnostics: Compiler and Lint diagnostics coexist (Java and Kotlin)', async () => {
-      const javaCoexistUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'CoexistActivity.java'),
-      ).href;
-      const javaText1 = [
-        'package com.example.app;',
-        '',
-        'public class CoexistActivity extends android.app.Activity {',
-        '    public void testCoexist() {',
-        '        int compilerErrorVar = "bad_type";',
-        '        new android.app.NotificationChannel("chan_coexist", "Coexist Channel", 3);',
-        '    }',
-        '}',
-        '',
-      ].join('\n');
+    await t.test(
+      'Diagnostics: Compiler and Lint diagnostics coexist (Java and Kotlin)',
+      async () => {
+        const javaCoexistUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'CoexistActivity.java',
+          ),
+        ).href;
+        const javaText1 = [
+          'package com.example.app;',
+          '',
+          'public class CoexistActivity extends android.app.Activity {',
+          '    public void testCoexist() {',
+          '        int compilerErrorVar = "bad_type";',
+          '        new android.app.NotificationChannel("chan_coexist", "Coexist Channel", 3);',
+          '    }',
+          '}',
+          '',
+        ].join('\n');
 
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: javaCoexistUri, languageId: 'java', version: 1, text: javaText1 },
-      });
-
-      try {
-        const report1 = await pullDiagnostics(client, javaCoexistUri);
-        assert.equal(report1.kind, 'full');
-        const items1 = report1.items ?? [];
-        const lintErrors1 = items1.filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        const compilerErrors1 = items1.filter((d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1);
-
-        assert.ok(lintErrors1.length >= 1, 'Java must report NewApi from android-lint');
-        assert.ok(compilerErrors1.length >= 1, 'Java must report native compiler error for bad_type');
-
-        const targetIdRange = findRangeInText(javaText1, 'new android.app.NotificationChannel("chan_coexist", "Coexist Channel", 3)');
-        const matchingLint = lintErrors1.find(
-          (d: LspDiagnostic) =>
-            d.range.start.line === targetIdRange.start.line &&
-            d.range.start.character === targetIdRange.start.character,
-        );
-        assert.ok(matchingLint, JSON.stringify(lintErrors1));
-
-        // Fix compiler error via didChange
-        const javaText2 = javaText1.replace('int compilerErrorVar = "bad_type";', 'int compilerErrorVar = 42;');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: javaCoexistUri, version: 2 },
-          contentChanges: [{ text: javaText2 }],
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: javaCoexistUri, languageId: 'java', version: 1, text: javaText1 },
         });
 
-        const report2 = await pullDiagnostics(client, javaCoexistUri);
-        const items2 = report2.items ?? [];
-        const lintErrors2 = items2.filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        const compilerErrors2 = items2.filter((d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1);
+        try {
+          const report1 = await pullDiagnostics(client, javaCoexistUri);
+          assert.equal(report1.kind, 'full');
+          const items1 = report1.items ?? [];
+          const lintErrors1 = items1.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          const compilerErrors1 = items1.filter(
+            (d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1,
+          );
 
-        assert.equal(compilerErrors2.length, 0, 'Java compiler error must be cleared after type fix');
-        assert.ok(lintErrors2.length >= 1, 'Java NewApi must remain after compiler error cleared');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: javaCoexistUri } });
-      }
+          assert.ok(lintErrors1.length >= 1, 'Java must report NewApi from android-lint');
+          assert.ok(
+            compilerErrors1.length >= 1,
+            'Java must report native compiler error for bad_type',
+          );
 
-      // Kotlin coexistence
-      const ktCoexistUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'CoexistKt.kt'),
-      ).href;
-      const ktText1 = [
-        'package com.example.app',
-        '',
-        'fun testCoexistKt() {',
-        '    val compilerErrorVar: Int = "bad_type"',
-        '    android.app.NotificationChannel("chan_kt_coexist", "Coexist KT", 3)',
-        '}',
-        '',
-      ].join('\n');
+          const targetIdRange = findRangeInText(
+            javaText1,
+            'new android.app.NotificationChannel("chan_coexist", "Coexist Channel", 3)',
+          );
+          const matchingLint = lintErrors1.find(
+            (d: LspDiagnostic) =>
+              d.range.start.line === targetIdRange.start.line &&
+              d.range.start.character === targetIdRange.start.character,
+          );
+          assert.ok(matchingLint, JSON.stringify(lintErrors1));
 
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: ktCoexistUri, languageId: 'kotlin', version: 1, text: ktText1 },
-      });
+          // Fix compiler error via didChange
+          const javaText2 = javaText1.replace(
+            'int compilerErrorVar = "bad_type";',
+            'int compilerErrorVar = 42;',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: javaCoexistUri, version: 2 },
+            contentChanges: [{ text: javaText2 }],
+          });
 
-      try {
-        const reportKt1 = await pullDiagnostics(client, ktCoexistUri);
-        const itemsKt1 = reportKt1.items ?? [];
-        const lintErrorsKt1 = itemsKt1.filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        const compilerErrorsKt1 = itemsKt1.filter((d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1);
+          const report2 = await pullDiagnostics(client, javaCoexistUri);
+          const items2 = report2.items ?? [];
+          const lintErrors2 = items2.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          const compilerErrors2 = items2.filter(
+            (d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1,
+          );
 
-        assert.ok(lintErrorsKt1.length >= 1, 'Kotlin must report NewApi from android-lint');
-        assert.ok(compilerErrorsKt1.length >= 1, 'Kotlin must report native compiler error for bad_type');
+          assert.equal(
+            compilerErrors2.length,
+            0,
+            'Java compiler error must be cleared after type fix',
+          );
+          assert.ok(
+            lintErrors2.length >= 1,
+            'Java NewApi must remain after compiler error cleared',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: javaCoexistUri } });
+        }
 
-        // Fix Kotlin compiler error via didChange
-        const ktText2 = ktText1.replace('val compilerErrorVar: Int = "bad_type"', 'val compilerErrorVar: Int = 42');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: ktCoexistUri, version: 2 },
-          contentChanges: [{ text: ktText2 }],
+        // Kotlin coexistence
+        const ktCoexistUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'CoexistKt.kt'),
+        ).href;
+        const ktText1 = [
+          'package com.example.app',
+          '',
+          'fun testCoexistKt() {',
+          '    val compilerErrorVar: Int = "bad_type"',
+          '    android.app.NotificationChannel("chan_kt_coexist", "Coexist KT", 3)',
+          '}',
+          '',
+        ].join('\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: ktCoexistUri, languageId: 'kotlin', version: 1, text: ktText1 },
         });
 
-        const reportKt2 = await pullDiagnostics(client, ktCoexistUri);
-        const itemsKt2 = reportKt2.items ?? [];
-        const lintErrorsKt2 = itemsKt2.filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        const compilerErrorsKt2 = itemsKt2.filter((d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1);
+        try {
+          const reportKt1 = await pullDiagnostics(client, ktCoexistUri);
+          const itemsKt1 = reportKt1.items ?? [];
+          const lintErrorsKt1 = itemsKt1.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          const compilerErrorsKt1 = itemsKt1.filter(
+            (d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1,
+          );
 
-        assert.equal(compilerErrorsKt2.length, 0, 'Kotlin compiler error must be cleared after type fix');
-        assert.ok(lintErrorsKt2.length >= 1, 'Kotlin NewApi must remain after compiler error cleared');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: ktCoexistUri } });
-      }
-    });
+          assert.ok(lintErrorsKt1.length >= 1, 'Kotlin must report NewApi from android-lint');
+          assert.ok(
+            compilerErrorsKt1.length >= 1,
+            'Kotlin must report native compiler error for bad_type',
+          );
+
+          // Fix Kotlin compiler error via didChange
+          const ktText2 = ktText1.replace(
+            'val compilerErrorVar: Int = "bad_type"',
+            'val compilerErrorVar: Int = 42',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: ktCoexistUri, version: 2 },
+            contentChanges: [{ text: ktText2 }],
+          });
+
+          const reportKt2 = await pullDiagnostics(client, ktCoexistUri);
+          const itemsKt2 = reportKt2.items ?? [];
+          const lintErrorsKt2 = itemsKt2.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          const compilerErrorsKt2 = itemsKt2.filter(
+            (d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1,
+          );
+
+          assert.equal(
+            compilerErrorsKt2.length,
+            0,
+            'Kotlin compiler error must be cleared after type fix',
+          );
+          assert.ok(
+            lintErrorsKt2.length >= 1,
+            'Kotlin NewApi must remain after compiler error cleared',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: ktCoexistUri } });
+        }
+      },
+    );
 
     // 3. Twelve NewApi positive-negative matrix and didChange (Java and Kotlin)
-    await t.test('Diagnostics: NewApi 12-item positive-negative matrix and didChange (Java and Kotlin)', async () => {
-      const javaMatrixUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'MatrixJavaActivity.java'),
-      ).href;
+    await t.test(
+      'Diagnostics: NewApi 12-item positive-negative matrix and didChange (Java and Kotlin)',
+      async () => {
+        const javaMatrixUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'MatrixJavaActivity.java',
+          ),
+        ).href;
 
-      // J1: 1 unprotected + 1 protected by Build.VERSION.SDK_INT >= 26
-      const jText1 = [
-        'package com.example.app;',
-        '',
-        'public class MatrixJavaActivity extends android.app.Activity {',
-        '    public void testMatrix() {',
-        '        new android.app.NotificationChannel("unprotected", "Unprotected", 3);',
-        '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
-        '            new android.app.NotificationChannel("protected", "Protected", 3);',
-        '        }',
-        '    }',
-        '}',
-        '',
-      ].join('\n');
-
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: javaMatrixUri, languageId: 'java', version: 1, text: jText1 },
-      });
-
-      try {
-        const repJ1 = await pullDiagnostics(client, javaMatrixUri);
-        const lintJ1 = (repJ1.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintJ1.length, 1, 'J1: exactly 1 NewApi error for unprotected call');
-        const targetIdRangeJ = findRangeInText(jText1, 'new android.app.NotificationChannel');
-        assert.deepEqual(lintJ1[0].range, targetIdRangeJ);
-
-        // J2: both protected by >= 26
-        const jText2 = [
+        // J1: 1 unprotected + 1 protected by Build.VERSION.SDK_INT >= 26
+        const jText1 = [
           'package com.example.app;',
           '',
           'public class MatrixJavaActivity extends android.app.Activity {',
           '    public void testMatrix() {',
+          '        new android.app.NotificationChannel("unprotected", "Unprotected", 3);',
           '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
-          '            new android.app.NotificationChannel("p1", "P1", 3);',
-          '        }',
-          '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
-          '            new android.app.NotificationChannel("p2", "P2", 3);',
+          '            new android.app.NotificationChannel("protected", "Protected", 3);',
           '        }',
           '    }',
           '}',
           '',
         ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: javaMatrixUri, version: 2 },
-          contentChanges: [{ text: jText2 }],
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: javaMatrixUri, languageId: 'java', version: 1, text: jText1 },
         });
-        const repJ2 = await pullDiagnostics(client, javaMatrixUri);
-        const lintJ2 = (repJ2.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintJ2.length, 0, 'J2: 0 NewApi errors when both protected by SDK_INT >= 26');
 
-        // J3: both protected only by >= 25
-        const jText3 = [
-          'package com.example.app;',
-          '',
-          'public class MatrixJavaActivity extends android.app.Activity {',
-          '    public void testMatrix() {',
-          '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
-          '            new android.app.NotificationChannel("p25_1", "P25_1", 3);',
-          '        }',
-          '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
-          '            new android.app.NotificationChannel("p25_2", "P25_2", 3);',
-          '        }',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: javaMatrixUri, version: 3 },
-          contentChanges: [{ text: jText3 }],
-        });
-        const repJ3 = await pullDiagnostics(client, javaMatrixUri);
-        const lintJ3 = (repJ3.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintJ3.length, 2, 'J3: 2 NewApi errors when protected only by SDK_INT >= 25');
+        try {
+          const repJ1 = await pullDiagnostics(client, javaMatrixUri);
+          const lintJ1 = (repJ1.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(lintJ1.length, 1, 'J1: exactly 1 NewApi error for unprotected call');
+          const targetIdRangeJ = findRangeInText(jText1, 'new android.app.NotificationChannel');
+          assert.deepEqual(lintJ1[0].range, targetIdRangeJ);
 
-        // J4: annotated with TargetApi(26)
-        const jText4 = [
-          'package com.example.app;',
-          '',
-          'public class MatrixJavaActivity extends android.app.Activity {',
-          '    @android.annotation.TargetApi(26)',
-          '    public void testMatrix() {',
-          '        new android.app.NotificationChannel("targetApi", "TargetApi", 3);',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: javaMatrixUri, version: 4 },
-          contentChanges: [{ text: jText4 }],
-        });
-        const repJ4 = await pullDiagnostics(client, javaMatrixUri);
-        const lintJ4 = (repJ4.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintJ4.length, 0, 'J4: 0 NewApi errors with @TargetApi(26)');
-
-        // J5: annotated with @SuppressWarnings("NewApi")
-        const jText5 = [
-          'package com.example.app;',
-          '',
-          'public class MatrixJavaActivity extends android.app.Activity {',
-          '    @SuppressWarnings("NewApi")',
-          '    public void testMatrix() {',
-          '        new android.app.NotificationChannel("suppress", "Suppress", 3);',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: javaMatrixUri, version: 5 },
-          contentChanges: [{ text: jText5 }],
-        });
-        const repJ5 = await pullDiagnostics(client, javaMatrixUri);
-        const lintJ5 = (repJ5.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintJ5.length, 0, 'J5: 0 NewApi errors with @SuppressWarnings("NewApi")');
-
-        // J6: didChange reverting back to unprotected call
-        const jText6 = [
-          'package com.example.app;',
-          '',
-          'public class MatrixJavaActivity extends android.app.Activity {',
-          '    public void testMatrix() {',
-          '        new android.app.NotificationChannel("revert_unprotected", "Revert", 3);',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: javaMatrixUri, version: 6 },
-          contentChanges: [{ text: jText6 }],
-        });
-        const repJ6 = await pullDiagnostics(client, javaMatrixUri);
-        const lintJ6 = (repJ6.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintJ6.length, 1, 'J6: NewApi reappears after reverting to unprotected call');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: javaMatrixUri } });
-      }
-
-      // Kotlin 6 cases (K1 to K6)
-      const ktMatrixUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'MatrixKotlin.kt'),
-      ).href;
-
-      // K1: 1 unprotected + 1 protected by Build.VERSION.SDK_INT >= 26
-      const kText1 = [
-        'package com.example.app',
-        '',
-        'class MatrixKotlin {',
-        '    fun testMatrix() {',
-        '        android.app.NotificationChannel("unprotected_kt", "Unprotected KT", 3)',
-        '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
-        '            android.app.NotificationChannel("protected_kt", "Protected KT", 3)',
-        '        }',
-        '    }',
-        '}',
-        '',
-      ].join('\n');
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: ktMatrixUri, languageId: 'kotlin', version: 1, text: kText1 },
-      });
-
-      try {
-        const repK1 = await pullDiagnostics(client, ktMatrixUri);
-        const lintK1 = (repK1.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintK1.length, 1, 'K1: exactly 1 NewApi error for unprotected call');
-        const targetIdRangeK = findRangeInText(kText1, 'NotificationChannel', 1);
-        assert.equal(lintK1[0].range.start.line, targetIdRangeK.start.line, 'K1: must flag unprotected line');
-        assert.equal(lintK1[0].range.start.character, targetIdRangeK.start.character, 'K1: start char must match identifier');
-        assert.equal(lintK1[0].range.end.character, targetIdRangeK.end.character, 'K1: end char must match identifier');
-
-        // K2: both protected by >= 26
-        const kText2 = [
-          'package com.example.app',
-          '',
-          'class MatrixKotlin {',
-          '    fun testMatrix() {',
-          '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
-          '            android.app.NotificationChannel("p1_kt", "P1 KT", 3)',
-          '        }',
-          '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
-          '            android.app.NotificationChannel("p2_kt", "P2 KT", 3)',
-          '        }',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: ktMatrixUri, version: 2 },
-          contentChanges: [{ text: kText2 }],
-        });
-        const repK2 = await pullDiagnostics(client, ktMatrixUri);
-        const lintK2 = (repK2.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintK2.length, 0, 'K2: 0 NewApi errors when both protected by SDK_INT >= 26');
-
-        // K3: both protected only by >= 25
-        const kText3 = [
-          'package com.example.app',
-          '',
-          'class MatrixKotlin {',
-          '    fun testMatrix() {',
-          '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
-          '            android.app.NotificationChannel("p25_1_kt", "P25_1 KT", 3)',
-          '        }',
-          '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
-          '            android.app.NotificationChannel("p25_2_kt", "P25_2 KT", 3)',
-          '        }',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: ktMatrixUri, version: 3 },
-          contentChanges: [{ text: kText3 }],
-        });
-        const repK3 = await pullDiagnostics(client, ktMatrixUri);
-        const lintK3 = (repK3.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintK3.length, 2, 'K3: 2 NewApi errors when protected only by SDK_INT >= 25');
-
-        // K4: annotated with TargetApi(26)
-        const kText4 = [
-          'package com.example.app',
-          '',
-          'class MatrixKotlin {',
-          '    @android.annotation.TargetApi(26)',
-          '    fun testMatrix() {',
-          '        android.app.NotificationChannel("targetApi_kt", "TargetApi KT", 3)',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: ktMatrixUri, version: 4 },
-          contentChanges: [{ text: kText4 }],
-        });
-        const repK4 = await pullDiagnostics(client, ktMatrixUri);
-        const lintK4 = (repK4.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintK4.length, 0, 'K4: 0 NewApi errors with @TargetApi(26)');
-
-        // K5: annotated with @Suppress("NewApi")
-        const kText5 = [
-          'package com.example.app',
-          '',
-          'class MatrixKotlin {',
-          '    @Suppress("NewApi")',
-          '    fun testMatrix() {',
-          '        android.app.NotificationChannel("suppress_kt", "Suppress KT", 3)',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: ktMatrixUri, version: 5 },
-          contentChanges: [{ text: kText5 }],
-        });
-        const repK5 = await pullDiagnostics(client, ktMatrixUri);
-        const lintK5 = (repK5.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintK5.length, 0, 'K5: 0 NewApi errors with @Suppress("NewApi")');
-
-        // K6: didChange reverting back to unprotected call
-        const kText6 = [
-          'package com.example.app',
-          '',
-          'class MatrixKotlin {',
-          '    fun testMatrix() {',
-          '        android.app.NotificationChannel("revert_unprotected_kt", "Revert KT", 3)',
-          '    }',
-          '}',
-          '',
-        ].join('\n');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: ktMatrixUri, version: 6 },
-          contentChanges: [{ text: kText6 }],
-        });
-        const repK6 = await pullDiagnostics(client, ktMatrixUri);
-        const lintK6 = (repK6.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintK6.length, 1, 'K6: NewApi reappears after reverting to unprotected call');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: ktMatrixUri } });
-      }
-    });
-
-    // 4. Real Compose unremembered/remember/suppress/coexist plus ComposableNaming
-    await t.test('Diagnostics: Real Compose unremembered/remember/suppress/coexist and ComposableNaming', async () => {
-      const composeUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'ComposeLintProbe.kt'),
-      ).href;
-      const composeText = [
-        'package com.example.app',
-        '',
-        'import androidx.compose.runtime.Composable',
-        'import androidx.compose.runtime.mutableStateOf',
-        'import androidx.compose.runtime.remember',
-        '',
-        '@Composable',
-        'fun BadStateProbe() {',
-        '    val state = mutableStateOf(0)',
-        '}',
-        '',
-        '@Composable',
-        'fun GoodStateProbe() {',
-        '    val state = remember { mutableStateOf(0) }',
-        '}',
-        '',
-        '@Suppress("UnrememberedMutableState")',
-        '@Composable',
-        'fun SuppressedStateProbe() {',
-        '    val state = mutableStateOf(0)',
-        '}',
-        '',
-        '@Composable',
-        'fun CoexistStateAndApiProbe() {',
-        '    val state = mutableStateOf(0)',
-        '    android.app.NotificationChannel("chan_compose", "Compose Channel", 3)',
-        '}',
-        '',
-        '@Composable',
-        'fun badNamingComposable() {',
-        '}',
-        '',
-      ].join('\n');
-
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: composeUri, languageId: 'kotlin', version: 1, text: composeText },
-      });
-
-      try {
-        const report = await pullDiagnostics(client, composeUri);
-        const items = report.items ?? [];
-
-        // 1. BadStateProbe reports UnrememberedMutableState
-        const badStateRange = findRangeInText(composeText, 'mutableStateOf(0)', 1);
-        const unremembered1 = items.filter(
-          (d: LspDiagnostic) =>
-            d.source === 'android-lint' &&
-            d.code === 'UnrememberedMutableState' &&
-            d.range.start.line === badStateRange.start.line,
-        );
-        assert.equal(unremembered1.length, 1, 'BadStateProbe must report UnrememberedMutableState');
-
-        // Phase D check: BadStateProbe should NOT report Kotlin FunctionName warning
-        const functionNameWarnings = items.filter(
-          (d: LspDiagnostic) =>
-            d.code === 'FunctionName' ||
-            d.message?.includes('Function name') ||
-            d.message?.includes('lowercase letter'),
-        );
-        const badFuncLine = composeText.split('\n').findIndex((l: string) => l.includes('fun BadStateProbe()'));
-        assert.ok(
-          !functionNameWarnings.some((d: LspDiagnostic) => d.range.start.line === badFuncLine),
-          'BadStateProbe FunctionName warning must be suppressed by Phase D',
-        );
-
-        // 2. GoodStateProbe does not report UnrememberedMutableState
-        const goodLine = composeText.split('\n').findIndex((l: string) => l.includes('GoodStateProbe()'));
-        const goodUnremembered = items.filter(
-          (d: LspDiagnostic) =>
-            d.source === 'android-lint' &&
-            d.code === 'UnrememberedMutableState' &&
-            d.range.start.line > goodLine &&
-            d.range.start.line < goodLine + 4,
-        );
-        assert.equal(goodUnremembered.length, 0, 'GoodStateProbe must not report UnrememberedMutableState');
-
-        // 3. SuppressedStateProbe does not report UnrememberedMutableState
-        const suppLine = composeText.split('\n').findIndex((l: string) => l.includes('SuppressedStateProbe()'));
-        const suppUnremembered = items.filter(
-          (d: LspDiagnostic) =>
-            d.source === 'android-lint' &&
-            d.code === 'UnrememberedMutableState' &&
-            d.range.start.line > suppLine &&
-            d.range.start.line < suppLine + 4,
-        );
-        assert.equal(suppUnremembered.length, 0, 'SuppressedStateProbe must not report UnrememberedMutableState');
-
-        // 4. CoexistStateAndApiProbe reports BOTH UnrememberedMutableState and NewApi
-        const coexistLine = composeText.split('\n').findIndex((l: string) => l.includes('CoexistStateAndApiProbe()'));
-        const coexistUnremembered = items.filter(
-          (d: LspDiagnostic) =>
-            d.source === 'android-lint' &&
-            d.code === 'UnrememberedMutableState' &&
-            d.range.start.line > coexistLine &&
-            d.range.start.line < coexistLine + 5,
-        );
-        const coexistNewApi = items.filter(
-          (d: LspDiagnostic) =>
-            d.source === 'android-lint' &&
-            d.code === 'NewApi' &&
-            d.range.start.line > coexistLine &&
-            d.range.start.line < coexistLine + 5,
-        );
-        assert.equal(coexistUnremembered.length, 1, 'Coexist probe must report UnrememberedMutableState');
-        assert.equal(coexistNewApi.length, 1, 'Coexist probe must report NewApi');
-
-        // 5. ComposableNaming on badNamingComposable
-        const namingIssues = items.filter(
-          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ComposableNaming',
-        );
-        assert.ok(namingIssues.length >= 1, 'badNamingComposable must report ComposableNaming');
-        const namingRange = findRangeInText(composeText, 'badNamingComposable', 1);
-        const matchingNaming = namingIssues.find((d: LspDiagnostic) => d.range.start.line === namingRange.start.line);
-        assert.ok(matchingNaming, 'ComposableNaming range must target the function name');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: composeUri } });
-      }
-    });
-
-    // 5. Clean literal, dynamic, productFlavors and official built-model transitions
-    await t.test('Diagnostics: Clean literal, dynamic, productFlavors and official built-model transitions', async () => {
-      const transUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'ComposeLintProbe.kt'),
-      ).href;
-      const transText = [
-        'package com.example.app',
-        'import androidx.compose.runtime.Composable',
-        'import androidx.compose.runtime.mutableStateOf',
-        '@Composable fun ModelTransition() {',
-        '    val state = mutableStateOf(0)',
-        '    android.app.NotificationChannel("chan_trans", "Transition Channel", 3)',
-        '}',
-        '',
-      ].join('\n');
-
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: transUri, languageId: 'kotlin', version: 1, text: transText },
-      });
-
-      const appBuildGradlePath = join(projectDir, 'app', 'build.gradle.kts');
-      const originalBuildContent = await readFile(appBuildGradlePath, 'utf8');
-      const modelDir = join(
-        projectDir,
-        'app',
-        'build',
-        'intermediates',
-        'lint_report_lint_model',
-        'debug',
-        'generateDebugLintReportModel',
-      );
-
-      try {
-        await rm(join(projectDir, 'app', 'build'), { recursive: true, force: true });
-        // Clean literal state (minSdk = 21 static literal): NewApi is reported
-        const rep1 = await pullDiagnostics(client, transUri);
-        const lint1 = (rep1.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lint1.length, 1, 'Clean literal minSdk=21 must report NewApi for API 26 call');
-        assert.equal((rep1.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState').length, 1);
-
-        await writeFile(appBuildGradlePath, originalBuildContent.replace('minSdk = 21', 'minSdk = resolveMinimumSdk()'));
-        const dynamic = await pullDiagnostics(client, transUri);
-        assert.equal((dynamic.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'NewApi').length, 0);
-        assert.equal((dynamic.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState').length, 1);
-
-        // Modify build.gradle.kts to introduce productFlavors (clean state premise missing)
-        const flavorBuildContent = originalBuildContent.replace(
-          'defaultConfig {',
-          [
-            'flavorDimensions += "mode"',
-            '    productFlavors {',
-            '        create("demo") {',
-            '            dimension = "mode"',
-            '            minSdk = 21',
+          // J2: both protected by >= 26
+          const jText2 = [
+            'package com.example.app;',
+            '',
+            'public class MatrixJavaActivity extends android.app.Activity {',
+            '    public void testMatrix() {',
+            '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
+            '            new android.app.NotificationChannel("p1", "P1", 3);',
             '        }',
-            '        create("full") {',
-            '            dimension = "mode"',
-            '            minSdk = 26',
+            '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
+            '            new android.app.NotificationChannel("p2", "P2", 3);',
             '        }',
             '    }',
-            '    defaultConfig {',
-          ].join('\n'),
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: javaMatrixUri, version: 2 },
+            contentChanges: [{ text: jText2 }],
+          });
+          const repJ2 = await pullDiagnostics(client, javaMatrixUri);
+          const lintJ2 = (repJ2.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lintJ2.length,
+            0,
+            'J2: 0 NewApi errors when both protected by SDK_INT >= 26',
+          );
+
+          // J3: both protected only by >= 25
+          const jText3 = [
+            'package com.example.app;',
+            '',
+            'public class MatrixJavaActivity extends android.app.Activity {',
+            '    public void testMatrix() {',
+            '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
+            '            new android.app.NotificationChannel("p25_1", "P25_1", 3);',
+            '        }',
+            '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
+            '            new android.app.NotificationChannel("p25_2", "P25_2", 3);',
+            '        }',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: javaMatrixUri, version: 3 },
+            contentChanges: [{ text: jText3 }],
+          });
+          const repJ3 = await pullDiagnostics(client, javaMatrixUri);
+          const lintJ3 = (repJ3.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lintJ3.length,
+            2,
+            'J3: 2 NewApi errors when protected only by SDK_INT >= 25',
+          );
+
+          // J4: annotated with TargetApi(26)
+          const jText4 = [
+            'package com.example.app;',
+            '',
+            'public class MatrixJavaActivity extends android.app.Activity {',
+            '    @android.annotation.TargetApi(26)',
+            '    public void testMatrix() {',
+            '        new android.app.NotificationChannel("targetApi", "TargetApi", 3);',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: javaMatrixUri, version: 4 },
+            contentChanges: [{ text: jText4 }],
+          });
+          const repJ4 = await pullDiagnostics(client, javaMatrixUri);
+          const lintJ4 = (repJ4.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(lintJ4.length, 0, 'J4: 0 NewApi errors with @TargetApi(26)');
+
+          // J5: annotated with @SuppressWarnings("NewApi")
+          const jText5 = [
+            'package com.example.app;',
+            '',
+            'public class MatrixJavaActivity extends android.app.Activity {',
+            '    @SuppressWarnings("NewApi")',
+            '    public void testMatrix() {',
+            '        new android.app.NotificationChannel("suppress", "Suppress", 3);',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: javaMatrixUri, version: 5 },
+            contentChanges: [{ text: jText5 }],
+          });
+          const repJ5 = await pullDiagnostics(client, javaMatrixUri);
+          const lintJ5 = (repJ5.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(lintJ5.length, 0, 'J5: 0 NewApi errors with @SuppressWarnings("NewApi")');
+
+          // J6: didChange reverting back to unprotected call
+          const jText6 = [
+            'package com.example.app;',
+            '',
+            'public class MatrixJavaActivity extends android.app.Activity {',
+            '    public void testMatrix() {',
+            '        new android.app.NotificationChannel("revert_unprotected", "Revert", 3);',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: javaMatrixUri, version: 6 },
+            contentChanges: [{ text: jText6 }],
+          });
+          const repJ6 = await pullDiagnostics(client, javaMatrixUri);
+          const lintJ6 = (repJ6.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lintJ6.length,
+            1,
+            'J6: NewApi reappears after reverting to unprotected call',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: javaMatrixUri } });
+        }
+
+        // Kotlin 6 cases (K1 to K6)
+        const ktMatrixUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'MatrixKotlin.kt',
+          ),
+        ).href;
+
+        // K1: 1 unprotected + 1 protected by Build.VERSION.SDK_INT >= 26
+        const kText1 = [
+          'package com.example.app',
+          '',
+          'class MatrixKotlin {',
+          '    fun testMatrix() {',
+          '        android.app.NotificationChannel("unprotected_kt", "Unprotected KT", 3)',
+          '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
+          '            android.app.NotificationChannel("protected_kt", "Protected KT", 3)',
+          '        }',
+          '    }',
+          '}',
+          '',
+        ].join('\n');
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: ktMatrixUri, languageId: 'kotlin', version: 1, text: kText1 },
+        });
+
+        try {
+          const repK1 = await pullDiagnostics(client, ktMatrixUri);
+          const lintK1 = (repK1.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(lintK1.length, 1, 'K1: exactly 1 NewApi error for unprotected call');
+          const targetIdRangeK = findRangeInText(kText1, 'NotificationChannel', 1);
+          assert.equal(
+            lintK1[0].range.start.line,
+            targetIdRangeK.start.line,
+            'K1: must flag unprotected line',
+          );
+          assert.equal(
+            lintK1[0].range.start.character,
+            targetIdRangeK.start.character,
+            'K1: start char must match identifier',
+          );
+          assert.equal(
+            lintK1[0].range.end.character,
+            targetIdRangeK.end.character,
+            'K1: end char must match identifier',
+          );
+
+          // K2: both protected by >= 26
+          const kText2 = [
+            'package com.example.app',
+            '',
+            'class MatrixKotlin {',
+            '    fun testMatrix() {',
+            '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
+            '            android.app.NotificationChannel("p1_kt", "P1 KT", 3)',
+            '        }',
+            '        if (android.os.Build.VERSION.SDK_INT >= 26) {',
+            '            android.app.NotificationChannel("p2_kt", "P2 KT", 3)',
+            '        }',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: ktMatrixUri, version: 2 },
+            contentChanges: [{ text: kText2 }],
+          });
+          const repK2 = await pullDiagnostics(client, ktMatrixUri);
+          const lintK2 = (repK2.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lintK2.length,
+            0,
+            'K2: 0 NewApi errors when both protected by SDK_INT >= 26',
+          );
+
+          // K3: both protected only by >= 25
+          const kText3 = [
+            'package com.example.app',
+            '',
+            'class MatrixKotlin {',
+            '    fun testMatrix() {',
+            '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
+            '            android.app.NotificationChannel("p25_1_kt", "P25_1 KT", 3)',
+            '        }',
+            '        if (android.os.Build.VERSION.SDK_INT >= 25) {',
+            '            android.app.NotificationChannel("p25_2_kt", "P25_2 KT", 3)',
+            '        }',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: ktMatrixUri, version: 3 },
+            contentChanges: [{ text: kText3 }],
+          });
+          const repK3 = await pullDiagnostics(client, ktMatrixUri);
+          const lintK3 = (repK3.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lintK3.length,
+            2,
+            'K3: 2 NewApi errors when protected only by SDK_INT >= 25',
+          );
+
+          // K4: annotated with TargetApi(26)
+          const kText4 = [
+            'package com.example.app',
+            '',
+            'class MatrixKotlin {',
+            '    @android.annotation.TargetApi(26)',
+            '    fun testMatrix() {',
+            '        android.app.NotificationChannel("targetApi_kt", "TargetApi KT", 3)',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: ktMatrixUri, version: 4 },
+            contentChanges: [{ text: kText4 }],
+          });
+          const repK4 = await pullDiagnostics(client, ktMatrixUri);
+          const lintK4 = (repK4.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(lintK4.length, 0, 'K4: 0 NewApi errors with @TargetApi(26)');
+
+          // K5: annotated with @Suppress("NewApi")
+          const kText5 = [
+            'package com.example.app',
+            '',
+            'class MatrixKotlin {',
+            '    @Suppress("NewApi")',
+            '    fun testMatrix() {',
+            '        android.app.NotificationChannel("suppress_kt", "Suppress KT", 3)',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: ktMatrixUri, version: 5 },
+            contentChanges: [{ text: kText5 }],
+          });
+          const repK5 = await pullDiagnostics(client, ktMatrixUri);
+          const lintK5 = (repK5.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(lintK5.length, 0, 'K5: 0 NewApi errors with @Suppress("NewApi")');
+
+          // K6: didChange reverting back to unprotected call
+          const kText6 = [
+            'package com.example.app',
+            '',
+            'class MatrixKotlin {',
+            '    fun testMatrix() {',
+            '        android.app.NotificationChannel("revert_unprotected_kt", "Revert KT", 3)',
+            '    }',
+            '}',
+            '',
+          ].join('\n');
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: ktMatrixUri, version: 6 },
+            contentChanges: [{ text: kText6 }],
+          });
+          const repK6 = await pullDiagnostics(client, ktMatrixUri);
+          const lintK6 = (repK6.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lintK6.length,
+            1,
+            'K6: NewApi reappears after reverting to unprotected call',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: ktMatrixUri } });
+        }
+      },
+    );
+
+    // 4. Real Compose unremembered/remember/suppress/coexist plus ComposableNaming
+    await t.test(
+      'Diagnostics: Real Compose unremembered/remember/suppress/coexist and ComposableNaming',
+      async () => {
+        const composeUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'ComposeLintProbe.kt',
+          ),
+        ).href;
+        const composeText = [
+          'package com.example.app',
+          '',
+          'import androidx.compose.runtime.Composable',
+          'import androidx.compose.runtime.mutableStateOf',
+          'import androidx.compose.runtime.remember',
+          '',
+          '@Composable',
+          'fun BadStateProbe() {',
+          '    val state = mutableStateOf(0)',
+          '}',
+          '',
+          '@Composable',
+          'fun GoodStateProbe() {',
+          '    val state = remember { mutableStateOf(0) }',
+          '}',
+          '',
+          '@Suppress("UnrememberedMutableState")',
+          '@Composable',
+          'fun SuppressedStateProbe() {',
+          '    val state = mutableStateOf(0)',
+          '}',
+          '',
+          '@Composable',
+          'fun CoexistStateAndApiProbe() {',
+          '    val state = mutableStateOf(0)',
+          '    android.app.NotificationChannel("chan_compose", "Compose Channel", 3)',
+          '}',
+          '',
+          '@Composable',
+          'fun badNamingComposable() {',
+          '}',
+          '',
+        ].join('\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: composeUri, languageId: 'kotlin', version: 1, text: composeText },
+        });
+
+        try {
+          const report = await pullDiagnostics(client, composeUri);
+          const items = report.items ?? [];
+
+          // 1. BadStateProbe reports UnrememberedMutableState
+          const badStateRange = findRangeInText(composeText, 'mutableStateOf(0)', 1);
+          const unremembered1 = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnrememberedMutableState' &&
+              d.range.start.line === badStateRange.start.line,
+          );
+          assert.equal(
+            unremembered1.length,
+            1,
+            'BadStateProbe must report UnrememberedMutableState',
+          );
+
+          // Phase D check: BadStateProbe should NOT report Kotlin FunctionName warning
+          const functionNameWarnings = items.filter(
+            (d: LspDiagnostic) =>
+              d.code === 'FunctionName' ||
+              d.message?.includes('Function name') ||
+              d.message?.includes('lowercase letter'),
+          );
+          const badFuncLine = composeText
+            .split('\n')
+            .findIndex((l: string) => l.includes('fun BadStateProbe()'));
+          assert.ok(
+            !functionNameWarnings.some((d: LspDiagnostic) => d.range.start.line === badFuncLine),
+            'BadStateProbe FunctionName warning must be suppressed by Phase D',
+          );
+
+          // 2. GoodStateProbe does not report UnrememberedMutableState
+          const goodLine = composeText
+            .split('\n')
+            .findIndex((l: string) => l.includes('GoodStateProbe()'));
+          const goodUnremembered = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnrememberedMutableState' &&
+              d.range.start.line > goodLine &&
+              d.range.start.line < goodLine + 4,
+          );
+          assert.equal(
+            goodUnremembered.length,
+            0,
+            'GoodStateProbe must not report UnrememberedMutableState',
+          );
+
+          // 3. SuppressedStateProbe does not report UnrememberedMutableState
+          const suppLine = composeText
+            .split('\n')
+            .findIndex((l: string) => l.includes('SuppressedStateProbe()'));
+          const suppUnremembered = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnrememberedMutableState' &&
+              d.range.start.line > suppLine &&
+              d.range.start.line < suppLine + 4,
+          );
+          assert.equal(
+            suppUnremembered.length,
+            0,
+            'SuppressedStateProbe must not report UnrememberedMutableState',
+          );
+
+          // 4. CoexistStateAndApiProbe reports BOTH UnrememberedMutableState and NewApi
+          const coexistLine = composeText
+            .split('\n')
+            .findIndex((l: string) => l.includes('CoexistStateAndApiProbe()'));
+          const coexistUnremembered = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'UnrememberedMutableState' &&
+              d.range.start.line > coexistLine &&
+              d.range.start.line < coexistLine + 5,
+          );
+          const coexistNewApi = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' &&
+              d.code === 'NewApi' &&
+              d.range.start.line > coexistLine &&
+              d.range.start.line < coexistLine + 5,
+          );
+          assert.equal(
+            coexistUnremembered.length,
+            1,
+            'Coexist probe must report UnrememberedMutableState',
+          );
+          assert.equal(coexistNewApi.length, 1, 'Coexist probe must report NewApi');
+
+          // 5. ComposableNaming on badNamingComposable
+          const namingIssues = items.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ComposableNaming',
+          );
+          assert.ok(namingIssues.length >= 1, 'badNamingComposable must report ComposableNaming');
+          const namingRange = findRangeInText(composeText, 'badNamingComposable', 1);
+          const matchingNaming = namingIssues.find(
+            (d: LspDiagnostic) => d.range.start.line === namingRange.start.line,
+          );
+          assert.ok(matchingNaming, 'ComposableNaming range must target the function name');
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: composeUri } });
+        }
+      },
+    );
+
+    // 5. Clean literal, dynamic, productFlavors and official built-model transitions
+    await t.test(
+      'Diagnostics: Clean literal, dynamic, productFlavors and official built-model transitions',
+      async () => {
+        const transUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'ComposeLintProbe.kt',
+          ),
+        ).href;
+        const transText = [
+          'package com.example.app',
+          'import androidx.compose.runtime.Composable',
+          'import androidx.compose.runtime.mutableStateOf',
+          '@Composable fun ModelTransition() {',
+          '    val state = mutableStateOf(0)',
+          '    android.app.NotificationChannel("chan_trans", "Transition Channel", 3)',
+          '}',
+          '',
+        ].join('\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: transUri, languageId: 'kotlin', version: 1, text: transText },
+        });
+
+        const appBuildGradlePath = join(projectDir, 'app', 'build.gradle.kts');
+        const originalBuildContent = await readFile(appBuildGradlePath, 'utf8');
+        const modelDir = join(
+          projectDir,
+          'app',
+          'build',
+          'intermediates',
+          'lint_report_lint_model',
+          'debug',
+          'generateDebugLintReportModel',
         );
-        await writeFile(appBuildGradlePath, flavorBuildContent, 'utf8');
 
-        // Pull diagnostics: NewApi must be skipped without guessing minSdk=1
-        const rep2 = await pullDiagnostics(client, transUri);
-        const lint2 = (rep2.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lint2.length, 0, 'Clean state with productFlavors must skip NewApi due to missing premise');
-        assert.equal((rep2.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState').length, 1);
-
-        // Built model transition: write complete official LintModelSerialization schema
-        await mkdir(modelDir, { recursive: true });
-        const moduleXmlContent = [
-          '<lint-module',
-          '    format="1"',
-          '    dir="."',
-          '    name="app"',
-          '    type="APP"',
-          '    buildFolder="build"',
-          '    javaSourceLevel="21"',
-          '    compileTarget="android-37">',
-          '  <lintOptions />',
-          '  <variant name="debug"/>',
-          '</lint-module>',
-          '',
-        ].join('\n');
-        const debugXmlContent = [
-          '<variant',
-          '    name="debug"',
-          '    package="com.example.app"',
-          '    minSdkVersion="21"',
-          '    targetSdkVersion="37"',
-          '    debuggable="true">',
-          '  <buildFeatures />',
-          '  <sourceProviders />',
-          '  <resValues />',
-          '  <manifestPlaceholders />',
-          '  <mainArtifact applicationId="com.example.app" />',
-          '</variant>',
-          '',
-        ].join('\n');
-        await writeFile(join(modelDir, 'module.xml'), moduleXmlContent, 'utf8');
-        await writeFile(join(modelDir, 'debug.xml'), debugXmlContent, 'utf8');
-        await writeFile(join(modelDir, 'debug-mainArtifact-libraries.xml'), '<libraries>\n</libraries>\n', 'utf8');
-        await writeFile(join(modelDir, 'debug-mainArtifact-dependencies.xml'), '<dependencies>\n</dependencies>\n', 'utf8');
-
-        // Pull diagnostics: NewApi must recover from official built model
-        const rep3 = await pullDiagnostics(client, transUri);
-        const lint3 = (rep3.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lint3.length, 1, 'Official built model must restore NewApi detection with minSdkVersion=21');
-        assert.equal((rep3.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState').length, 1);
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: transUri } });
-        await writeFile(appBuildGradlePath, originalBuildContent, 'utf8');
         try {
           await rm(join(projectDir, 'app', 'build'), { recursive: true, force: true });
-        } catch {
-          // Ignore cleanup error
+          // Clean literal state (minSdk = 21 static literal): NewApi is reported
+          const rep1 = await pullDiagnostics(client, transUri);
+          const lint1 = (rep1.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lint1.length,
+            1,
+            'Clean literal minSdk=21 must report NewApi for API 26 call',
+          );
+          assert.equal(
+            (rep1.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState',
+            ).length,
+            1,
+          );
+
+          await writeFile(
+            appBuildGradlePath,
+            originalBuildContent.replace('minSdk = 21', 'minSdk = resolveMinimumSdk()'),
+          );
+          const dynamic = await pullDiagnostics(client, transUri);
+          assert.equal(
+            (dynamic.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'NewApi')
+              .length,
+            0,
+          );
+          assert.equal(
+            (dynamic.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState',
+            ).length,
+            1,
+          );
+
+          // Modify build.gradle.kts to introduce productFlavors (clean state premise missing)
+          const flavorBuildContent = originalBuildContent.replace(
+            'defaultConfig {',
+            [
+              'flavorDimensions += "mode"',
+              '    productFlavors {',
+              '        create("demo") {',
+              '            dimension = "mode"',
+              '            minSdk = 21',
+              '        }',
+              '        create("full") {',
+              '            dimension = "mode"',
+              '            minSdk = 26',
+              '        }',
+              '    }',
+              '    defaultConfig {',
+            ].join('\n'),
+          );
+          await writeFile(appBuildGradlePath, flavorBuildContent, 'utf8');
+
+          // Pull diagnostics: NewApi must be skipped without guessing minSdk=1
+          const rep2 = await pullDiagnostics(client, transUri);
+          const lint2 = (rep2.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lint2.length,
+            0,
+            'Clean state with productFlavors must skip NewApi due to missing premise',
+          );
+          assert.equal(
+            (rep2.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState',
+            ).length,
+            1,
+          );
+
+          // Built model transition: write complete official LintModelSerialization schema
+          await mkdir(modelDir, { recursive: true });
+          const moduleXmlContent = [
+            '<lint-module',
+            '    format="1"',
+            '    dir="."',
+            '    name="app"',
+            '    type="APP"',
+            '    buildFolder="build"',
+            '    javaSourceLevel="21"',
+            '    compileTarget="android-37">',
+            '  <lintOptions />',
+            '  <variant name="debug"/>',
+            '</lint-module>',
+            '',
+          ].join('\n');
+          const debugXmlContent = [
+            '<variant',
+            '    name="debug"',
+            '    package="com.example.app"',
+            '    minSdkVersion="21"',
+            '    targetSdkVersion="37"',
+            '    debuggable="true">',
+            '  <buildFeatures />',
+            '  <sourceProviders />',
+            '  <resValues />',
+            '  <manifestPlaceholders />',
+            '  <mainArtifact applicationId="com.example.app" />',
+            '</variant>',
+            '',
+          ].join('\n');
+          await writeFile(join(modelDir, 'module.xml'), moduleXmlContent, 'utf8');
+          await writeFile(join(modelDir, 'debug.xml'), debugXmlContent, 'utf8');
+          await writeFile(
+            join(modelDir, 'debug-mainArtifact-libraries.xml'),
+            '<libraries>\n</libraries>\n',
+            'utf8',
+          );
+          await writeFile(
+            join(modelDir, 'debug-mainArtifact-dependencies.xml'),
+            '<dependencies>\n</dependencies>\n',
+            'utf8',
+          );
+
+          // Pull diagnostics: NewApi must recover from official built model
+          const rep3 = await pullDiagnostics(client, transUri);
+          const lint3 = (rep3.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            lint3.length,
+            1,
+            'Official built model must restore NewApi detection with minSdkVersion=21',
+          );
+          assert.equal(
+            (rep3.items ?? []).filter(
+              (d) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState',
+            ).length,
+            1,
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: transUri } });
+          await writeFile(appBuildGradlePath, originalBuildContent, 'utf8');
+          try {
+            await rm(join(projectDir, 'app', 'build'), { recursive: true, force: true });
+          } catch {
+            // Ignore cleanup error
+          }
         }
-      }
-    });
+      },
+    );
 
     // 6. lint.xml severity override (ignore and warning)
     await t.test('Diagnostics: lint.xml severity override (ignore and warning)', async () => {
       const xmlProbeUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'LintXmlOverrideActivity.java'),
+        join(
+          projectDir,
+          'app',
+          'src',
+          'main',
+          'java',
+          'com',
+          'example',
+          'app',
+          'LintXmlOverrideActivity.java',
+        ),
       ).href;
       const xmlProbeText = [
         'package com.example.app;',
@@ -4037,8 +4313,14 @@ test('Android Lint diagnostics integration', {
         await writeFile(lintXmlFile, ignoreXml, 'utf8');
 
         const repIgnore = await pullDiagnostics(client, xmlProbeUri);
-        const lintIgnore = (repIgnore.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintIgnore.length, 0, 'lint.xml severity="ignore" must hide NewApi diagnostic');
+        const lintIgnore = (repIgnore.items ?? []).filter(
+          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+        );
+        assert.equal(
+          lintIgnore.length,
+          0,
+          'lint.xml severity="ignore" must hide NewApi diagnostic',
+        );
 
         // Update lint.xml with severity="warning"
         const warningXml = [
@@ -4051,9 +4333,19 @@ test('Android Lint diagnostics integration', {
         await writeFile(lintXmlFile, warningXml, 'utf8');
 
         const repWarning = await pullDiagnostics(client, xmlProbeUri);
-        const lintWarning = (repWarning.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        assert.equal(lintWarning.length, 1, 'lint.xml severity="warning" must report NewApi diagnostic');
-        assert.equal(lintWarning[0].severity, 2, 'DiagnosticSeverity must be Warning (2) when configured in lint.xml');
+        const lintWarning = (repWarning.items ?? []).filter(
+          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+        );
+        assert.equal(
+          lintWarning.length,
+          1,
+          'lint.xml severity="warning" must report NewApi diagnostic',
+        );
+        assert.equal(
+          lintWarning[0].severity,
+          2,
+          'DiagnosticSeverity must be Warning (2) when configured in lint.xml',
+        );
       } finally {
         client.notify('textDocument/didClose', { textDocument: { uri: xmlProbeUri } });
         try {
@@ -4065,208 +4357,291 @@ test('Android Lint diagnostics integration', {
     });
 
     // 7. Corrupt/NoSuchMethodError AAR rule isolation and non-AndroidX rule support
-    await t.test('Diagnostics: Corrupt/NoSuchMethodError AAR rule isolation and non-AndroidX rule support', async () => {
-      const isoUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'CorruptIsolationProbe.kt'),
-      ).href;
-      const isoText = [
-        'package com.example.app',
-        '',
-        'import androidx.compose.runtime.Composable',
-        'import androidx.compose.runtime.mutableStateOf',
-        '',
-        '@Composable',
-        'fun CorruptIsolationFunction() {',
-        '    val state = mutableStateOf(0)',
-        '    android.app.NotificationChannel("iso_chan", "Iso Channel", 3)',
-        '    val errorProbe = "triggerCorruptExecutionError"',
-        '    val nativeError: Int = "native type error"',
-        '}',
-        '',
-      ].join('\n');
+    await t.test(
+      'Diagnostics: Corrupt/NoSuchMethodError AAR rule isolation and non-AndroidX rule support',
+      async () => {
+        const isoUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'CorruptIsolationProbe.kt',
+          ),
+        ).href;
+        const isoText = [
+          'package com.example.app',
+          '',
+          'import androidx.compose.runtime.Composable',
+          'import androidx.compose.runtime.mutableStateOf',
+          '',
+          '@Composable',
+          'fun CorruptIsolationFunction() {',
+          '    val state = mutableStateOf(0)',
+          '    android.app.NotificationChannel("iso_chan", "Iso Channel", 3)',
+          '    val errorProbe = "triggerCorruptExecutionError"',
+          '    val nativeError: Int = "native type error"',
+          '}',
+          '',
+        ].join('\n');
 
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: isoUri, languageId: 'kotlin', version: 1, text: isoText },
-      });
-
-      try {
-        // Pull diagnostics while corrupt-rule.aar (with constructor & execution NoSuchMethodError) is present
-        const report = await pullDiagnostics(client, isoUri);
-        assert.equal(report.kind, 'full', 'Response must be full diagnostic report despite corrupt AAR');
-        const items = report.items ?? [];
-
-        const newApi = items.filter((d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi');
-        const composeRule = items.filter(
-          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'UnrememberedMutableState',
-        );
-
-        assert.equal(newApi.length, 1, JSON.stringify(items));
-        assert.equal(composeRule.length, 1, 'Compose rule must be safely returned despite corrupt AAR');
-        assert.ok(items.some((d) => d.source !== 'android-lint' && d.severity === 1),
-          'Native compiler diagnostics must survive faulty AAR rules');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: isoUri } });
-      }
-
-      // Non-AndroidX custom rule assertion
-      const externalUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'CustomExternalProbe.java'),
-      ).href;
-      const externalText = [
-        'package com.example.app;',
-        '',
-        'public class CustomExternalProbe extends android.app.Activity {',
-        '    public void runExternal() {',
-        '        String trigger = "triggerCustomExternalRule";',
-        '    }',
-        '}',
-        '',
-      ].join('\n');
-
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: externalUri, languageId: 'java', version: 1, text: externalText },
-      });
-
-      try {
-        const externalReport = await pullDiagnostics(client, externalUri);
-        const externalItems = externalReport.items ?? [];
-        const customRules = externalItems.filter(
-          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'CustomExternalRule',
-        );
-        assert.equal(
-          customRules.length,
-          1,
-          'Non-AndroidX dependency AAR rule CustomExternalRule must be loaded and reported',
-        );
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: externalUri } });
-      }
-    });
-
-    // 8. Same-version cache hit and cancel/concurrent-edit recovery
-    await t.test('Diagnostics: Same-version cache hit and cancel/concurrent-edit recovery', async () => {
-      const cacheUri = pathToFileURL(
-        join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app', 'CacheCancelProbe.java'),
-      ).href;
-      const cacheText = [
-        'package com.example.app;',
-        '',
-        'public class CacheCancelProbe extends android.app.Activity {',
-        '    public void testCacheCancel() {',
-        '        String cacheSentinel = "triggerCustomExternalRule";',
-        '        new android.app.NotificationChannel("chan_cc", "CC Channel", 3);',
-        '    }',
-        '}',
-        '',
-      ].join('\n');
-
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: cacheUri, languageId: 'java', version: 1, text: cacheText },
-      });
-
-      try {
-        // A. Same-version cache hit
-        const repFirst = await pullDiagnostics(client, cacheUri);
-        const repSecond = await pullDiagnostics(client, cacheUri);
-        assert.deepEqual(
-          repFirst.items,
-          repSecond.items,
-          'Consecutive requests for same version must return identical cached diagnostics',
-        );
-
-        const firstChecks = (repFirst.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'CustomExternalRule');
-        const secondChecks = (repSecond.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'CustomExternalRule');
-        assert.equal(firstChecks.length, 1);
-        assert.equal(secondChecks.length, 1);
-        assert.equal(secondChecks[0].message, firstChecks[0].message, 'Cache hit must not execute the dependency detector again');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: cacheUri, version: 2 },
-          contentChanges: [{ text: `${cacheText}\n` }],
-        });
-        const rechecked = await pullDiagnostics(client, cacheUri);
-        const nextChecks = (rechecked.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'CustomExternalRule');
-        assert.equal(nextChecks.length, 1);
-        assert.notEqual(nextChecks[0].message, firstChecks[0].message, 'A changed document must execute the detector again');
-
-        // B. In-flight cancellation recovery
-        const busyText = cacheText.replace(
-          '        new android.app.NotificationChannel("chan_cc", "CC Channel", 3);\n',
-          '        new android.app.NotificationChannel("chan_cc", "CC Channel", 3);\n'.repeat(1000),
-        );
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: cacheUri, version: 3 },
-          contentChanges: [{ text: busyText }],
-        });
-        const cancelReqId = 91919;
-        client.process.stdin?.write(
-          encode({
-            jsonrpc: '2.0',
-            id: cancelReqId,
-            method: 'textDocument/diagnostic',
-            params: { textDocument: { uri: cacheUri } },
-          }),
-        );
-        client.notify('$/cancelRequest', { id: cancelReqId });
-        const cancelMsg = await client.waitFor((m: { id?: number | string }) => m.id === cancelReqId, 15000);
-        assert.ok(cancelMsg, 'Cancellation response message must be received');
-        assert.equal(cancelMsg.error?.code, -32800, 'In-flight cancellation must return -32800');
-
-        // Subsequent request after cancel recovers normally
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: cacheUri, version: 4 },
-          contentChanges: [{ text: cacheText }],
-        });
-        const repRecovered = await pullDiagnostics(client, cacheUri);
-        assert.equal(repRecovered.kind, 'full', 'Server must recover and serve diagnostics after cancellation');
-
-        // C. Concurrent didChange recovery
-        const concurrentReqId = 82828;
-        const modifiedText = cacheText.replace(
-          'new android.app.NotificationChannel("chan_cc", "CC Channel", 3);',
-          '// modified comment',
-        );
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: cacheUri, version: 5 },
-          contentChanges: [{ text: busyText }],
-        });
-        client.process.stdin?.write(
-          encode({
-            jsonrpc: '2.0',
-            id: concurrentReqId,
-            method: 'textDocument/diagnostic',
-            params: { textDocument: { uri: cacheUri } },
-          }),
-        );
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: cacheUri, version: 6 },
-          contentChanges: [{ text: modifiedText }],
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: isoUri, languageId: 'kotlin', version: 1, text: isoText },
         });
 
-        const concurrentMsg = await client.waitFor((m: { id?: number | string }) => m.id === concurrentReqId, 15000);
-        assert.ok(concurrentMsg, 'Concurrent request response message must be received');
-        if (concurrentMsg.error) {
+        try {
+          // Pull diagnostics while corrupt-rule.aar (with constructor & execution NoSuchMethodError) is present
+          const report = await pullDiagnostics(client, isoUri);
           assert.equal(
-            concurrentMsg.error.code,
-            -32801,
-            'Concurrent edit during analysis must yield -32801 (content_modified)',
+            report.kind,
+            'full',
+            'Response must be full diagnostic report despite corrupt AAR',
           );
-        } else {
-          const latest = concurrentMsg.result as LspDiagnosticReport;
-          assert.equal(latest.kind, 'full');
-          assert.equal((latest.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'NewApi').length, 0);
+          const items = report.items ?? [];
+
+          const newApi = items.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          const composeRule = items.filter(
+            (d: LspDiagnostic) =>
+              d.source === 'android-lint' && d.code === 'UnrememberedMutableState',
+          );
+
+          assert.equal(newApi.length, 1, JSON.stringify(items));
+          assert.equal(
+            composeRule.length,
+            1,
+            'Compose rule must be safely returned despite corrupt AAR',
+          );
+          assert.ok(
+            items.some((d) => d.source !== 'android-lint' && d.severity === 1),
+            'Native compiler diagnostics must survive faulty AAR rules',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: isoUri } });
         }
 
-        // Post-change diagnostic succeeds and reflects updated content
-        const repPostChange = await pullDiagnostics(client, cacheUri);
-        assert.equal(repPostChange.kind, 'full');
-        const postLint = (repPostChange.items ?? []).filter(
-          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
-        );
-        assert.equal(postLint.length, 0, 'Diagnostics must reflect updated content after didChange');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: cacheUri } });
-      }
-    });
+        // Non-AndroidX custom rule assertion
+        const externalUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'CustomExternalProbe.java',
+          ),
+        ).href;
+        const externalText = [
+          'package com.example.app;',
+          '',
+          'public class CustomExternalProbe extends android.app.Activity {',
+          '    public void runExternal() {',
+          '        String trigger = "triggerCustomExternalRule";',
+          '    }',
+          '}',
+          '',
+        ].join('\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: externalUri, languageId: 'java', version: 1, text: externalText },
+        });
+
+        try {
+          const externalReport = await pullDiagnostics(client, externalUri);
+          const externalItems = externalReport.items ?? [];
+          const customRules = externalItems.filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'CustomExternalRule',
+          );
+          assert.equal(
+            customRules.length,
+            1,
+            'Non-AndroidX dependency AAR rule CustomExternalRule must be loaded and reported',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: externalUri } });
+        }
+      },
+    );
+
+    // 8. Same-version cache hit and cancel/concurrent-edit recovery
+    await t.test(
+      'Diagnostics: Same-version cache hit and cancel/concurrent-edit recovery',
+      async () => {
+        const cacheUri = pathToFileURL(
+          join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'java',
+            'com',
+            'example',
+            'app',
+            'CacheCancelProbe.java',
+          ),
+        ).href;
+        const cacheText = [
+          'package com.example.app;',
+          '',
+          'public class CacheCancelProbe extends android.app.Activity {',
+          '    public void testCacheCancel() {',
+          '        String cacheSentinel = "triggerCustomExternalRule";',
+          '        new android.app.NotificationChannel("chan_cc", "CC Channel", 3);',
+          '    }',
+          '}',
+          '',
+        ].join('\n');
+
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri: cacheUri, languageId: 'java', version: 1, text: cacheText },
+        });
+
+        try {
+          // A. Same-version cache hit
+          const repFirst = await pullDiagnostics(client, cacheUri);
+          const repSecond = await pullDiagnostics(client, cacheUri);
+          assert.deepEqual(
+            repFirst.items,
+            repSecond.items,
+            'Consecutive requests for same version must return identical cached diagnostics',
+          );
+
+          const firstChecks = (repFirst.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'CustomExternalRule',
+          );
+          const secondChecks = (repSecond.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'CustomExternalRule',
+          );
+          assert.equal(firstChecks.length, 1);
+          assert.equal(secondChecks.length, 1);
+          assert.equal(
+            secondChecks[0].message,
+            firstChecks[0].message,
+            'Cache hit must not execute the dependency detector again',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: cacheUri, version: 2 },
+            contentChanges: [{ text: `${cacheText}\n` }],
+          });
+          const rechecked = await pullDiagnostics(client, cacheUri);
+          const nextChecks = (rechecked.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'CustomExternalRule',
+          );
+          assert.equal(nextChecks.length, 1);
+          assert.notEqual(
+            nextChecks[0].message,
+            firstChecks[0].message,
+            'A changed document must execute the detector again',
+          );
+
+          // B. In-flight cancellation recovery
+          const busyText = cacheText.replace(
+            '        new android.app.NotificationChannel("chan_cc", "CC Channel", 3);\n',
+            '        new android.app.NotificationChannel("chan_cc", "CC Channel", 3);\n'.repeat(
+              1000,
+            ),
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: cacheUri, version: 3 },
+            contentChanges: [{ text: busyText }],
+          });
+          const cancelReqId = 91919;
+          client.process.stdin?.write(
+            encode({
+              jsonrpc: '2.0',
+              id: cancelReqId,
+              method: 'textDocument/diagnostic',
+              params: { textDocument: { uri: cacheUri } },
+            }),
+          );
+          client.notify('$/cancelRequest', { id: cancelReqId });
+          const cancelMsg = await client.waitFor(
+            (m: { id?: number | string }) => m.id === cancelReqId,
+            15000,
+          );
+          assert.ok(cancelMsg, 'Cancellation response message must be received');
+          assert.equal(cancelMsg.error?.code, -32800, 'In-flight cancellation must return -32800');
+
+          // Subsequent request after cancel recovers normally
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: cacheUri, version: 4 },
+            contentChanges: [{ text: cacheText }],
+          });
+          const repRecovered = await pullDiagnostics(client, cacheUri);
+          assert.equal(
+            repRecovered.kind,
+            'full',
+            'Server must recover and serve diagnostics after cancellation',
+          );
+
+          // C. Concurrent didChange recovery
+          const concurrentReqId = 82828;
+          const modifiedText = cacheText.replace(
+            'new android.app.NotificationChannel("chan_cc", "CC Channel", 3);',
+            '// modified comment',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: cacheUri, version: 5 },
+            contentChanges: [{ text: busyText }],
+          });
+          client.process.stdin?.write(
+            encode({
+              jsonrpc: '2.0',
+              id: concurrentReqId,
+              method: 'textDocument/diagnostic',
+              params: { textDocument: { uri: cacheUri } },
+            }),
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri: cacheUri, version: 6 },
+            contentChanges: [{ text: modifiedText }],
+          });
+
+          const concurrentMsg = await client.waitFor(
+            (m: { id?: number | string }) => m.id === concurrentReqId,
+            15000,
+          );
+          assert.ok(concurrentMsg, 'Concurrent request response message must be received');
+          if (concurrentMsg.error) {
+            assert.equal(
+              concurrentMsg.error.code,
+              -32801,
+              'Concurrent edit during analysis must yield -32801 (content_modified)',
+            );
+          } else {
+            const latest = concurrentMsg.result as LspDiagnosticReport;
+            assert.equal(latest.kind, 'full');
+            assert.equal(
+              (latest.items ?? []).filter((d) => d.source === 'android-lint' && d.code === 'NewApi')
+                .length,
+              0,
+            );
+          }
+
+          // Post-change diagnostic succeeds and reflects updated content
+          const repPostChange = await pullDiagnostics(client, cacheUri);
+          assert.equal(repPostChange.kind, 'full');
+          const postLint = (repPostChange.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'NewApi',
+          );
+          assert.equal(
+            postLint.length,
+            0,
+            'Diagnostics must reflect updated content after didChange',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri: cacheUri } });
+        }
+      },
+    );
   } finally {
     if (driver) {
       try {
@@ -4352,10 +4727,9 @@ test('Android XML and Manifest Lint diagnostics integration', {
         const nativeManifestUri = pathToFileURL(
           join(nativeProjectDir, 'app', 'config', 'manifest-main.xml'),
         ).href;
-        const nativeManifestContent = (await readFile(fileURLToPath(nativeManifestUri), 'utf8')).replace(
-          '<application',
-          '<application android:debuggable="true"',
-        );
+        const nativeManifestContent = (
+          await readFile(fileURLToPath(nativeManifestUri), 'utf8')
+        ).replace('<application', '<application android:debuggable="true"');
 
         nativeDriver.notify('textDocument/didOpen', {
           textDocument: {
@@ -4376,7 +4750,9 @@ test('Android XML and Manifest Lint diagnostics integration', {
             'Native session without extension must emit zero HardcodedDebugMode diagnostics',
           );
         } finally {
-          nativeDriver.notify('textDocument/didClose', { textDocument: { uri: nativeManifestUri } });
+          nativeDriver.notify('textDocument/didClose', {
+            textDocument: { uri: nativeManifestUri },
+          });
         }
       } finally {
         if (nativeDriver) {
@@ -4393,7 +4769,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
 
   // 2. Full XML & Manifest Lint acceptance suite in isolated session (WITH extension)
   const sandbox = await createIntegrationSandbox(prereqs);
-  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/intellij-android');
+  sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = resolve('resources/ils/271.2085.0/android.lsp');
   let projectDir = '';
   let driver: InitializedLspClientDriver | null = null;
 
@@ -4440,15 +4816,21 @@ test('Android XML and Manifest Lint diagnostics integration', {
           assert.ok(hardcoded1.length >= 1, 'Must report HardcodedText for hardcoded string');
           assert.equal(hardcoded1[0].severity, 2, 'HardcodedText severity must be Warning (2)');
 
-          const expectedAttrRange = findRangeInText(layoutText1, 'android:text="Hardcoded String Text"');
+          const expectedAttrRange = findRangeInText(
+            layoutText1,
+            'android:text="Hardcoded String Text"',
+          );
           const match = hardcoded1.find(
             (d: LspDiagnostic) =>
-              (d.range.start.line === expectedAttrRange.start.line &&
-                d.range.start.character === expectedAttrRange.start.character &&
-                d.range.end.line === expectedAttrRange.end.line &&
-                d.range.end.character === expectedAttrRange.end.character),
+              d.range.start.line === expectedAttrRange.start.line &&
+              d.range.start.character === expectedAttrRange.start.character &&
+              d.range.end.line === expectedAttrRange.end.line &&
+              d.range.end.character === expectedAttrRange.end.character,
           );
-          assert.ok(match, `HardcodedText range must strictly match the full attribute: ${JSON.stringify(hardcoded1)}`);
+          assert.ok(
+            match,
+            `HardcodedText range must strictly match the full attribute: ${JSON.stringify(hardcoded1)}`,
+          );
           // Fix via didChange
           const layoutText2 = layoutText1.replace('Hardcoded String Text', '@string/app_name');
           client.notify('textDocument/didChange', {
@@ -4461,7 +4843,11 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const hardcoded2 = items2.filter(
             (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
           );
-          assert.equal(hardcoded2.length, 0, 'HardcodedText must be cleared after replacing with resource reference');
+          assert.equal(
+            hardcoded2.length,
+            0,
+            'HardcodedText must be cleared after replacing with resource reference',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: layoutUri } });
         }
@@ -4482,8 +4868,15 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const contentDesc1 = itemsImg1.filter(
             (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ContentDescription',
           );
-          assert.ok(contentDesc1.length >= 1, 'Must report ContentDescription for ImageView without description');
-          assert.equal(contentDesc1[0].severity, 2, 'ContentDescription severity must be Warning (2)');
+          assert.ok(
+            contentDesc1.length >= 1,
+            'Must report ContentDescription for ImageView without description',
+          );
+          assert.equal(
+            contentDesc1[0].severity,
+            2,
+            'ContentDescription severity must be Warning (2)',
+          );
 
           // Fix via didChange
           const imageText2 = imageText1.replace(
@@ -4500,7 +4893,11 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const contentDesc2 = itemsImg2.filter(
             (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'ContentDescription',
           );
-          assert.equal(contentDesc2.length, 0, 'ContentDescription must be cleared after adding attribute');
+          assert.equal(
+            contentDesc2.length,
+            0,
+            'ContentDescription must be cleared after adding attribute',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: imageUri } });
         }
@@ -4516,23 +4913,44 @@ test('Android XML and Manifest Lint diagnostics integration', {
         );
 
         client.notify('textDocument/didOpen', {
-          textDocument: { uri: manifestUri, languageId: 'xml', version: 1, text: manifestWithDebug },
+          textDocument: {
+            uri: manifestUri,
+            languageId: 'xml',
+            version: 1,
+            text: manifestWithDebug,
+          },
         });
 
         try {
           const repMan1 = await pullDiagnostics(client, manifestUri);
           const itemsMan1 = repMan1.items ?? [];
-          assert.equal(itemsMan1.some(
-            (d) => d.source === 'android-lint' && d.code === 'MissingClass'
-              && d.message?.includes('com.example.app.MainApplication'),
-          ), false, 'Custom source Manifest checks must resolve classes in the selected production module');
+          assert.equal(
+            itemsMan1.some(
+              (d) =>
+                d.source === 'android-lint' &&
+                d.code === 'MissingClass' &&
+                d.message?.includes('com.example.app.MainApplication'),
+            ),
+            false,
+            'Custom source Manifest checks must resolve classes in the selected production module',
+          );
           const debug1 = itemsMan1.filter(
             (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
           );
-          assert.ok(debug1.length >= 1, `Must report HardcodedDebugMode for android:debuggable="true": ${JSON.stringify(itemsMan1)}`);
-          assert.equal(debug1[0].severity, 1, 'HardcodedDebugMode severity must be Error/Fatal (1)');
+          assert.ok(
+            debug1.length >= 1,
+            `Must report HardcodedDebugMode for android:debuggable="true": ${JSON.stringify(itemsMan1)}`,
+          );
+          assert.equal(
+            debug1[0].severity,
+            1,
+            'HardcodedDebugMode severity must be Error/Fatal (1)',
+          );
 
-          const expectedDebugRange = findRangeInText(manifestWithDebug, 'android:debuggable="true"');
+          const expectedDebugRange = findRangeInText(
+            manifestWithDebug,
+            'android:debuggable="true"',
+          );
           const debugMatch = debug1.find(
             (d: LspDiagnostic) =>
               d.range.start.line === expectedDebugRange.start.line &&
@@ -4540,7 +4958,10 @@ test('Android XML and Manifest Lint diagnostics integration', {
               d.range.end.line === expectedDebugRange.end.line &&
               d.range.end.character === expectedDebugRange.end.character,
           );
-          assert.ok(debugMatch, `HardcodedDebugMode range must strictly match android:debuggable="true": ${JSON.stringify(debug1)}`);
+          assert.ok(
+            debugMatch,
+            `HardcodedDebugMode range must strictly match android:debuggable="true": ${JSON.stringify(debug1)}`,
+          );
           // Fix via didChange
           client.notify('textDocument/didChange', {
             textDocument: { uri: manifestUri, version: 2 },
@@ -4552,7 +4973,11 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const debug2 = itemsMan2.filter(
             (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
           );
-          assert.equal(debug2.length, 0, 'HardcodedDebugMode must be cleared after removing attribute');
+          assert.equal(
+            debug2.length,
+            0,
+            'HardcodedDebugMode must be cleared after removing attribute',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: manifestUri } });
         }
@@ -4565,16 +4990,20 @@ test('Android XML and Manifest Lint diagnostics integration', {
       async () => {
         const unusedDefault = join(projectDir, 'app', 'src', 'main', 'AndroidManifest.xml');
         const unusedUri = pathToFileURL(unusedDefault).href;
-        const unusedText = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
-          + '<application android:debuggable="true" /></manifest>';
+        const unusedText =
+          '<manifest xmlns:android="http://schemas.android.com/apk/res/android">' +
+          '<application android:debuggable="true" /></manifest>';
         await writeFile(unusedDefault, unusedText, 'utf8');
         client.notify('textDocument/didOpen', {
           textDocument: { uri: unusedUri, languageId: 'xml', version: 1, text: unusedText },
         });
         try {
           const unused = await pullDiagnostics(client, unusedUri);
-          assert.equal((unused.items ?? []).filter((d) => d.source === 'android-lint').length, 0,
-            'A default Manifest replaced by manifest.srcFile must remain outside the configured source set');
+          assert.equal(
+            (unused.items ?? []).filter((d) => d.source === 'android-lint').length,
+            0,
+            'A default Manifest replaced by manifest.srcFile must remain outside the configured source set',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: unusedUri } });
           await rm(unusedDefault);
@@ -4589,9 +5018,14 @@ test('Android XML and Manifest Lint diagnostics integration', {
         ]) {
           const path = join(projectDir, 'app', ...resourcePath);
           await mkdir(dirname(path), { recursive: true });
-          const root = resourcePath.includes('values') || resourcePath.includes('values-es')
-            ? 'resources' : resourcePath.includes('menu-land') ? 'menu'
-              : resourcePath.includes('drawable-night') ? 'shape' : 'LinearLayout';
+          const root =
+            resourcePath.includes('values') || resourcePath.includes('values-es')
+              ? 'resources'
+              : resourcePath.includes('menu-land')
+                ? 'menu'
+                : resourcePath.includes('drawable-night')
+                  ? 'shape'
+                  : 'LinearLayout';
           const text = `<${root} xmlns:unused="http://schemas.android.com/apk/res/com.example.unused" />`;
           await writeFile(path, text, 'utf8');
           const uri = pathToFileURL(path).href;
@@ -4603,18 +5037,30 @@ test('Android XML and Manifest Lint diagnostics integration', {
             const unused = (positive.items ?? []).filter(
               (d) => d.source === 'android-lint' && d.code === 'UnusedNamespace',
             );
-            assert.equal(unused.length, 1,
-              `Official namespace rule must run for ${resourcePath.join('/')}: ${JSON.stringify(positive.items)}`);
-            assert.deepEqual(unused[0].range,
-              findRangeInText(text, 'xmlns:unused="http://schemas.android.com/apk/res/com.example.unused"'));
+            assert.equal(
+              unused.length,
+              1,
+              `Official namespace rule must run for ${resourcePath.join('/')}: ${JSON.stringify(positive.items)}`,
+            );
+            assert.deepEqual(
+              unused[0].range,
+              findRangeInText(
+                text,
+                'xmlns:unused="http://schemas.android.com/apk/res/com.example.unused"',
+              ),
+            );
             client.notify('textDocument/didChange', {
               textDocument: { uri, version: 2 },
               contentChanges: [{ text: `<${root} />` }],
             });
             const negative = await pullDiagnostics(client, uri);
-            assert.equal((negative.items ?? []).filter(
-              (d) => d.source === 'android-lint' && d.code === 'UnusedNamespace',
-            ).length, 0, `Removing the unused namespace must clear ${resourcePath.join('/')}`);
+            assert.equal(
+              (negative.items ?? []).filter(
+                (d) => d.source === 'android-lint' && d.code === 'UnusedNamespace',
+              ).length,
+              0,
+              `Removing the unused namespace must clear ${resourcePath.join('/')}`,
+            );
           } finally {
             client.notify('textDocument/didClose', { textDocument: { uri } });
             await rm(path);
@@ -4634,7 +5080,10 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const menuHardcoded = menuItems.filter(
             (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
           );
-          assert.ok(menuHardcoded.length >= 1, 'Menu title must trigger HardcodedText in res/menu folder');
+          assert.ok(
+            menuHardcoded.length >= 1,
+            'Menu title must trigger HardcodedText in res/menu folder',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: menuUri } });
         }
@@ -4675,7 +5124,12 @@ test('Android XML and Manifest Lint diagnostics integration', {
         ).href;
         const debugManifestText = await readFile(fileURLToPath(debugManifestUri), 'utf8');
         client.notify('textDocument/didOpen', {
-          textDocument: { uri: debugManifestUri, languageId: 'xml', version: 1, text: debugManifestText },
+          textDocument: {
+            uri: debugManifestUri,
+            languageId: 'xml',
+            version: 1,
+            text: debugManifestText,
+          },
         });
         try {
           const repDebug = await pullDiagnostics(client, debugManifestUri);
@@ -4689,17 +5143,26 @@ test('Android XML and Manifest Lint diagnostics integration', {
           join(projectDir, 'lib', 'src', 'main', 'AndroidManifest.xml'),
         ).href;
         const libManifestText = (await readFile(fileURLToPath(libManifestUri), 'utf8')).replace(
-          '</manifest>', '<application android:debuggable="true" /></manifest>',
+          '</manifest>',
+          '<application android:debuggable="true" /></manifest>',
         );
         client.notify('textDocument/didOpen', {
-          textDocument: { uri: libManifestUri, languageId: 'xml', version: 1, text: libManifestText },
+          textDocument: {
+            uri: libManifestUri,
+            languageId: 'xml',
+            version: 1,
+            text: libManifestText,
+          },
         });
         try {
           const repLib = await pullDiagnostics(client, libManifestUri);
           assert.equal(repLib.kind, 'full');
-          assert.ok((repLib.items ?? []).some(
-            (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
-          ), `Library manifests must run official single-file checks: ${JSON.stringify(repLib.items)}`);
+          assert.ok(
+            (repLib.items ?? []).some(
+              (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+            ),
+            `Library manifests must run official single-file checks: ${JSON.stringify(repLib.items)}`,
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: libManifestUri } });
         }
@@ -4714,8 +5177,14 @@ test('Android XML and Manifest Lint diagnostics integration', {
         });
         try {
           const repRaw = await pullDiagnostics(client, rawUri);
-          const rawLint = (repRaw.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint');
-          assert.equal(rawLint.length, 0, 'res/raw files must not be analyzed by layout or values detectors');
+          const rawLint = (repRaw.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint',
+          );
+          assert.equal(
+            rawLint.length,
+            0,
+            'res/raw files must not be analyzed by layout or values detectors',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: rawUri } });
         }
@@ -4728,8 +5197,14 @@ test('Android XML and Manifest Lint diagnostics integration', {
         });
         try {
           const repPlain = await pullDiagnostics(client, plainUri);
-          const plainLint = (repPlain.items ?? []).filter((d: LspDiagnostic) => d.source === 'android-lint');
-          assert.equal(plainLint.length, 0, 'Plain XML outside Android resource roots must emit zero android-lint diagnostics');
+          const plainLint = (repPlain.items ?? []).filter(
+            (d: LspDiagnostic) => d.source === 'android-lint',
+          );
+          assert.equal(
+            plainLint.length,
+            0,
+            'Plain XML outside Android resource roots must emit zero android-lint diagnostics',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: plainUri } });
         }
@@ -4737,78 +5212,72 @@ test('Android XML and Manifest Lint diagnostics integration', {
     );
 
     // 4. Newly saved XML file analyzed on disk
-    await t.test(
-      'Diagnostics: Newly saved XML file analyzed on disk',
-      async () => {
-        const newSavedPath = join(
-          projectDir,
-          'app',
-          'src',
-          'main',
-          'res',
-          'layout',
-          'new_saved_layout.xml',
+    await t.test('Diagnostics: Newly saved XML file analyzed on disk', async () => {
+      const newSavedPath = join(
+        projectDir,
+        'app',
+        'src',
+        'main',
+        'res',
+        'layout',
+        'new_saved_layout.xml',
+      );
+      const newSavedUri = pathToFileURL(newSavedPath).href;
+
+      const newSavedText1 = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+        '    android:layout_width="match_parent"',
+        '    android:layout_height="match_parent"',
+        '    android:orientation="vertical">',
+        '    <TextView',
+        '        android:layout_width="wrap_content"',
+        '        android:layout_height="wrap_content"',
+        '        android:text="Newly Saved Hardcoded Text" />',
+        '</LinearLayout>',
+        '',
+      ].join('\n');
+
+      await writeFile(newSavedPath, newSavedText1, 'utf8');
+
+      client.notify('textDocument/didOpen', {
+        textDocument: { uri: newSavedUri, languageId: 'xml', version: 1, text: newSavedText1 },
+      });
+
+      try {
+        const rep1 = await pullDiagnostics(client, newSavedUri);
+        assert.equal(rep1.kind, 'full');
+        const items1 = rep1.items ?? [];
+        const hardcoded1 = items1.filter(
+          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
         );
-        const newSavedUri = pathToFileURL(newSavedPath).href;
+        assert.ok(hardcoded1.length >= 1, 'Newly saved XML file must trigger HardcodedText');
 
-        const newSavedText1 = [
-          '<?xml version="1.0" encoding="utf-8"?>',
-          '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
-          '    android:layout_width="match_parent"',
-          '    android:layout_height="match_parent"',
-          '    android:orientation="vertical">',
-          '    <TextView',
-          '        android:layout_width="wrap_content"',
-          '        android:layout_height="wrap_content"',
-          '        android:text="Newly Saved Hardcoded Text" />',
-          '</LinearLayout>',
-          '',
-        ].join('\n');
-
-        await writeFile(newSavedPath, newSavedText1, 'utf8');
-
-        client.notify('textDocument/didOpen', {
-          textDocument: { uri: newSavedUri, languageId: 'xml', version: 1, text: newSavedText1 },
+        // Modify via didChange
+        const newSavedText2 = newSavedText1.replace(
+          'Newly Saved Hardcoded Text',
+          '@string/app_name',
+        );
+        client.notify('textDocument/didChange', {
+          textDocument: { uri: newSavedUri, version: 2 },
+          contentChanges: [{ text: newSavedText2 }],
         });
 
-        try {
-          const rep1 = await pullDiagnostics(client, newSavedUri);
-          assert.equal(rep1.kind, 'full');
-          const items1 = rep1.items ?? [];
-          const hardcoded1 = items1.filter(
-            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
-          );
-          assert.ok(
-            hardcoded1.length >= 1,
-            'Newly saved XML file must trigger HardcodedText',
-          );
-
-          // Modify via didChange
-          const newSavedText2 = newSavedText1.replace(
-            'Newly Saved Hardcoded Text',
-            '@string/app_name',
-          );
-          client.notify('textDocument/didChange', {
-            textDocument: { uri: newSavedUri, version: 2 },
-            contentChanges: [{ text: newSavedText2 }],
-          });
-
-          const rep2 = await pullDiagnostics(client, newSavedUri);
-          const items2 = rep2.items ?? [];
-          const hardcoded2 = items2.filter(
-            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
-          );
-          assert.equal(
-            hardcoded2.length,
-            0,
-            'HardcodedText must be cleared in saved file after didChange fix',
-          );
-        } finally {
-          client.notify('textDocument/didClose', { textDocument: { uri: newSavedUri } });
-          if (existsSync(newSavedPath)) await rm(newSavedPath);
-        }
-      },
-    );
+        const rep2 = await pullDiagnostics(client, newSavedUri);
+        const items2 = rep2.items ?? [];
+        const hardcoded2 = items2.filter(
+          (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'HardcodedText',
+        );
+        assert.equal(
+          hardcoded2.length,
+          0,
+          'HardcodedText must be cleared in saved file after didChange fix',
+        );
+      } finally {
+        client.notify('textDocument/didClose', { textDocument: { uri: newSavedUri } });
+        if (existsSync(newSavedPath)) await rm(newSavedPath);
+      }
+    });
 
     // 5. Position and range accuracy for CRLF, emoji, entities, quotes, multiline, CDATA, and namespace alias
     await t.test(
@@ -4839,19 +5308,28 @@ test('Android XML and Manifest Lint diagnostics integration', {
             const attrR = findRangeInText(edgeText, attrSnippet.replace(/\r?\n/g, '\r\n'));
             const m = hardcodedList.find(
               (d) =>
-                (d.range.start.line === attrR.start.line &&
-                  d.range.start.character === attrR.start.character &&
-                  d.range.end.line === attrR.end.line &&
-                  d.range.end.character === attrR.end.character),
+                d.range.start.line === attrR.start.line &&
+                d.range.start.character === attrR.start.character &&
+                d.range.end.line === attrR.end.line &&
+                d.range.end.character === attrR.end.character,
             );
-            assert.ok(m, `${label} must strictly match the full attribute: ${JSON.stringify(hardcodedList)}`);
+            assert.ok(
+              m,
+              `${label} must strictly match the full attribute: ${JSON.stringify(hardcodedList)}`,
+            );
           };
 
           assertExactEdge('android:text="Emoji 👋 probe 🎉"', 'Emoji UTF-16 code units range');
           assertExactEdge('android:text="Entity &amp; &lt; test"', 'XML entity range');
           assertExactEdge("android:text='Single quote hardcoded'", 'Single quote range');
-          assertExactEdge('android:text="Multi\nLine\nHardcoded"', 'Multiline CRLF attribute range');
-          assertExactEdge('customalias:text="Alias Hardcoded Text"', 'Custom namespace alias range');
+          assertExactEdge(
+            'android:text="Multi\nLine\nHardcoded"',
+            'Multiline CRLF attribute range',
+          );
+          assertExactEdge(
+            'customalias:text="Alias Hardcoded Text"',
+            'Custom namespace alias range',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: edgeUri } });
         }
@@ -4892,8 +5370,10 @@ test('Android XML and Manifest Lint diagnostics integration', {
             nativeErrors.length >= 1,
             'Native syntax error must be reported for incomplete unclosed XML tag',
           );
-          assert.ok(items.some((d) => d.source === 'android-lint' && d.code === 'ContentDescription'),
-            'Recovered valid nodes must retain Android Lint diagnostics alongside native syntax errors');
+          assert.ok(
+            items.some((d) => d.source === 'android-lint' && d.code === 'ContentDescription'),
+            'Recovered valid nodes must retain Android Lint diagnostics alongside native syntax errors',
+          );
 
           // Fix syntax error via didChange
           const fixedXmlText = brokenXmlText.replace(
@@ -4909,7 +5389,11 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const fixedNative = (repFixed.items ?? []).filter(
             (d: LspDiagnostic) => d.source !== 'android-lint' && d.severity === 1,
           );
-          assert.equal(fixedNative.length, 0, 'Native syntax errors must be cleared after fixing tag');
+          assert.equal(
+            fixedNative.length,
+            0,
+            'Native syntax errors must be cleared after fixing tag',
+          );
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: incompleteUri } });
           await rm(fileURLToPath(incompleteUri), { force: true });
@@ -4941,13 +5425,20 @@ test('Android XML and Manifest Lint diagnostics integration', {
           );
 
           // 1. Element 1 with t:ignore="HardcodedText" is suppressed
-          const ignoredMatch = hardcodedList.find((d) => d.message?.includes('Ignored Hardcoded Text'));
-          assert.equal(ignoredMatch, undefined, 'Element with t:ignore="HardcodedText" must be suppressed');
+          const ignoredMatch = hardcodedList.find((d) =>
+            d.message?.includes('Ignored Hardcoded Text'),
+          );
+          assert.equal(
+            ignoredMatch,
+            undefined,
+            'Element with t:ignore="HardcodedText" must be suppressed',
+          );
 
           // 2. Element 2 (Sibling): MUST NOT BE SUPPRESSED! Sibling isolation!
           const siblingMatch = hardcodedList.find(
             (d) =>
-              d.range.start.line === findRangeInText(ignoreText, 'Not Ignored Sibling Text').start.line,
+              d.range.start.line ===
+              findRangeInText(ignoreText, 'Not Ignored Sibling Text').start.line,
           );
           assert.ok(
             siblingMatch,
@@ -4992,24 +5483,33 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const rep1 = await pullDiagnostics(client, apiLayoutUri);
           const items1 = rep1.items ?? [];
           const apiIssues1 = items1.filter(
-            (d: LspDiagnostic) =>
-              d.source === 'android-lint' &&
-              d.code === 'UnusedAttribute',
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'UnusedAttribute',
           );
-          assert.equal(apiIssues1.length, 1,
-            `API 26 tooltipText must produce UnusedAttribute with minSdk 21: ${JSON.stringify(items1)}`);
+          assert.equal(
+            apiIssues1.length,
+            1,
+            `API 26 tooltipText must produce UnusedAttribute with minSdk 21: ${JSON.stringify(items1)}`,
+          );
           const scriptPath = join(projectDir, 'app', 'build.gradle.kts');
           const scriptUri = pathToFileURL(scriptPath).href;
           const scriptText = await readFile(scriptPath, 'utf8');
           client.notify('textDocument/didOpen', {
-            textDocument: { uri: scriptUri, languageId: 'kotlin', version: 1,
-              text: scriptText.replace('minSdk = 21', 'minSdk = 26') },
+            textDocument: {
+              uri: scriptUri,
+              languageId: 'kotlin',
+              version: 1,
+              text: scriptText.replace('minSdk = 21', 'minSdk = 26'),
+            },
           });
           try {
             const associatedEdit = await pullDiagnostics(client, apiLayoutUri);
-            assert.equal((associatedEdit.items ?? []).filter(
-              (d) => d.source === 'android-lint' && d.code === 'UnusedAttribute',
-            ).length, 1, 'Unsaved associated Gradle settings must not change the saved XML model');
+            assert.equal(
+              (associatedEdit.items ?? []).filter(
+                (d) => d.source === 'android-lint' && d.code === 'UnusedAttribute',
+              ).length,
+              1,
+              'Unsaved associated Gradle settings must not change the saved XML model',
+            );
           } finally {
             client.notify('textDocument/didClose', { textDocument: { uri: scriptUri } });
           }
@@ -5027,9 +5527,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const rep2 = await pullDiagnostics(client, apiLayoutUri);
           const items2 = rep2.items ?? [];
           const apiIssues2 = items2.filter(
-            (d: LspDiagnostic) =>
-              d.source === 'android-lint' &&
-              d.code === 'UnusedAttribute',
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'UnusedAttribute',
           );
           assert.equal(
             apiIssues2.length,
@@ -5053,9 +5551,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const repV26 = await pullDiagnostics(client, v26LayoutUri);
           const itemsV26 = repV26.items ?? [];
           const apiIssuesV26 = itemsV26.filter(
-            (d: LspDiagnostic) =>
-              d.source === 'android-lint' &&
-              d.code === 'UnusedAttribute',
+            (d: LspDiagnostic) => d.source === 'android-lint' && d.code === 'UnusedAttribute',
           );
           assert.equal(
             apiIssuesV26.length,
@@ -5165,7 +5661,10 @@ test('Android XML and Manifest Lint diagnostics integration', {
               d.code === 'CustomXmlRule' &&
               d.message?.includes('CustomRepoQuery:'),
           );
-          assert.ok(repoQueryMsg, `CustomRepoQuery detector must report repository availability: ${JSON.stringify(items)}`);
+          assert.ok(
+            repoQueryMsg,
+            `CustomRepoQuery detector must report repository availability: ${JSON.stringify(items)}`,
+          );
           assert.match(
             repoQueryMsg.message ?? '',
             /app_name=Android XML Fixture/,
@@ -5193,21 +5692,38 @@ test('Android XML and Manifest Lint diagnostics integration', {
           );
 
           // Saved resource edit on disk triggers cache invalidation on the SAME layout
-          const stringsPath = join(projectDir, 'app', 'src', 'main', 'res', 'values', 'strings.xml');
+          const stringsPath = join(
+            projectDir,
+            'app',
+            'src',
+            'main',
+            'res',
+            'values',
+            'strings.xml',
+          );
           const stringsBaseText = await readFile(stringsPath, 'utf8');
           const stringsUri = pathToFileURL(stringsPath).href;
           client.notify('textDocument/didOpen', {
-            textDocument: { uri: stringsUri, languageId: 'xml', version: 1,
-              text: stringsBaseText.replace('Android XML Fixture', 'Unrelated Unsaved Title') },
+            textDocument: {
+              uri: stringsUri,
+              languageId: 'xml',
+              version: 1,
+              text: stringsBaseText.replace('Android XML Fixture', 'Unrelated Unsaved Title'),
+            },
           });
           try {
             const unsavedReport = await pullDiagnostics(client, aarUri);
             const unsavedQuery = (unsavedReport.items ?? []).find(
-              (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
-                && d.message?.includes('CustomRepoQuery:'),
+              (d) =>
+                d.source === 'android-lint' &&
+                d.code === 'CustomXmlRule' &&
+                d.message?.includes('CustomRepoQuery:'),
             );
-            assert.match(unsavedQuery?.message ?? '', /app_name=Android XML Fixture/,
-              'An unsaved associated document must not replace the resource disk snapshot');
+            assert.match(
+              unsavedQuery?.message ?? '',
+              /app_name=Android XML Fixture/,
+              'An unsaved associated document must not replace the resource disk snapshot',
+            );
             const stringsDiskModified = stringsBaseText.replace(
               'Android XML Fixture',
               'Live On-Disk Updated Title',
@@ -5222,7 +5738,10 @@ test('Android XML and Manifest Lint diagnostics integration', {
                   d.code === 'CustomXmlRule' &&
                   d.message?.includes('CustomRepoQuery:'),
               );
-              assert.ok(liveQueryMsg, `Resource refresh must retain query diagnostics: ${JSON.stringify(liveItems)}`);
+              assert.ok(
+                liveQueryMsg,
+                `Resource refresh must retain query diagnostics: ${JSON.stringify(liveItems)}`,
+              );
               assert.match(
                 liveQueryMsg.message ?? '',
                 /app_name=Live On-Disk Updated Title/,
@@ -5235,18 +5754,34 @@ test('Android XML and Manifest Lint diagnostics integration', {
             client.notify('textDocument/didClose', { textDocument: { uri: stringsUri } });
           }
 
-          const libraryStringsPath = join(projectDir, 'lib', 'src', 'main', 'res', 'values', 'strings.xml');
+          const libraryStringsPath = join(
+            projectDir,
+            'lib',
+            'src',
+            'main',
+            'res',
+            'values',
+            'strings.xml',
+          );
           const libraryStrings = await readFile(libraryStringsPath, 'utf8');
           try {
-            await writeFile(libraryStringsPath,
-              libraryStrings.replace('Android XML Lib', 'Updated Dependency Title'), 'utf8');
+            await writeFile(
+              libraryStringsPath,
+              libraryStrings.replace('Android XML Lib', 'Updated Dependency Title'),
+              'utf8',
+            );
             const dependencyReport = await pullDiagnostics(client, aarUri);
             const dependencyQuery = (dependencyReport.items ?? []).find(
-              (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
-                && d.message?.includes('CustomRepoQuery:'),
+              (d) =>
+                d.source === 'android-lint' &&
+                d.code === 'CustomXmlRule' &&
+                d.message?.includes('CustomRepoQuery:'),
             );
-            assert.match(dependencyQuery?.message ?? '', /lib_name=Updated Dependency Title/,
-              'Editing an existing dependency values file must invalidate the consuming layout cache');
+            assert.match(
+              dependencyQuery?.message ?? '',
+              /lib_name=Updated Dependency Title/,
+              'Editing an existing dependency values file must invalidate the consuming layout cache',
+            );
           } finally {
             await writeFile(libraryStringsPath, libraryStrings, 'utf8');
           }
@@ -5256,114 +5791,132 @@ test('Android XML and Manifest Lint diagnostics integration', {
       },
     );
 
-    await t.test(
-      'Diagnostics: Source Manifest and workspace isolation',
-      async () => {
-        // A. Variant manifest isolation
-        const debugManifestUri = pathToFileURL(
-          join(projectDir, 'app', 'src', 'debug', 'AndroidManifest.xml'),
+    await t.test('Diagnostics: Source Manifest and workspace isolation', async () => {
+      // A. Variant manifest isolation
+      const debugManifestUri = pathToFileURL(
+        join(projectDir, 'app', 'src', 'debug', 'AndroidManifest.xml'),
+      ).href;
+      const debugManifestText = await readFile(fileURLToPath(debugManifestUri), 'utf8');
+      const debugWithHardcoded = debugManifestText.replace(
+        '<application>',
+        '<application android:debuggable="true">',
+      );
+
+      client.notify('textDocument/didOpen', {
+        textDocument: {
+          uri: debugManifestUri,
+          languageId: 'xml',
+          version: 1,
+          text: debugWithHardcoded,
+        },
+      });
+
+      const mainManifestUri = pathToFileURL(
+        join(projectDir, 'app', 'config', 'manifest-main.xml'),
+      ).href;
+      const mainManifestText = await readFile(fileURLToPath(mainManifestUri), 'utf8');
+      client.notify('textDocument/didOpen', {
+        textDocument: {
+          uri: mainManifestUri,
+          languageId: 'xml',
+          version: 1,
+          text: mainManifestText,
+        },
+      });
+
+      try {
+        const debugRep = await pullDiagnostics(client, debugManifestUri);
+        const debugLint = (debugRep.items ?? []).filter(
+          (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+        );
+        assert.ok(debugLint.length >= 1, 'Debug variant manifest must report HardcodedDebugMode');
+
+        const mainRep = await pullDiagnostics(client, mainManifestUri);
+        const mainLint = (mainRep.items ?? []).filter(
+          (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+        );
+        assert.equal(
+          mainLint.length,
+          0,
+          'Main manifest must not leak HardcodedDebugMode from variant manifest',
+        );
+      } finally {
+        client.notify('textDocument/didClose', { textDocument: { uri: debugManifestUri } });
+        client.notify('textDocument/didClose', { textDocument: { uri: mainManifestUri } });
+      }
+
+      // B. Two Workspaces isolation
+      const workspace2 = await createIntegrationSandbox(prereqs);
+      workspace2.env.OMP_ANDROID_LS_EXTENSION_DIR = sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR;
+      const workspace2Dir = await copyAndroidLintFixture(workspace2);
+      let client2: InitializedLspClientDriver | null = null;
+      try {
+        client2 = await startLspClient(workspace2Dir, workspace2);
+        await executeIntellij(
+          { action: 'wait', project: workspace2Dir, timeout: 180 },
+          undefined,
+          undefined,
+          { cwd: workspace2Dir } as ExtensionContext,
+          { systemPath: workspace2.systemPath },
+        );
+        const ws1ProbeUri = pathToFileURL(
+          join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
         ).href;
-        const debugManifestText = await readFile(fileURLToPath(debugManifestUri), 'utf8');
-        const debugWithHardcoded = debugManifestText.replace(
-          '<application>',
-          '<application android:debuggable="true">',
+        const ws2ProbeUri = pathToFileURL(
+          join(workspace2Dir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
+        ).href;
+        const probeContent = await readFile(fileURLToPath(ws1ProbeUri), 'utf8');
+
+        // In workspace 1, create lint.xml to ignore HardcodedText
+        const ws1LintXml = join(projectDir, 'app', 'lint.xml');
+        await writeFile(
+          ws1LintXml,
+          '<?xml version="1.0" encoding="UTF-8"?>\n<lint>\n    <issue id="HardcodedText" severity="ignore" />\n</lint>\n',
+          'utf8',
         );
 
         client.notify('textDocument/didOpen', {
-          textDocument: { uri: debugManifestUri, languageId: 'xml', version: 1, text: debugWithHardcoded },
+          textDocument: { uri: ws1ProbeUri, languageId: 'xml', version: 1, text: probeContent },
         });
-
-        const mainManifestUri = pathToFileURL(
-          join(projectDir, 'app', 'config', 'manifest-main.xml'),
-        ).href;
-        const mainManifestText = await readFile(fileURLToPath(mainManifestUri), 'utf8');
-        client.notify('textDocument/didOpen', {
-          textDocument: { uri: mainManifestUri, languageId: 'xml', version: 1, text: mainManifestText },
+        client2.notify('textDocument/didOpen', {
+          textDocument: { uri: ws2ProbeUri, languageId: 'xml', version: 1, text: probeContent },
         });
 
         try {
-          const debugRep = await pullDiagnostics(client, debugManifestUri);
-          const debugLint = (debugRep.items ?? []).filter(
-            (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          const repWs1 = await pullDiagnostics(client, ws1ProbeUri);
+          const hardcodedWs1 = (repWs1.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
           );
-          assert.ok(debugLint.length >= 1, 'Debug variant manifest must report HardcodedDebugMode');
+          assert.equal(
+            hardcodedWs1.length,
+            0,
+            'Workspace 1 must ignore HardcodedText per its local lint.xml',
+          );
 
-          const mainRep = await pullDiagnostics(client, mainManifestUri);
-          const mainLint = (mainRep.items ?? []).filter(
-            (d) => d.source === 'android-lint' && d.code === 'HardcodedDebugMode',
+          const repWs2 = await pullDiagnostics(client2, ws2ProbeUri);
+          const hardcodedWs2 = (repWs2.items ?? []).filter(
+            (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
           );
-          assert.equal(mainLint.length, 0, 'Main manifest must not leak HardcodedDebugMode from variant manifest');
+          assert.ok(
+            hardcodedWs2.length >= 1,
+            'Workspace 2 must NOT inherit Workspace 1 lint.xml suppression (workspace isolation)',
+          );
         } finally {
-          client.notify('textDocument/didClose', { textDocument: { uri: debugManifestUri } });
-          client.notify('textDocument/didClose', { textDocument: { uri: mainManifestUri } });
+          if (existsSync(ws1LintXml)) await rm(ws1LintXml);
+          client.notify('textDocument/didClose', { textDocument: { uri: ws1ProbeUri } });
+          client2.notify('textDocument/didClose', { textDocument: { uri: ws2ProbeUri } });
         }
-
-        // B. Two Workspaces isolation
-        const workspace2 = await createIntegrationSandbox(prereqs);
-        workspace2.env.OMP_ANDROID_LS_EXTENSION_DIR = sandbox.env.OMP_ANDROID_LS_EXTENSION_DIR;
-        const workspace2Dir = await copyAndroidLintFixture(workspace2);
-        let client2: InitializedLspClientDriver | null = null;
-        try {
-          client2 = await startLspClient(workspace2Dir, workspace2);
-          await executeIntellij(
-            { action: 'wait', project: workspace2Dir, timeout: 180 }, undefined, undefined,
-            { cwd: workspace2Dir } as ExtensionContext, { systemPath: workspace2.systemPath },
-          );
-          const ws1ProbeUri = pathToFileURL(
-            join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
-          ).href;
-          const ws2ProbeUri = pathToFileURL(
-            join(workspace2Dir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
-          ).href;
-          const probeContent = await readFile(fileURLToPath(ws1ProbeUri), 'utf8');
-
-          // In workspace 1, create lint.xml to ignore HardcodedText
-          const ws1LintXml = join(projectDir, 'app', 'lint.xml');
-          await writeFile(
-            ws1LintXml,
-            '<?xml version="1.0" encoding="UTF-8"?>\n<lint>\n    <issue id="HardcodedText" severity="ignore" />\n</lint>\n',
-            'utf8',
-          );
-
-          client.notify('textDocument/didOpen', {
-            textDocument: { uri: ws1ProbeUri, languageId: 'xml', version: 1, text: probeContent },
-          });
-          client2.notify('textDocument/didOpen', {
-            textDocument: { uri: ws2ProbeUri, languageId: 'xml', version: 1, text: probeContent },
-          });
-
+      } finally {
+        if (client2) {
           try {
-            const repWs1 = await pullDiagnostics(client, ws1ProbeUri);
-            const hardcodedWs1 = (repWs1.items ?? []).filter(
-              (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
-            );
-            assert.equal(hardcodedWs1.length, 0, 'Workspace 1 must ignore HardcodedText per its local lint.xml');
-
-            const repWs2 = await pullDiagnostics(client2, ws2ProbeUri);
-            const hardcodedWs2 = (repWs2.items ?? []).filter(
-              (d) => d.source === 'android-lint' && d.code === 'HardcodedText',
-            );
-            assert.ok(
-              hardcodedWs2.length >= 1,
-              'Workspace 2 must NOT inherit Workspace 1 lint.xml suppression (workspace isolation)',
-            );
-          } finally {
-            if (existsSync(ws1LintXml)) await rm(ws1LintXml);
-            client.notify('textDocument/didClose', { textDocument: { uri: ws1ProbeUri } });
-            client2.notify('textDocument/didClose', { textDocument: { uri: ws2ProbeUri } });
+            await client2.close();
+          } catch {
+            // ignore
           }
-        } finally {
-          if (client2) {
-            try {
-              await client2.close();
-            } catch {
-              // ignore
-            }
-          }
-          await workspace2.cleanup();
         }
-      },
-    );
+        await workspace2.cleanup();
+      }
+    });
 
     // 12. AAR custom XML rule execution, node visit fault isolation, cancellation, and concurrency
     await t.test(
@@ -5402,23 +5955,33 @@ test('Android XML and Manifest Lint diagnostics integration', {
           );
           const repeated = await pullDiagnostics(client, aarProbeUri);
           const repeatedCustom = (repeated.items ?? []).find(
-            (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
-              && d.message?.includes('CustomXmlView'),
+            (d) =>
+              d.source === 'android-lint' &&
+              d.code === 'CustomXmlRule' &&
+              d.message?.includes('CustomXmlView'),
           );
-          assert.equal(repeatedCustom?.message, customXml[0].message,
-            'An unchanged XML pull must reuse the result without visiting the custom detector again');
+          assert.equal(
+            repeatedCustom?.message,
+            customXml[0].message,
+            'An unchanged XML pull must reuse the result without visiting the custom detector again',
+          );
           client.notify('textDocument/didChange', {
             textDocument: { uri: aarProbeUri, version: 2 },
             contentChanges: [{ text: `${aarProbeText}\n` }],
           });
           const rechecked = await pullDiagnostics(client, aarProbeUri);
           const recheckedCustom = (rechecked.items ?? []).find(
-            (d) => d.source === 'android-lint' && d.code === 'CustomXmlRule'
-              && d.message?.includes('CustomXmlView'),
+            (d) =>
+              d.source === 'android-lint' &&
+              d.code === 'CustomXmlRule' &&
+              d.message?.includes('CustomXmlView'),
           );
           assert.ok(recheckedCustom);
-          assert.notEqual(recheckedCustom.message, customXml[0].message,
-            'A changed XML snapshot must actually visit the detector again');
+          assert.notEqual(
+            recheckedCustom.message,
+            customXml[0].message,
+            'A changed XML snapshot must actually visit the detector again',
+          );
 
           // B. In-flight cancellation recovery on XML diagnostic
           const cancelId = 73737;
@@ -5444,7 +6007,11 @@ test('Android XML and Manifest Lint diagnostics integration', {
 
           // Recovery after cancel
           const repAfterCancel = await pullDiagnostics(client, aarProbeUri);
-          assert.equal(repAfterCancel.kind, 'full', 'Server must recover and serve XML diagnostics after cancellation');
+          assert.equal(
+            repAfterCancel.kind,
+            'full',
+            'Server must recover and serve XML diagnostics after cancellation',
+          );
 
           // C. Concurrent didChange recovery
           const concurrentId = 64646;
@@ -5493,62 +6060,94 @@ test('Android XML and Manifest Lint diagnostics integration', {
         }
       },
     );
-    await t.test('Diagnostics: Official AGP merged Manifest source ranges and stale snapshot fallback', async () => {
-      const java = join(prereqs.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
-      const path = join(projectDir, 'app', 'config', 'manifest-main.xml');
-      const text = await readFile(path, 'utf8');
-      const uri = pathToFileURL(path).href;
-      await writeFile(path, text, 'utf8');
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri, languageId: 'xml', version: 1, text },
-      });
-      try {
-        const clean = await pullDiagnostics(client, uri);
-        const cleanSnapshot = (clean.items ?? []).find(
-          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+    await t.test(
+      'Diagnostics: Official AGP merged Manifest source ranges and stale snapshot fallback',
+      async () => {
+        const java = join(
+          prereqs.jdk21Path,
+          'bin',
+          process.platform === 'win32' ? 'java.exe' : 'java',
         );
-        assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=false;/);
-        const build = spawnSync(java, [
-          '-cp', join(projectDir, 'gradle', 'wrapper', 'gradle-wrapper.jar'),
-          'org.gradle.wrapper.GradleWrapperMain', ':app:processDebugManifest',
-          '--offline', '--no-daemon', '--rerun-tasks',
-        ], { cwd: projectDir, env: sandbox.env, encoding: 'utf8', timeout: 180000 });
-        assert.equal(build.status, 0, `Manifest Merger must run successfully:\n${build.stdout}\n${build.stderr}`);
-        const built = await pullDiagnostics(client, uri);
-        const snapshot = (built.items ?? []).find(
-          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
-        );
-        assert.ok(snapshot, `Merged Manifest diagnostic must map to its source: ${JSON.stringify(built.items)}`);
-        assert.match(snapshot.message ?? '', /ManifestSnapshot: merged=true;/);
-        assert.deepEqual(snapshot.range, findRangeInText(text, 'android:label="@string/app_name"'));
-
-        const edited = text.replace('android:label="@string/app_name"', 'android:label="Unsaved Label"');
-        client.notify('textDocument/didChange', {
-          textDocument: { uri, version: 2 }, contentChanges: [{ text: edited }],
-        });
-        const unsaved = await pullDiagnostics(client, uri);
-        const local = (unsaved.items ?? []).find(
-          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
-        );
-        assert.match(local?.message ?? '', /ManifestSnapshot: merged=false; label=Unsaved Label/);
-        assert.deepEqual(local?.range, findRangeInText(edited, 'android:label="Unsaved Label"'));
-        client.notify('textDocument/didClose', { textDocument: { uri } });
-
-        await writeFile(path, edited, 'utf8');
-        client.notify('textDocument/didOpen', {
-          textDocument: { uri, languageId: 'xml', version: 1, text: edited },
-        });
-        const stale = await pullDiagnostics(client, uri);
-        const fallback = (stale.items ?? []).find(
-          (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
-        );
-        assert.match(fallback?.message ?? '', /ManifestSnapshot: merged=false; label=Unsaved Label/,
-          'A saved source newer than merger output must invalidate the built snapshot');
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri } });
+        const path = join(projectDir, 'app', 'config', 'manifest-main.xml');
+        const text = await readFile(path, 'utf8');
+        const uri = pathToFileURL(path).href;
         await writeFile(path, text, 'utf8');
-      }
-    });
+        client.notify('textDocument/didOpen', {
+          textDocument: { uri, languageId: 'xml', version: 1, text },
+        });
+        try {
+          const clean = await pullDiagnostics(client, uri);
+          const cleanSnapshot = (clean.items ?? []).find(
+            (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+          );
+          assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=false;/);
+          const build = spawnSync(
+            java,
+            [
+              '-cp',
+              join(projectDir, 'gradle', 'wrapper', 'gradle-wrapper.jar'),
+              'org.gradle.wrapper.GradleWrapperMain',
+              ':app:processDebugManifest',
+              '--offline',
+              '--no-daemon',
+              '--rerun-tasks',
+            ],
+            { cwd: projectDir, env: sandbox.env, encoding: 'utf8', timeout: 180000 },
+          );
+          assert.equal(
+            build.status,
+            0,
+            `Manifest Merger must run successfully:\n${build.stdout}\n${build.stderr}`,
+          );
+          const built = await pullDiagnostics(client, uri);
+          const snapshot = (built.items ?? []).find(
+            (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+          );
+          assert.ok(
+            snapshot,
+            `Merged Manifest diagnostic must map to its source: ${JSON.stringify(built.items)}`,
+          );
+          assert.match(snapshot.message ?? '', /ManifestSnapshot: merged=true;/);
+          assert.deepEqual(
+            snapshot.range,
+            findRangeInText(text, 'android:label="@string/app_name"'),
+          );
+
+          const edited = text.replace(
+            'android:label="@string/app_name"',
+            'android:label="Unsaved Label"',
+          );
+          client.notify('textDocument/didChange', {
+            textDocument: { uri, version: 2 },
+            contentChanges: [{ text: edited }],
+          });
+          const unsaved = await pullDiagnostics(client, uri);
+          const local = (unsaved.items ?? []).find(
+            (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+          );
+          assert.match(local?.message ?? '', /ManifestSnapshot: merged=false; label=Unsaved Label/);
+          assert.deepEqual(local?.range, findRangeInText(edited, 'android:label="Unsaved Label"'));
+          client.notify('textDocument/didClose', { textDocument: { uri } });
+
+          await writeFile(path, edited, 'utf8');
+          client.notify('textDocument/didOpen', {
+            textDocument: { uri, languageId: 'xml', version: 1, text: edited },
+          });
+          const stale = await pullDiagnostics(client, uri);
+          const fallback = (stale.items ?? []).find(
+            (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
+          );
+          assert.match(
+            fallback?.message ?? '',
+            /ManifestSnapshot: merged=false; label=Unsaved Label/,
+            'A saved source newer than merger output must invalidate the built snapshot',
+          );
+        } finally {
+          client.notify('textDocument/didClose', { textDocument: { uri } });
+          await writeFile(path, text, 'utf8');
+        }
+      },
+    );
   } finally {
     if (driver) {
       try {
@@ -5560,4 +6159,3 @@ test('Android XML and Manifest Lint diagnostics integration', {
     await sandbox.cleanup();
   }
 });
-

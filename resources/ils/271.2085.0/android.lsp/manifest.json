@@ -10,10 +10,16 @@
   },
   "assets": [
     {
-      "name": "intellij-android.jar",
-      "path": "lib/intellij-android.jar",
-      "sha256": "9e17f2fda076d1f6aa2b9e9c02804234aa874a95928067fa4d676d25ad93b119",
-      "size": 768482
+      "name": "language-server-plugins-android-lsp.jar",
+      "path": "lib/language-server-plugins-android-lsp.jar",
+      "sha256": "b31c9c8b9bc5d825e9da831f07586ee398e155fe4c448cab3ac66686841c9d3e",
+      "size": 1028
+    },
+    {
+      "name": "language-server.api.features.impl.android.jar",
+      "path": "lib/modules/language-server.api.features.impl.android.jar",
+      "sha256": "80fe44434b919de5ca01b738632ef027778c61359150731b9e1f86cad6f236d9",
+      "size": 769201
     },
     {
       "name": "adblib-9.4.1.jar",

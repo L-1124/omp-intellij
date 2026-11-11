@@ -1,24 +1,81 @@
 import { createHash } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { lstat, readdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_SERVER_VERSION } from './bundle-metadata.js';
 
-const EXTENSION_ASSETS = [
-  'intellij-android.jar',
-  'adblib-9.4.1.jar',
-  'adblib-tools-9.4.1.jar',
-  'lint-api-32.4.1.jar',
-  'lint-checks-32.4.1.jar',
-  'lint-model-32.4.1.jar',
-  'common-32.4.1.jar',
-  'sdklib-32.4.1.jar',
-  'kxml2-2.3.0.jar',
-  'sdk-common-32.4.1.jar',
-  'layoutlib-api-32.4.1.jar',
-  'manifest-merger-32.4.1.jar',
-  'groovy-4.0.29.jar',
+interface ExtensionAssetSpec {
+  readonly name: string;
+  readonly path: string;
+}
+
+const EXTENSION_ASSETS: readonly ExtensionAssetSpec[] = [
+  {
+    name: 'language-server-plugins-android-lsp.jar',
+    path: 'lib/language-server-plugins-android-lsp.jar',
+  },
+  {
+    name: 'language-server.api.features.impl.android.jar',
+    path: 'lib/modules/language-server.api.features.impl.android.jar',
+  },
+  {
+    name: 'adblib-9.4.1.jar',
+    path: 'lib/adblib-9.4.1.jar',
+  },
+  {
+    name: 'adblib-tools-9.4.1.jar',
+    path: 'lib/adblib-tools-9.4.1.jar',
+  },
+  {
+    name: 'lint-api-32.4.1.jar',
+    path: 'lib/lint-api-32.4.1.jar',
+  },
+  {
+    name: 'lint-checks-32.4.1.jar',
+    path: 'lib/lint-checks-32.4.1.jar',
+  },
+  {
+    name: 'lint-model-32.4.1.jar',
+    path: 'lib/lint-model-32.4.1.jar',
+  },
+  {
+    name: 'common-32.4.1.jar',
+    path: 'lib/common-32.4.1.jar',
+  },
+  {
+    name: 'sdklib-32.4.1.jar',
+    path: 'lib/sdklib-32.4.1.jar',
+  },
+  {
+    name: 'kxml2-2.3.0.jar',
+    path: 'lib/kxml2-2.3.0.jar',
+  },
+  {
+    name: 'sdk-common-32.4.1.jar',
+    path: 'lib/sdk-common-32.4.1.jar',
+  },
+  {
+    name: 'layoutlib-api-32.4.1.jar',
+    path: 'lib/layoutlib-api-32.4.1.jar',
+  },
+  {
+    name: 'manifest-merger-32.4.1.jar',
+    path: 'lib/manifest-merger-32.4.1.jar',
+  },
+  {
+    name: 'groovy-4.0.29.jar',
+    path: 'lib/groovy-4.0.29.jar',
+  },
 ] as const;
+
+const EXPECTED_ASSET_PATHS = new Map<string, string>(
+  EXTENSION_ASSETS.map((asset) => [asset.name, asset.path]),
+);
+
+const EXPECTED_RELATIVE_FILES = new Set<string>(
+  EXTENSION_ASSETS.flatMap((asset) => [asset.path, `${asset.path}.sha256`]),
+);
+
 const UPSTREAM_SHA256: Readonly<Record<string, string>> = {
   'adblib-9.4.1.jar': 'ee4362dba99b5c64f72cc69073f66913e17318289204e861971a0b901a9a1ef9',
   'adblib-tools-9.4.1.jar': '2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c',
@@ -68,6 +125,45 @@ export async function detectServerVersion(executable: string): Promise<string | 
   return null;
 }
 
+async function scanLibDirectory(libDir: string): Promise<{ files: string[] } | { reason: string }> {
+  const libStat = await lstat(libDir);
+  if (libStat.isSymbolicLink() || !libStat.isDirectory()) {
+    return { reason: 'Android extension library files do not match the asset set' };
+  }
+
+  const files: string[] = [];
+  const libEntries = await readdir(libDir, { withFileTypes: true });
+
+  for (const entry of libEntries) {
+    if (entry.isSymbolicLink()) {
+      return { reason: 'Android extension library files do not match the asset set' };
+    }
+    if (entry.isDirectory()) {
+      if (entry.name !== 'modules') {
+        return { reason: 'Android extension library files do not match the asset set' };
+      }
+      const modulesDir = join(libDir, 'modules');
+      const modStat = await lstat(modulesDir);
+      if (modStat.isSymbolicLink() || !modStat.isDirectory()) {
+        return { reason: 'Android extension library files do not match the asset set' };
+      }
+      const modEntries = await readdir(modulesDir, { withFileTypes: true });
+      for (const modEntry of modEntries) {
+        if (modEntry.isSymbolicLink() || !modEntry.isFile()) {
+          return { reason: 'Android extension library files do not match the asset set' };
+        }
+        files.push(`lib/modules/${modEntry.name}`);
+      }
+    } else if (entry.isFile()) {
+      files.push(`lib/${entry.name}`);
+    } else {
+      return { reason: 'Android extension library files do not match the asset set' };
+    }
+  }
+
+  return { files };
+}
+
 export async function verifyExtensionDirectory(
   directory: string,
   expectedVersion: string = DEFAULT_SERVER_VERSION,
@@ -78,12 +174,21 @@ export async function verifyExtensionDirectory(
         reason:
           'Extension path contains invalid characters and cannot be represented in plugin.path',
       };
-    const manifest: unknown = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+
+    const manifestPath = join(directory, 'manifest.json');
+    const manifestStat = await lstat(manifestPath);
+    if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) {
+      return { reason: 'Android extension manifest version or ABI mismatch' };
+    }
+
+    const manifest: unknown = JSON.parse(await readFile(manifestPath, 'utf8'));
     if (
       !manifest ||
       typeof manifest !== 'object' ||
       !('serverVersion' in manifest) ||
       manifest.serverVersion !== expectedVersion ||
+      !('extensionId' in manifest) ||
+      manifest.extensionId !== 'org.jetbrains.android' ||
       !('classFileVersion' in manifest) ||
       manifest.classFileVersion !== 69 ||
       !('targetJavaVersion' in manifest) ||
@@ -93,19 +198,29 @@ export async function verifyExtensionDirectory(
       manifest.assets.length !== EXTENSION_ASSETS.length
     )
       return { reason: 'Android extension manifest version or ABI mismatch' };
-    const remaining = new Set<string>(EXTENSION_ASSETS);
-    const files = await readdir(join(directory, 'lib'));
-    const expectedFiles = new Set(EXTENSION_ASSETS.flatMap((name) => [name, `${name}.sha256`]));
-    if (files.length !== expectedFiles.size || files.some((name) => !expectedFiles.has(name)))
+
+    const scanResult = await scanLibDirectory(join(directory, 'lib'));
+    if ('reason' in scanResult) {
+      return scanResult;
+    }
+    if (
+      scanResult.files.length !== EXPECTED_RELATIVE_FILES.size ||
+      scanResult.files.some((name) => !EXPECTED_RELATIVE_FILES.has(name))
+    )
       return { reason: 'Android extension library files do not match the asset set' };
+
+    const seenNames = new Set<string>();
+    const seenPaths = new Set<string>();
 
     for (const asset of manifest.assets) {
       if (
         !asset ||
         typeof asset !== 'object' ||
         typeof asset.name !== 'string' ||
-        !remaining.delete(asset.name) ||
-        asset.path !== `lib/${asset.name}` ||
+        typeof asset.path !== 'string' ||
+        seenNames.has(asset.name) ||
+        seenPaths.has(asset.path) ||
+        EXPECTED_ASSET_PATHS.get(asset.name) !== asset.path ||
         typeof asset.sha256 !== 'string' ||
         !/^[a-f0-9]{64}$/i.test(asset.sha256) ||
         !Number.isSafeInteger(asset.size) ||
@@ -113,10 +228,17 @@ export async function verifyExtensionDirectory(
       )
         return { reason: 'Invalid Android extension asset manifest' };
 
+      seenNames.add(asset.name);
+      seenPaths.add(asset.path);
+
       const resolvedJarPath = resolve(directory, asset.path);
       const rel = relative(directory, resolvedJarPath);
       if (rel.startsWith('..') || isAbsolute(rel))
         return { reason: 'Asset path escapes extension directory' };
+
+      const jarStat = await lstat(resolvedJarPath);
+      if (jarStat.isSymbolicLink() || !jarStat.isFile())
+        return { reason: `Asset cannot be a symlink: ${asset.name}` };
 
       const bytes = await readFile(resolvedJarPath);
       const actualSha = createHash('sha256').update(bytes).digest('hex');
@@ -126,10 +248,29 @@ export async function verifyExtensionDirectory(
       if (upstreamSha && actualSha !== upstreamSha)
         return { reason: `Android extension upstream SHA-256 mismatch: ${asset.name}` };
 
-      const content = (await readFile(`${resolvedJarPath}.sha256`, 'utf8')).trim();
+      const companionPath = `${resolvedJarPath}.sha256`;
+      const companionStat = await lstat(companionPath);
+      if (companionStat.isSymbolicLink() || !companionStat.isFile())
+        return { reason: `Companion cannot be a symlink: ${asset.name}` };
+
+      const content = (await readFile(companionPath, 'utf8')).trim();
       const match = /^([a-f0-9]{64})(?:\s+\*?([^\s]+))?$/i.exec(content);
-      if (!match || match[1].toLowerCase() !== actualSha || (match[2] && match[2] !== asset.name))
+      const expectedFilename = asset.name;
+      const expectedPath = asset.path;
+      const expectedRelative = asset.path.replace(/^lib\//, '');
+      if (
+        !match ||
+        match[1].toLowerCase() !== actualSha ||
+        (match[2] &&
+          match[2] !== expectedFilename &&
+          match[2] !== expectedPath &&
+          match[2] !== expectedRelative)
+      )
         return { reason: `Android extension asset companion SHA-256 mismatch: ${asset.name}` };
+    }
+
+    if (seenNames.size !== EXTENSION_ASSETS.length) {
+      return { reason: 'Invalid Android extension asset manifest' };
     }
 
     return { pluginPath: directory };
@@ -150,7 +291,7 @@ export async function resolveAndroidExtension(
     };
   const directory = process.env.OMP_ANDROID_LS_EXTENSION_DIR
     ? resolve(process.env.OMP_ANDROID_LS_EXTENSION_DIR)
-    : fileURLToPath(new URL(`../../resources/ils/${version}/intellij-android`, import.meta.url));
+    : fileURLToPath(new URL(`../../resources/ils/${version}/android.lsp`, import.meta.url));
   return verifyExtensionDirectory(directory, version);
 }
 

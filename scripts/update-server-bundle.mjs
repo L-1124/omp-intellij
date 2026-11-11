@@ -65,7 +65,7 @@ export function parseBundleMetadataFile(content) {
 }
 
 export async function verifyJvmAssets({ targetVersion, resourcesDir }) {
-  const targetDir = join(resourcesDir, targetVersion, 'intellij-android');
+  const targetDir = join(resourcesDir, targetVersion, 'android.lsp');
   let verifyExtensionDirectory;
   try {
     const mod = await import('../dist/server/android-extension.js');

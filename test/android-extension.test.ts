@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -118,22 +118,6 @@ test('resolveAndroidExtension rejects invalid characters in extension directory'
   }
 });
 
-const assetNames = [
-  'intellij-android.jar',
-  'adblib-9.4.1.jar',
-  'adblib-tools-9.4.1.jar',
-  'lint-api-32.4.1.jar',
-  'lint-checks-32.4.1.jar',
-  'lint-model-32.4.1.jar',
-  'common-32.4.1.jar',
-  'sdklib-32.4.1.jar',
-  'kxml2-2.3.0.jar',
-  'sdk-common-32.4.1.jar',
-  'layoutlib-api-32.4.1.jar',
-  'manifest-merger-32.4.1.jar',
-  'groovy-4.0.29.jar',
-];
-
 async function extensionFixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'omp-assets-'));
   const extension = join(directory, 'extension');
@@ -143,7 +127,7 @@ async function extensionFixture(t: TestContext) {
     else process.env.OMP_ANDROID_LS_EXTENSION_DIR = originalEnv;
     await rm(directory, { recursive: true, force: true });
   });
-  await cp(`resources/ils/${DEFAULT_SERVER_VERSION}/intellij-android`, extension, {
+  await cp(`resources/ils/${DEFAULT_SERVER_VERSION}/android.lsp`, extension, {
     recursive: true,
   });
   await writeFile(join(directory, 'build.txt'), `ILS-${DEFAULT_SERVER_VERSION}\n`);
@@ -158,65 +142,257 @@ test('matching published extension assets resolve for the exact ILS build', asyn
   assert.deepEqual(await resolveAndroidExtension(executable), { pluginPath: extension });
 });
 
-for (const name of assetNames) {
-  for (const mutation of [
-    'missing',
-    'tampered',
-    'companion-missing',
-    'companion-malformed',
-    'companion-wrong',
-  ] as const) {
-    test(`extension rejects ${name} ${mutation}`, async (t) => {
-      const { extension, executable } = await extensionFixture(t);
-      const asset = join(extension, 'lib', name);
-      if (mutation === 'missing') await rm(asset);
-      else if (mutation === 'tampered') await writeFile(asset, 'tampered');
-      else if (mutation === 'companion-missing') await rm(`${asset}.sha256`);
-      else if (mutation === 'companion-malformed')
-        await writeFile(`${asset}.sha256`, 'invalid checksum');
-      else await writeFile(`${asset}.sha256`, `${'0'.repeat(64)} *${name}\n`);
-      const result = await resolveAndroidExtension(executable);
-      assert.equal(result.pluginPath, undefined);
-      assert.equal(typeof result.reason, 'string');
-    });
-  }
-}
+test('extension rejects missing nested implementation module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.jar'));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
 
-test('extension rejects additional runtime libraries', async (t) => {
+test('extension rejects tampered nested implementation module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(
+    join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.jar'),
+    'tampered bytecode',
+  );
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects missing companion sha256 for nested module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(
+    join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.jar.sha256'),
+  );
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects malformed companion sha256 for nested module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(
+    join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.jar.sha256'),
+    'invalid checksum',
+  );
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects companion sha256 mismatch for nested module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(
+    join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.jar.sha256'),
+    `${'0'.repeat(64)} *language-server.api.features.impl.android.jar\n`,
+  );
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects missing descriptor jar', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(join(extension, 'lib', 'language-server-plugins-android-lsp.jar'));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects tampered descriptor jar', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(join(extension, 'lib', 'language-server-plugins-android-lsp.jar'), 'tampered');
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects missing companion sha256 for descriptor jar', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(join(extension, 'lib', 'language-server-plugins-android-lsp.jar.sha256'));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects missing upstream library', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(join(extension, 'lib', 'lint-api-32.4.1.jar'));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects tampered upstream library', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(join(extension, 'lib', 'lint-api-32.4.1.jar'), 'tampered upstream');
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects flattened implementation module in lib', async (t) => {
+  const { extension, executable, manifestPath } = await extensionFixture(t);
+  const nestedJar = join(
+    extension,
+    'lib',
+    'modules',
+    'language-server.api.features.impl.android.jar',
+  );
+  const flattenedJar = join(extension, 'lib', 'language-server.api.features.impl.android.jar');
+  const nestedSha = `${nestedJar}.sha256`;
+  const flattenedSha = `${flattenedJar}.sha256`;
+
+  await cp(nestedJar, flattenedJar);
+  await cp(nestedSha, flattenedSha);
+  await rm(join(extension, 'lib', 'modules'), { recursive: true, force: true });
+
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const asset = manifest.assets.find(
+    (a: { name: string }) => a.name === 'language-server.api.features.impl.android.jar',
+  );
+  if (asset) {
+    asset.path = 'lib/language-server.api.features.impl.android.jar';
+  }
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+  assert.equal(typeof result.reason, 'string');
+});
+
+test('extension rejects unexpected nested asset in lib/modules', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(join(extension, 'lib', 'modules', 'unexpected.jar'), 'extra nested jar');
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects additional runtime libraries in lib', async (t) => {
   const { extension, executable } = await extensionFixture(t);
   await writeFile(join(extension, 'lib', 'unexpected.jar'), 'extra');
   assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
 });
 
-for (const mutation of [
-  'missing',
-  'duplicate',
-  'traversal',
-  'wrong-name',
-  'wrong-version',
-  'wrong-java',
-  'wrong-abi',
-  'wrong-size',
-] as const) {
-  test(`extension rejects manifest ${mutation}`, async (t) => {
-    const { executable, manifestPath } = await extensionFixture(t);
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-    if (mutation === 'missing') manifest.assets.pop();
-    else if (mutation === 'duplicate') manifest.assets[1] = manifest.assets[0];
-    else if (mutation === 'traversal') manifest.assets[0].path = '../../secret.jar';
-    else if (mutation === 'wrong-name') manifest.assets[0].name = 'unexpected.jar';
-    else if (mutation === 'wrong-version') manifest.serverVersion = '263.7084.0';
-    else if (mutation === 'wrong-java') manifest.targetJavaVersion = 21;
-    else if (mutation === 'wrong-abi') manifest.classFileVersion = 65;
-    else manifest.assets[1].size++;
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
-  });
-}
+test('extension rejects unexpected subdirectory in lib', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await mkdir(join(extension, 'lib', 'unexpected_dir'), { recursive: true });
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects unexpected subdirectory in lib/modules', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await mkdir(join(extension, 'lib', 'modules', 'unexpected_sub'), { recursive: true });
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects symbolic link in lib directory', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  try {
+    await symlink(
+      join(extension, 'lib', 'common-32.4.1.jar'),
+      join(extension, 'lib', 'symlink.jar'),
+    );
+  } catch (error: unknown) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error.code === 'EPERM' || error.code === 'ENOSYS')
+    ) {
+      t.skip('Symbolic links are not supported without elevated privileges on this system');
+      return;
+    }
+    throw error;
+  }
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
 
 test('extension rejects a missing manifest', async (t) => {
   const { executable, manifestPath } = await extensionFixture(t);
   await rm(manifestPath);
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest duplicate asset name', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.assets[1].name = manifest.assets[0].name;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest duplicate asset path', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.assets[1].path = manifest.assets[0].path;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest path traversal', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.assets[0].path = '../../secret.jar';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest mismatched asset name and path', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.assets[0].name = 'unexpected.jar';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest wrong serverVersion', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.serverVersion = '263.7084.0';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest wrong extensionId', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.extensionId = 'com.other.plugin';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest wrong targetJavaVersion', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.targetJavaVersion = 21;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest wrong classFileVersion', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.classFileVersion = 65;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest wrong asset size', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.assets[0].size++;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
+
+test('extension rejects manifest missing asset entries', async (t) => {
+  const { executable, manifestPath } = await extensionFixture(t);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.assets.pop();
+  await writeFile(manifestPath, JSON.stringify(manifest));
   assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
 });
 
@@ -350,34 +526,20 @@ test('Windows plugin paths retain filesystem case-insensitive identity', {
   );
 });
 
-for (const name of [
-  'adblib-9.4.1.jar',
-  'adblib-tools-9.4.1.jar',
-  'lint-api-32.4.1.jar',
-  'lint-checks-32.4.1.jar',
-  'lint-model-32.4.1.jar',
-  'common-32.4.1.jar',
-  'sdklib-32.4.1.jar',
-  'kxml2-2.3.0.jar',
-  'sdk-common-32.4.1.jar',
-  'layoutlib-api-32.4.1.jar',
-  'manifest-merger-32.4.1.jar',
-  'groovy-4.0.29.jar',
-]) {
-  test(`extension rejects substituted ${name} even with a self-consistent manifest`, async (t) => {
-    const { extension, executable, manifestPath } = await extensionFixture(t);
-    const bytes = Buffer.from('substituted dependency');
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
-    await writeFile(join(extension, 'lib', name), bytes);
-    await writeFile(join(extension, 'lib', `${name}.sha256`), `${sha256} *${name}\n`);
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-    const asset = manifest.assets.find((item: { name: string }) => item.name === name);
-    asset.sha256 = sha256;
-    asset.size = bytes.length;
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
-  });
-}
+test('extension rejects substituted upstream dependency even with a self-consistent manifest', async (t) => {
+  const { extension, executable, manifestPath } = await extensionFixture(t);
+  const name = 'lint-api-32.4.1.jar';
+  const bytes = Buffer.from('substituted dependency');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  await writeFile(join(extension, 'lib', name), bytes);
+  await writeFile(join(extension, 'lib', `${name}.sha256`), `${sha256} *${name}\n`);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const asset = manifest.assets.find((item: { name: string }) => item.name === name);
+  asset.sha256 = sha256;
+  asset.size = bytes.length;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+});
 
 test('getIjPluginPaths returns empty array when options are undefined, empty, or whitespace-only', () => {
   assert.deepEqual(getIjPluginPaths(undefined), []);
@@ -395,63 +557,52 @@ test('getIjPluginPaths extracts single unquoted -Dplugin.path', () => {
 });
 
 test('getIjPluginPaths extracts quoted -Dplugin.path containing spaces', () => {
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path="/Program Files/My Plugins/p1"'),
-    ['/Program Files/My Plugins/p1'],
-  );
-  assert.deepEqual(
-    getIjPluginPaths('"-Dplugin.path=/Program Files/My Plugins/p1"'),
-    ['/Program Files/My Plugins/p1'],
-  );
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path="/Program Files/My Plugins/p1"'), [
+    '/Program Files/My Plugins/p1',
+  ]);
+  assert.deepEqual(getIjPluginPaths('"-Dplugin.path=/Program Files/My Plugins/p1"'), [
+    '/Program Files/My Plugins/p1',
+  ]);
 });
 
 test('getIjPluginPaths extracts multiple comma-separated and native list-separated paths', () => {
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path="/opt/p1,/opt/p2"'),
-    ['/opt/p1', '/opt/p2'],
-  );
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path="/opt/p1,/opt/p2"'), ['/opt/p1', '/opt/p2']);
   const separator = process.platform === 'win32' ? ';' : ':';
-  assert.deepEqual(
-    getIjPluginPaths(`-Dplugin.path="/opt/p1${separator}/opt/p2"`),
-    ['/opt/p1', '/opt/p2'],
-  );
+  assert.deepEqual(getIjPluginPaths(`-Dplugin.path="/opt/p1${separator}/opt/p2"`), [
+    '/opt/p1',
+    '/opt/p2',
+  ]);
 });
 
 test('getIjPluginPaths combines multiple -Dplugin.path occurrences', () => {
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"'),
-    ['/opt/p1', '/opt/p2'],
-  );
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"'), [
+    '/opt/p1',
+    '/opt/p2',
+  ]);
 });
 
 test('getIjPluginPaths normalizes Windows backslashes in extracted paths', {
   skip: process.platform !== 'win32',
 }, () => {
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path="C:\\p1\\dir,D:\\p2\\dir"'),
-    ['C:/p1/dir', 'D:/p2/dir'],
-  );
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path="C:\\p1\\dir,D:\\p2\\dir"'), [
+    'C:/p1/dir',
+    'D:/p2/dir',
+  ]);
 });
 
 test('getIjPluginPaths merges and deduplicates additional plugin path', () => {
   assert.deepEqual(getIjPluginPaths(undefined, 'C:\\ext'), ['C:/ext']);
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path=/opt/p1', 'C:\\ext'),
-    ['/opt/p1', 'C:/ext'],
-  );
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path="/opt/p1,/ext"', '/ext'),
-    ['/opt/p1', '/ext'],
-  );
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path=/opt/p1', 'C:\\ext'), ['/opt/p1', 'C:/ext']);
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path="/opt/p1,/ext"', '/ext'), ['/opt/p1', '/ext']);
 });
 
 test('getIjPluginPaths deduplicates case-insensitively on Windows', {
   skip: process.platform !== 'win32',
 }, () => {
-  assert.deepEqual(
-    getIjPluginPaths('-Dplugin.path="c:/existing;C:/EXT"', 'C:\\ext'),
-    ['c:/existing', 'C:/EXT'],
-  );
+  assert.deepEqual(getIjPluginPaths('-Dplugin.path="c:/existing;C:/EXT"', 'C:\\ext'), [
+    'c:/existing',
+    'C:/EXT',
+  ]);
 });
 
 test('getIjPluginPaths throws on invalid characters in additional plugin path', () => {
