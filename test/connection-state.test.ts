@@ -361,11 +361,7 @@ test('reduceConnectionState: maintains progress but preserves failed detail and 
   assert.deepEqual(state.failure, originalFailure);
   assert.equal(state.progress, null);
 
-  state = reduceConnectionState(
-    state,
-    { method: 'intellij/ready-for-test', params: {} },
-    'server',
-  );
+  state = reduceConnectionState(state, { method: 'intellij/ready-for-test', params: {} }, 'server');
   assert.equal(state.phase, 'failed');
   assert.equal(state.detail, 'Gradle sync failed');
   assert.deepEqual(state.failure, originalFailure);

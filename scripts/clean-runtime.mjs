@@ -36,9 +36,10 @@ function referencesTarget(value, target) {
 function systemPathArgument(commandLine) {
   const quoted = /"--system-path=([^"]+)"|'--system-path=([^']+)'/.exec(commandLine);
   if (quoted) return quoted[1] ?? quoted[2];
-  const value = /(?:^|\s)--system-path=(?:"([^"]+)"|'([^']+)'|(.+?)(?=\s--[\w-]+(?:=|\s|$)|$))/.exec(
-    commandLine,
-  );
+  const value =
+    /(?:^|\s)--system-path=(?:"([^"]+)"|'([^']+)'|(.+?)(?=\s--[\w-]+(?:=|\s|$)|$))/.exec(
+      commandLine,
+    );
   return value ? (value[1] ?? value[2] ?? value[3]) : null;
 }
 
@@ -92,9 +93,10 @@ async function processIdentity(item) {
     encoding: 'utf8',
     timeout: 5000,
   });
-  const match = /^([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*$/.exec(
-    output.trim(),
-  );
+  const match =
+    /^([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*$/.exec(
+      output.trim(),
+    );
   return match ? { startTime: Date.parse(match[1]), executable: match[2] } : null;
 }
 
@@ -174,7 +176,10 @@ async function consumersRunning(targets) {
     if (!liveSystemPath || normalize(resolve(liveSystemPath)) !== normalize(resolve(systemPath)))
       return true;
     // JVM options are inherited through the environment, not the Windows command line.
-    if (!Array.isArray(owner.pluginPaths) || owner.pluginPaths.some((path) => typeof path !== 'string'))
+    if (
+      !Array.isArray(owner.pluginPaths) ||
+      owner.pluginPaths.some((path) => typeof path !== 'string')
+    )
       return true;
     if (owner.pluginPaths.some((path) => targets.some((target) => referencesTarget(path, target))))
       return true;

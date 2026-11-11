@@ -160,12 +160,14 @@ test('unclaimed loopback attach and remote attach preserve ordinary JVM behavior
     if (host === '[::1]' || host === '[0:0:0:0:0:0:0:1]') {
       assert.equal(claimedHost, '::1');
       assert.equal(
-        harness.backendRequests.find((request) => request.command === 'attach')?.arguments?.hostName,
+        harness.backendRequests.find((request) => request.command === 'attach')?.arguments
+          ?.hostName,
         '::1',
       );
     } else if (host === '[::1:8080]') {
       assert.equal(
-        harness.backendRequests.find((request) => request.command === 'attach')?.arguments?.hostName,
+        harness.backendRequests.find((request) => request.command === 'attach')?.arguments
+          ?.hostName,
         '::1:8080',
       );
     }

@@ -5,7 +5,11 @@ import net from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from '../project/metadata.js';
-import { getIjPluginPaths, mergeIjJavaOptions, resolveAndroidExtension } from './android-extension.js';
+import {
+  getIjPluginPaths,
+  mergeIjJavaOptions,
+  resolveAndroidExtension,
+} from './android-extension.js';
 import { DEFAULT_SERVER_VERSION } from './bundles.js';
 import { readServerConfig, trackInstallation } from './config.js';
 import { requireAcceptedEula } from './eula.js';
@@ -488,8 +492,7 @@ export async function verifyServerOwnership(
   }
   if (
     owner.pluginPaths !== undefined &&
-    (!Array.isArray(owner.pluginPaths) ||
-      owner.pluginPaths.some((p) => typeof p !== 'string'))
+    (!Array.isArray(owner.pluginPaths) || owner.pluginPaths.some((p) => typeof p !== 'string'))
   ) {
     return {
       status: 'running-unverified',
@@ -498,7 +501,6 @@ export async function verifyServerOwnership(
       reason: 'Server owner record contains invalid pluginPaths (expected string array)',
     };
   }
-
 
   const expectedSystemPath = normalizePathForPlatform(systemPath);
   const ownerSystemPath = normalizePathForPlatform(owner.systemPath);

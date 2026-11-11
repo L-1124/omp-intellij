@@ -96,11 +96,16 @@ async function blocked(run) {
   await assert.rejects(run('--apply'), (error) => error.code === 1);
 }
 
-test('runtime cleanup ignores unrelated Node processes and preserves the declared current cache', { timeout: 60000 }, async (t) => {
+test('runtime cleanup ignores unrelated Node processes and preserves the declared current cache', {
+  timeout: 60000,
+}, async (t) => {
   const f = await fixture(t);
   const stale = await f.cache(staleHash);
   const current = await f.cache(protectedHash);
-  await writeFile(join(f.root, '.lsp.json'), JSON.stringify({ args: [join(current, 'dist', 'bridge.js')] }));
+  await writeFile(
+    join(f.root, '.lsp.json'),
+    JSON.stringify({ args: [join(current, 'dist', 'bridge.js')] }),
+  );
   await f.idle(join(f.root, 'unrelated.js'));
 
   await f.run('--apply');
@@ -109,7 +114,9 @@ test('runtime cleanup ignores unrelated Node processes and preserves the declare
   assert.equal(await readFile(join(current, 'marker'), 'utf8'), protectedHash);
 });
 
-test('runtime cleanup preserves an old cache used by a live Bridge', { timeout: 60000 }, async (t) => {
+test('runtime cleanup preserves an old cache used by a live Bridge', {
+  timeout: 60000,
+}, async (t) => {
   const f = await fixture(t);
   const stale = await f.cache(staleHash);
   await f.idle(join(stale, 'dist', 'bridge.js'));
@@ -120,7 +127,9 @@ test('runtime cleanup preserves an old cache used by a live Bridge', { timeout: 
   assert.equal(await readFile(join(stale, 'marker'), 'utf8'), staleHash);
 });
 
-test('runtime cleanup checks JVM plugin ownership after the Bridge has exited', { timeout: 60000 }, async (t) => {
+test('runtime cleanup checks JVM plugin ownership after the Bridge has exited', {
+  timeout: 60000,
+}, async (t) => {
   const f = await fixture(t);
   const stale = await f.cache(staleHash);
   const systemPath = join(f.root, 'server system');
