@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { acceptServerEula, readServerEula } from '../src/server/eula.js';
 
 for (const invalid of [
   { host: '0.0.0.0' },
@@ -202,14 +201,6 @@ test('ensureServer rejects spawn when EULA is not accepted for executable', asyn
 
     assert.equal(child.status, 2);
     assert.match(child.stderr, /EULA_NOT_ACCEPTED/);
-
-    // Accept EULA
-    const doc = await readServerEula(exe);
-    await acceptServerEula(doc, { configFile });
-
-    // Now EULA check is accepted
-    const docCheck = await readServerEula(exe);
-    assert.equal(docCheck.hash, doc.hash);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

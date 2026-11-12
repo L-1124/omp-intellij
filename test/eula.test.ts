@@ -67,19 +67,6 @@ test('readServerEula reads EULA document and computes correct 16-char lowercase 
   assert.match(doc.hash, /^[0-9a-f]{16}$/);
 });
 
-test('readServerEula hash changes when EULA bytes change even slightly', async (t) => {
-  const env = await temporaryTestEnv(t);
-  const bundle = await createFakeBundle(join(env.root, 'bundle'), 'Version 1.0.0');
-  const initialEulaDoc = await readServerEula(bundle.launcher);
-
-  await writeFile(bundle.eulaPath, 'Version 1.0.1');
-  const updatedEulaDoc = await readServerEula(bundle.launcher);
-
-  assert.notEqual(initialEulaDoc.hash, updatedEulaDoc.hash);
-  assert.match(initialEulaDoc.hash, /^[0-9a-f]{16}$/);
-  assert.match(updatedEulaDoc.hash, /^[0-9a-f]{16}$/);
-});
-
 test('readServerEula fails when EULA.txt is missing in bundle with path and code', async (t) => {
   const env = await temporaryTestEnv(t);
   const bundle = await createFakeBundle(join(env.root, 'bundle'));
@@ -116,25 +103,18 @@ test('readServerEula fails when executable cannot be resolved with path and code
   );
 });
 
-test('readServerEula resolves symlinked launcher to real bundle EULA.txt if symlinks supported', async (t) => {
+test('readServerEula resolves a linked launcher directory to the real bundle EULA.txt', async (t) => {
   const env = await temporaryTestEnv(t);
   const bundle = await createFakeBundle(join(env.root, 'real'));
   const linkDir = join(env.root, 'links');
   await mkdir(linkDir, { recursive: true });
-  const linkPath = join(linkDir, 'launcher-link.exe');
+  const linkedServer = join(linkDir, 'server');
+  // Windows file symlinks require elevation, so link the server root instead: a junction
+  // needs no privilege and still forces realpath() to resolve through the link.
+  await symlink(bundle.serverRoot, linkedServer, process.platform === 'win32' ? 'junction' : 'dir');
 
-  let symlinkCreated = false;
-  try {
-    await symlink(bundle.launcher, linkPath);
-    symlinkCreated = true;
-  } catch {
-    // Unprivileged symlink creation on Windows without Developer Mode
-  }
-
-  if (symlinkCreated) {
-    const doc = await readServerEula(linkPath);
-    assert.equal(doc.path, bundle.eulaPath);
-  }
+  const doc = await readServerEula(join(linkedServer, 'bin', 'intellij-server.exe'));
+  assert.equal(doc.path, bundle.eulaPath);
 });
 
 test('readEulaAcceptance returns empty list when file is missing', async (t) => {

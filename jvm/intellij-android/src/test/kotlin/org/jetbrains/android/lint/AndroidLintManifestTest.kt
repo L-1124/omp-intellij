@@ -144,28 +144,7 @@ class AndroidLintManifestTest {
             """.trimIndent() + "\n"
             Files.writeString(blameReport, blameText)
 
-            val model = AndroidLintModel(
-                module = null,
-                androidModule = null,
-                moduleRoot = tempDir,
-                projectRoot = tempDir,
-                variant = "debug",
-                sdkHome = null,
-                compileSdk = 34,
-                compileTarget = "android-34",
-                minSdk = 26,
-                targetSdk = 34,
-                namespace = "com.example.app",
-                isLibrary = false,
-                minSdkPremiseMissing = false,
-                lintModelModule = null,
-                lintModelVariant = null,
-                ruleJars = emptyList(),
-                ruleJarFingerprints = emptyList(),
-                fingerprint = "fingerprint",
-                lintXmlFingerprint = "lintXmlFingerprint",
-                xmlInputs = null,
-            )
+            val model = debugModel(tempDir, "fingerprint", "lintXmlFingerprint")
 
             val client = TestLintClient()
             val helper = AndroidLintManifest(model, environment.project, client)
@@ -225,28 +204,7 @@ class AndroidLintManifestTest {
                 "-- Merging decision tree log ---\nmanifest\nADDED from ${srcManifest.toAbsolutePath()}:1:1\n"
             )
 
-            val model = AndroidLintModel(
-                module = null,
-                androidModule = null,
-                moduleRoot = tempDir,
-                projectRoot = tempDir,
-                variant = "debug",
-                sdkHome = null,
-                compileSdk = 34,
-                compileTarget = "android-34",
-                minSdk = 26,
-                targetSdk = 34,
-                namespace = "com.example.app",
-                isLibrary = false,
-                minSdkPremiseMissing = false,
-                lintModelModule = null,
-                lintModelVariant = null,
-                ruleJars = emptyList(),
-                ruleJarFingerprints = emptyList(),
-                fingerprint = "fp",
-                lintXmlFingerprint = "xmlFp",
-                xmlInputs = null,
-            )
+            val model = debugModel(tempDir)
 
             // Client returns normalized LF from in-memory document
             val client = object : TestLintClient() {
@@ -290,28 +248,7 @@ class AndroidLintManifestTest {
             // Write a generic XML/log file that is NOT an AGP decision tree log
             Files.writeString(wrongLog, "Some random build summary or resource log without decision tree markers")
 
-            val model = AndroidLintModel(
-                module = null,
-                androidModule = null,
-                moduleRoot = tempDir,
-                projectRoot = tempDir,
-                variant = "debug",
-                sdkHome = null,
-                compileSdk = 34,
-                compileTarget = "android-34",
-                minSdk = 26,
-                targetSdk = 34,
-                namespace = "com.example.app",
-                isLibrary = false,
-                minSdkPremiseMissing = false,
-                lintModelModule = null,
-                lintModelVariant = null,
-                ruleJars = emptyList(),
-                ruleJarFingerprints = emptyList(),
-                fingerprint = "fp",
-                lintXmlFingerprint = "xmlFp",
-                xmlInputs = null,
-            )
+            val model = debugModel(tempDir)
 
             val client = TestLintClient()
             val helper = AndroidLintManifest(model, environment.project, client)
@@ -349,28 +286,7 @@ class AndroidLintManifestTest {
                 "-- Merging decision tree log ---\nmanifest\nADDED from ${srcManifest.toAbsolutePath()}:1:1\n"
             )
 
-            val model = AndroidLintModel(
-                module = null,
-                androidModule = null,
-                moduleRoot = tempDir,
-                projectRoot = tempDir,
-                variant = "debug",
-                sdkHome = null,
-                compileSdk = 34,
-                compileTarget = "android-34",
-                minSdk = 26,
-                targetSdk = 34,
-                namespace = "com.example.app",
-                isLibrary = false,
-                minSdkPremiseMissing = false,
-                lintModelModule = null,
-                lintModelVariant = null,
-                ruleJars = emptyList(),
-                ruleJarFingerprints = emptyList(),
-                fingerprint = "fp",
-                lintXmlFingerprint = "xmlFp",
-                xmlInputs = null,
-            )
+            val model = debugModel(tempDir)
 
             val client = TestLintClient()
             val helper = AndroidLintManifest(model, environment.project, client)
@@ -411,28 +327,7 @@ class AndroidLintManifestTest {
                 "-- Merging decision tree log ---\nmanifest\nADDED from ${srcManifest.toAbsolutePath()}:1:1\n"
             )
 
-            val model = AndroidLintModel(
-                module = null,
-                androidModule = null,
-                moduleRoot = tempDir,
-                projectRoot = tempDir,
-                variant = "debug",
-                sdkHome = null,
-                compileSdk = 34,
-                compileTarget = "android-34",
-                minSdk = 26,
-                targetSdk = 34,
-                namespace = "com.example.app",
-                isLibrary = false,
-                minSdkPremiseMissing = false,
-                lintModelModule = null,
-                lintModelVariant = null,
-                ruleJars = emptyList(),
-                ruleJarFingerprints = emptyList(),
-                fingerprint = "fingerprint",
-                lintXmlFingerprint = "lintXmlFingerprint",
-                xmlInputs = null,
-            )
+            val model = debugModel(tempDir, "fingerprint", "lintXmlFingerprint")
 
             // A client simulating open editor with unsaved content differing from disk
             val client = object : TestLintClient() {
@@ -488,28 +383,7 @@ class AndroidLintManifestTest {
             )
 
             // Model is configured for variant "release"
-            val releaseModel = AndroidLintModel(
-                module = null,
-                androidModule = null,
-                moduleRoot = tempDir,
-                projectRoot = tempDir,
-                variant = "release",
-                sdkHome = null,
-                compileSdk = 34,
-                compileTarget = "android-34",
-                minSdk = 26,
-                targetSdk = 34,
-                namespace = "com.example.app",
-                isLibrary = false,
-                minSdkPremiseMissing = false,
-                lintModelModule = null,
-                lintModelVariant = null,
-                ruleJars = emptyList(),
-                ruleJarFingerprints = emptyList(),
-                fingerprint = "fingerprint",
-                lintXmlFingerprint = "lintXmlFingerprint",
-                xmlInputs = null,
-            )
+            val releaseModel = debugModel(tempDir, "fingerprint", "lintXmlFingerprint", variant = "release")
 
             val client = TestLintClient()
             val helper = AndroidLintManifest(releaseModel, environment.project, client)
@@ -541,6 +415,36 @@ class AndroidLintManifestTest {
         @AfterClass
         fun tearDown() {
             Disposer.dispose(disposable)
+        }
+
+        private fun debugModel(
+            root: Path,
+            fingerprint: String = "fp",
+            lintXmlFingerprint: String = "xmlFp",
+            variant: String = "debug",
+        ): AndroidLintModel {
+            return AndroidLintModel(
+                module = null,
+                androidModule = null,
+                moduleRoot = root,
+                projectRoot = root,
+                variant = variant,
+                sdkHome = null,
+                compileSdk = 34,
+                compileTarget = "android-34",
+                minSdk = 26,
+                targetSdk = 34,
+                namespace = "com.example.app",
+                isLibrary = false,
+                minSdkPremiseMissing = false,
+                lintModelModule = null,
+                lintModelVariant = null,
+                ruleJars = emptyList(),
+                ruleJarFingerprints = emptyList(),
+                fingerprint = fingerprint,
+                lintXmlFingerprint = lintXmlFingerprint,
+                xmlInputs = null,
+            )
         }
 
         private fun deleteRecursively(path: Path) {

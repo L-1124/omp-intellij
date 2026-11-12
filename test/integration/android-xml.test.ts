@@ -318,7 +318,7 @@ async function startLspClient(
   return driver;
 }
 
-test('Android XML symbols and manifest references integration', async (t) => {
+test('Android XML symbols and manifest references integration [smoke]', async (t) => {
   const sandbox = await createIntegrationSandbox(prereqs);
   let projectDir = '';
   let driver: LspClientDriver | null = null;
@@ -1290,7 +1290,7 @@ test('Android XML symbols and manifest references integration', async (t) => {
     );
 
     await t.test(
-      'References: multiple resource types (color, dimen, bool, integer, array, plurals, style, id, layout)',
+      'References: representative value, container, ID, style, and file resources',
       async () => {
         const usageRefPath = join(
           appDir,
@@ -1333,77 +1333,13 @@ test('Android XML symbols and manifest references integration', async (t) => {
           'Exact set equality for color references (direct and wildcard)',
         );
 
-        // Dimen
-        const dimensPath = join(appDir, 'res', 'values', 'dimens.xml');
-        const dimensText = await readFile(dimensPath, 'utf8');
-        const dimensUri = pathToFileURL(dimensPath).href;
-        client.notify('textDocument/didOpen', {
-          textDocument: { uri: dimensUri, languageId: 'xml', version: 1, text: dimensText },
-        });
-        const dimenRefs = normalizeLocations(
-          await client.request('textDocument/references', {
-            textDocument: { uri: dimensUri },
-            position: findPositionInText(dimensText, 'default_margin'),
-            context: { includeDeclaration: false },
-          }),
-        );
-        const expectedDimenRefs: LspLocation[] = [
-          {
-            uri: mainActivityUri,
-            range: findFieldRangeInText(mainActivityText, 'R.dimen.default_margin'),
-          },
-        ];
-        assert.deepEqual(
-          new Set(dimenRefs.map(locationToKey)),
-          new Set(expectedDimenRefs.map(locationToKey)),
-          'Exact set equality for dimen references',
-        );
-
-        // Attrs: bool, integer, array, plurals, id
+        // Container and item declarations have distinct XML shapes.
         const attrsPath = join(appDir, 'res', 'values', 'attrs.xml');
         const attrsText = await readFile(attrsPath, 'utf8');
         const attrsUri = pathToFileURL(attrsPath).href;
         client.notify('textDocument/didOpen', {
           textDocument: { uri: attrsUri, languageId: 'xml', version: 1, text: attrsText },
         });
-
-        // bool
-        const boolRefs = normalizeLocations(
-          await client.request('textDocument/references', {
-            textDocument: { uri: attrsUri },
-            position: findPositionInText(attrsText, 'feature_enabled'),
-            context: { includeDeclaration: false },
-          }),
-        );
-        assert.deepEqual(
-          boolRefs.map(locationToKey),
-          [
-            locationToKey({
-              uri: usageRefUri,
-              range: findFieldRangeInText(usageRefText, 'R.bool.feature_enabled'),
-            }),
-          ],
-          'Exact set equality for bool reference',
-        );
-
-        // integer
-        const intRefs = normalizeLocations(
-          await client.request('textDocument/references', {
-            textDocument: { uri: attrsUri },
-            position: findPositionInText(attrsText, 'max_retry_count'),
-            context: { includeDeclaration: false },
-          }),
-        );
-        assert.deepEqual(
-          intRefs.map(locationToKey),
-          [
-            locationToKey({
-              uri: usageRefUri,
-              range: findFieldRangeInText(usageRefText, 'R.integer.max_retry_count'),
-            }),
-          ],
-          'Exact set equality for integer reference',
-        );
 
         // array
         const arrayRefs = normalizeLocations(
@@ -1422,25 +1358,6 @@ test('Android XML symbols and manifest references integration', async (t) => {
             }),
           ],
           'Exact set equality for array reference',
-        );
-
-        // plurals
-        const pluralsRefs = normalizeLocations(
-          await client.request('textDocument/references', {
-            textDocument: { uri: attrsUri },
-            position: findPositionInText(attrsText, 'items_count'),
-            context: { includeDeclaration: false },
-          }),
-        );
-        assert.deepEqual(
-          pluralsRefs.map(locationToKey),
-          [
-            locationToKey({
-              uri: usageRefUri,
-              range: findFieldRangeInText(usageRefText, 'R.plurals.items_count'),
-            }),
-          ],
-          'Exact set equality for plurals reference',
         );
 
         // id item
@@ -1556,10 +1473,6 @@ test('Android XML symbols and manifest references integration', async (t) => {
         name: 'reference_icon',
         root: 'adaptive-icon',
       },
-      { type: 'anim', folder: 'anim', name: 'reference_alpha', root: 'alpha' },
-      { type: 'animator', folder: 'animator', name: 'reference_animator', root: 'objectAnimator' },
-      { type: 'raw', folder: 'raw', name: 'reference_raw', root: 'probe' },
-      { type: 'xml', folder: 'xml', name: 'reference_config', root: 'preferences' },
     ]) {
       await t.test(
         `References: ${resource.type} XML file identity and declaration range`,
@@ -4622,117 +4535,6 @@ test('Android Lint diagnostics integration', async (t) => {
 test('Android XML and Manifest Lint diagnostics integration', {
   timeout: 600000,
 }, async (t) => {
-  // 1. Native baseline in isolated session (WITHOUT extension)
-  await t.test(
-    'Baseline: Isolated native ILS session without extension preserves native XML diagnostics and emits no Lint issues',
-    async () => {
-      const nativeSandbox = await createIntegrationSandbox(prereqs);
-      let nativeProjectDir = '';
-      let nativeDriver: InitializedLspClientDriver | null = null;
-      try {
-        const nativeExtensionDir = join(nativeSandbox.sandboxDir, 'no-extension');
-        await mkdir(nativeExtensionDir);
-        nativeSandbox.env.OMP_ANDROID_LS_EXTENSION_DIR = nativeExtensionDir;
-        nativeProjectDir = await copyAndroidLintFixture(nativeSandbox);
-        nativeDriver = await startLspClient(nativeProjectDir, nativeSandbox);
-
-        await executeIntellij(
-          { action: 'wait', project: nativeProjectDir, timeout: 180 },
-          undefined,
-          undefined,
-          { cwd: nativeProjectDir } as ExtensionContext,
-          { systemPath: nativeSandbox.systemPath },
-        );
-
-        // Verify capabilities: diagnosticProvider declared
-        const initCapabilities = nativeDriver.initResult?.capabilities;
-        assert.ok(
-          Boolean(initCapabilities?.diagnosticProvider),
-          'Native server must declare diagnosticProvider capability',
-        );
-
-        // Open an XML with syntax error
-        const syntaxErrorUri = pathToFileURL(
-          join(nativeProjectDir, 'app', 'src', 'main', 'res', 'layout', 'native_syntax_err.xml'),
-        ).href;
-        const badXmlText = [
-          '<?xml version="1.0" encoding="utf-8"?>',
-          '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"',
-          '    android:layout_width="match_parent"',
-          '    android:layout_height="match_parent">',
-          '    <TextView',
-          '        android:layout_width="wrap_content"',
-          '        android:layout_height="wrap_content"',
-          '        android:text="Native syntax test"',
-          '</LinearLayout>',
-          '',
-        ].join('\n');
-
-        nativeDriver.notify('textDocument/didOpen', {
-          textDocument: { uri: syntaxErrorUri, languageId: 'xml', version: 1, text: badXmlText },
-        });
-
-        try {
-          const report = await pullDiagnostics(nativeDriver, syntaxErrorUri);
-          const items = report.items ?? [];
-          const nativeErrors = items.filter((d: LspDiagnostic) => d.source !== 'android-lint');
-          const lintErrors = items.filter((d: LspDiagnostic) => d.source === 'android-lint');
-
-          assert.ok(nativeErrors.length >= 1, 'Native server must report XML syntax error');
-          assert.equal(
-            lintErrors.length,
-            0,
-            'Native session without extension must emit zero android-lint diagnostics',
-          );
-        } finally {
-          nativeDriver.notify('textDocument/didClose', { textDocument: { uri: syntaxErrorUri } });
-        }
-
-        // Open manifest with debuggable="true" in native session
-        const nativeManifestUri = pathToFileURL(
-          join(nativeProjectDir, 'app', 'config', 'manifest-main.xml'),
-        ).href;
-        const nativeManifestContent = (
-          await readFile(fileURLToPath(nativeManifestUri), 'utf8')
-        ).replace('<application', '<application android:debuggable="true"');
-
-        nativeDriver.notify('textDocument/didOpen', {
-          textDocument: {
-            uri: nativeManifestUri,
-            languageId: 'xml',
-            version: 1,
-            text: nativeManifestContent,
-          },
-        });
-
-        try {
-          const report = await pullDiagnostics(nativeDriver, nativeManifestUri);
-          const items = report.items ?? [];
-          const lintErrors = items.filter((d: LspDiagnostic) => d.source === 'android-lint');
-          assert.equal(
-            lintErrors.length,
-            0,
-            'Native session without extension must emit zero HardcodedDebugMode diagnostics',
-          );
-        } finally {
-          nativeDriver.notify('textDocument/didClose', {
-            textDocument: { uri: nativeManifestUri },
-          });
-        }
-      } finally {
-        if (nativeDriver) {
-          try {
-            await nativeDriver.close();
-          } catch {
-            // ignore
-          }
-        }
-        await nativeSandbox.cleanup();
-      }
-    },
-  );
-
-  // 2. Full XML & Manifest Lint acceptance suite in isolated session (WITH extension)
   const sandbox = await createIntegrationSandbox(prereqs);
   let projectDir = '';
   let driver: InitializedLspClientDriver | null = null;

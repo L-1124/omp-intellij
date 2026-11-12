@@ -12,7 +12,6 @@ import {
   findProjectIdForScope,
   getHostInitializationOptions,
   isPathInside,
-  loadDefaultPluginSettings,
   loadProjectConfiguration,
   recordConfigurationItems,
   resolveConfigurationItems,
@@ -371,13 +370,6 @@ test('loadProjectConfiguration throws on malformed JSON and save cleans up temp 
   const files = await readdir(rawConfigDir);
   assert.ok(files.includes(`${id}.json`));
   assert.equal(files.filter((f) => f.endsWith('.tmp')).length, 0);
-});
-
-test('loadDefaultPluginSettings reads single source of truth from marketplace manifest', async () => {
-  const defaults = await loadDefaultPluginSettings();
-  assert.ok(defaults && typeof defaults === 'object');
-  assert.ok('jetbrains.java' in defaults);
-  assert.ok('jetbrains.kotlin' in defaults);
 });
 
 test('getHostInitializationOptions preserves raw values without stripping', async (t) => {

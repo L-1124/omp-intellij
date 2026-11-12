@@ -33,7 +33,6 @@ import {
 
 const prerequisites = await verifyPrerequisites();
 test('dual project concurrency: JDK 17 and JDK 21 independent debugging and session recovery', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -265,7 +264,6 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
 });
 
 test('indexing cancellation: wait cancellation releases barrier and permits subsequent requests', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -387,7 +385,6 @@ test('indexing cancellation: wait cancellation releases barrier and permits subs
 });
 
 test('build cancellation: aborting DAP launch terminates process tree and preserves shared daemon', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -512,7 +509,6 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
 });
 
 test('attach cancellation: aborting handshake disconnects proxy and leaves target JVM intact', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -626,7 +622,6 @@ test('attach cancellation: aborting handshake disconnects proxy and leaves targe
 });
 
 test('process isolation: killed proxy marks session unrecoverable and preserves sibling sessions', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -697,8 +692,7 @@ test('process isolation: killed proxy marks session unrecoverable and preserves 
   }
 });
 
-test('crash recovery: terminated server transitions connection to disconnected with bounded wait', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
+test('crash recovery: terminated server transitions connection to disconnected with bounded wait [smoke]', async () => {
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -728,25 +722,27 @@ test('crash recovery: terminated server transitions connection to disconnected w
     await dap.request('initialize', { clientID: 'test-crash-dap', adapterID: 'intellij' });
 
     // Send real semantic request on bridge and launch request on DAP
-    const pendingQuery = bridge.request(
-      'textDocument/definition',
-      {
-        textDocument: { uri: pathToFileURL(app17Source).href },
-        position: { line: 5, character: 20 },
-      },
-      10000,
-    );
-    const pendingDap = dap.request(
-      'launch',
-      {
-        file: app17Source,
-        project: jdk17Dir,
-        noDebug: true,
-        build: false,
-        mainClass: 'com.example.App',
-      },
-      10000,
-    );
+    const pending = Promise.allSettled([
+      bridge.request(
+        'textDocument/definition',
+        {
+          textDocument: { uri: pathToFileURL(app17Source).href },
+          position: { line: 5, character: 20 },
+        },
+        10000,
+      ),
+      dap.request(
+        'launch',
+        {
+          file: app17Source,
+          project: jdk17Dir,
+          noDebug: true,
+          build: false,
+          mainClass: 'com.example.App',
+        },
+        10000,
+      ),
+    ]);
 
     // Verify server PID and kill only verified sandbox server
     const serverOwnerFile = join(sandbox.systemPath, 'omp-server.json');
@@ -756,26 +752,15 @@ test('crash recovery: terminated server transitions connection to disconnected w
 
     killProcessSafely(serverPid, sandbox);
 
-    // Confirm both pending operations terminate with bounded timeout / connection drop
-    let bridgeFailed = false;
-    let dapFailed = false;
+    assert.deepEqual(
+      (await pending).map((result) => result.status),
+      ['rejected', 'rejected'],
+    );
 
-    try {
-      await pendingQuery;
-    } catch {
-      bridgeFailed = true;
-    }
-
-    try {
-      await pendingDap;
-    } catch {
-      dapFailed = true;
-    }
-
-    assert.ok(bridgeFailed, 'Pending bridge query terminated after server kill');
-    assert.ok(dapFailed, 'Pending DAP launch terminated after server kill');
-
-    await bridge.close();
+    await bridge.waitForExit();
+    const disconnected = await readProjectState(sandbox.systemPath, jdk17Dir);
+    assert.equal(disconnected.phase, 'disconnected');
+    assert.equal(disconnected.live, false);
     await dap.close();
   } finally {
     await sandbox.cleanup();
@@ -783,7 +768,6 @@ test('crash recovery: terminated server transitions connection to disconnected w
 });
 
 test('build gate timeout: long-running Gradle launch resolves upon gate release', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified before running matrix');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {

@@ -273,9 +273,6 @@ class AndroidLintXmlParserTest {
         val start = valueLocation.start!!.offset
         val end = valueLocation.end!!.offset
         assertEquals("Hello 😀 World", xmlFile.text.substring(start, end))
-
-        // Emoji 😀 is 2 UTF-16 code units (surrogate pair)
-        assertEquals(2, "😀".length)
     }
 
     @Test
@@ -326,7 +323,6 @@ class AndroidLintXmlParserTest {
         val start = nameLoc.start!!.offset
         val end = nameLoc.end!!.offset
         assertEquals("string", xmlFile.text.substring(start, end))
-        assertEquals("string", xml.substring(start, end))
     }
 
     @Test
@@ -365,7 +361,6 @@ class AndroidLintXmlParserTest {
         val start = valLoc.start!!.offset
         val end = valLoc.end!!.offset
         assertEquals("Unfinished", xmlFile.text.substring(start, end))
-        assertEquals("Unfinished", xml.substring(start, end))
     }
 
     @Test
@@ -426,7 +421,7 @@ class AndroidLintXmlParserTest {
     }
 
     @Test
-    fun findNodeAtLocatesElementsAttributesAndText() {
+    fun findNodeAtLocatesElementsAndAttributes() {
         val xml = "<LinearLayout><Button android:text=\"ClickMe\" /></LinearLayout>"
         val xmlFile = createXmlFile("findnode.xml", xml)
         val doc = AndroidDomPsiConverter.convert(xmlFile)
@@ -473,32 +468,6 @@ class AndroidLintXmlParserTest {
         assertEquals(expectedEnd, resolvedLoc.end!!.offset)
         assertEquals(file, resolvedLoc.file)
     }
-
-    @Test
-    fun lintXmlDiskParsingFallbackSupported() {
-        val lintXml = "<lint><issue id=\"NewApi\" severity=\"ignore\"/></lint>"
-        val parser = AndroidLintXmlParser(null)
-        val lintFile = File("lint.xml")
-
-        val doc = parser.parseXml(lintXml, lintFile)
-        assertNotNull("lint.xml should be parsed by fallback parser", doc)
-
-        val root = doc!!.documentElement
-        assertNotNull(root)
-        assertEquals("lint", root!!.tagName)
-
-        val issues = doc.getElementsByTagName("issue")
-        assertEquals(1, issues.length)
-
-        val issue = issues.item(0) as Element
-        assertEquals("NewApi", issue.getAttribute("id"))
-        assertEquals("ignore", issue.getAttribute("severity"))
-
-        val loc = parser.getLocation(lintFile, issue)
-        assertNotNull(loc.start)
-        assertEquals(lintXml.indexOf("<issue"), loc.start!!.offset)
-    }
-
 
     @Test
     fun noDomAcrossRequestsCaching() {

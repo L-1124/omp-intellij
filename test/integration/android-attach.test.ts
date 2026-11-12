@@ -460,7 +460,7 @@ async function ensureApkBuilt(
   return apkPath;
 }
 
-test('Scenario 1: normal launch -> CLI prepare -> DAP attach -> tick breakpoint -> frame variables (after = before + 1) -> step counter -> detach (original PID survives) -> release & idempotence -> adb forward unchanged', async () => {
+test('Scenario 1: normal launch -> CLI prepare -> DAP attach -> tick breakpoint -> frame variables (after = before + 1) -> step counter -> detach (original PID survives) -> release & idempotence -> adb forward unchanged [smoke]', async () => {
   assert.ok(
     isDeviceOnline(deviceId),
     `Android device ${deviceId} must remain online during acceptance`,

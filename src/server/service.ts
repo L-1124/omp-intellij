@@ -1,9 +1,10 @@
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { createLeaseUnlocked, getActiveLeases, type LeaseHandle } from '../project/metadata.js';
 import {
   getIjPluginPaths,
@@ -642,45 +643,51 @@ export async function listAllActiveDebugSessions(
   return activeSessions;
 }
 
+const execFileAsync = promisify(execFile);
+
 async function terminateVerifiedServer(pid: number, timeoutMs: number = 3000): Promise<void> {
-  try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill.exe', ['/PID', String(pid)], {
+  let failure: string | undefined;
+
+  if (process.platform === 'win32') {
+    // Console servers require /F; async execution lets child exit events drain.
+    try {
+      await execFileAsync('taskkill.exe', ['/F', '/T', '/PID', String(pid)], {
         windowsHide: true,
-        encoding: 'utf8',
         timeout: 3000,
       });
-    } else {
-      process.kill(pid, 'SIGTERM');
+    } catch (error: unknown) {
+      const detail = error as { code?: number | string; killed?: boolean; stderr?: string };
+      const stderr = typeof detail?.stderr === 'string' ? detail.stderr.trim() : '';
+      failure = `taskkill /F /T /PID ${pid} failed${
+        detail?.killed
+          ? ' (timed out after 3000ms)'
+          : detail?.code === undefined
+            ? ''
+            : ` (exit ${String(detail.code)})`
+      }${stderr ? `: ${stderr}` : ''}`;
     }
-  } catch {}
 
-  const deadline = Date.now() + Math.min(timeoutMs, 2000);
-  while (isProcessAlive(pid) && Date.now() < deadline) {
-    await pause(100);
-  }
-
-  if (isProcessAlive(pid)) {
+    const deadline = Date.now() + 2000;
+    while (isProcessAlive(pid) && Date.now() < deadline) await pause(100);
+  } else {
     try {
-      if (process.platform === 'win32') {
-        spawnSync('taskkill.exe', ['/F', '/T', '/PID', String(pid)], {
-          windowsHide: true,
-          encoding: 'utf8',
-          timeout: 3000,
-        });
-      } else {
-        process.kill(pid, 'SIGKILL');
-      }
+      process.kill(pid, 'SIGTERM');
     } catch {}
-
-    const forceDeadline = Date.now() + 2000;
-    while (isProcessAlive(pid) && Date.now() < forceDeadline) {
-      await pause(100);
+    const deadline = Date.now() + Math.min(timeoutMs, 2000);
+    while (isProcessAlive(pid) && Date.now() < deadline) await pause(100);
+    if (isProcessAlive(pid)) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {}
+      const forceDeadline = Date.now() + 2000;
+      while (isProcessAlive(pid) && Date.now() < forceDeadline) await pause(100);
     }
   }
 
   if (isProcessAlive(pid)) {
-    throw new Error(`Failed to terminate verified server process (PID ${pid})`);
+    throw new Error(
+      `Failed to terminate verified server process (PID ${pid})${failure ? `: ${failure}` : ''}`,
+    );
   }
 }
 

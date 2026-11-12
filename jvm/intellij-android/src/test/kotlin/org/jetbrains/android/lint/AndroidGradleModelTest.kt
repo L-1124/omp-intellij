@@ -198,7 +198,7 @@ class AndroidGradleModelTest {
     }
 
     @Test
-    fun groovyUntrustedScriptDoesNotExecuteGrabOrTransformations() {
+    fun groovyAstIgnoresGrabAnnotationAndImports() {
         val script = "@Grab('nonexistent.malicious:dependency:9.9.9')\n" +
                 "import nonexistent.malicious.Package\n" +
                 "android {\n" +

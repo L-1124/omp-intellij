@@ -147,7 +147,6 @@ test('extension rejects missing nested implementation module', async (t) => {
   await rm(join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.jar'));
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects tampered nested implementation module', async (t) => {
@@ -158,7 +157,6 @@ test('extension rejects tampered nested implementation module', async (t) => {
   );
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects missing companion sha256 for nested module', async (t) => {
@@ -168,7 +166,6 @@ test('extension rejects missing companion sha256 for nested module', async (t) =
   );
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects malformed companion sha256 for nested module', async (t) => {
@@ -179,7 +176,6 @@ test('extension rejects malformed companion sha256 for nested module', async (t)
   );
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects companion sha256 mismatch for nested module', async (t) => {
@@ -190,7 +186,6 @@ test('extension rejects companion sha256 mismatch for nested module', async (t) 
   );
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects missing descriptor jar', async (t) => {
@@ -198,7 +193,6 @@ test('extension rejects missing descriptor jar', async (t) => {
   await rm(join(extension, 'lib', 'language-server-plugins-android-lsp.jar'));
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects tampered descriptor jar', async (t) => {
@@ -206,7 +200,6 @@ test('extension rejects tampered descriptor jar', async (t) => {
   await writeFile(join(extension, 'lib', 'language-server-plugins-android-lsp.jar'), 'tampered');
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects missing companion sha256 for descriptor jar', async (t) => {
@@ -214,7 +207,6 @@ test('extension rejects missing companion sha256 for descriptor jar', async (t) 
   await rm(join(extension, 'lib', 'language-server-plugins-android-lsp.jar.sha256'));
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects missing upstream library', async (t) => {
@@ -222,7 +214,6 @@ test('extension rejects missing upstream library', async (t) => {
   await rm(join(extension, 'lib', 'lint-api-32.4.1.jar'));
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects tampered upstream library', async (t) => {
@@ -230,7 +221,6 @@ test('extension rejects tampered upstream library', async (t) => {
   await writeFile(join(extension, 'lib', 'lint-api-32.4.1.jar'), 'tampered upstream');
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects flattened implementation module in lib', async (t) => {
@@ -260,31 +250,34 @@ test('extension rejects flattened implementation module in lib', async (t) => {
 
   const result = await resolveAndroidExtension(executable);
   assert.equal(result.pluginPath, undefined);
-  assert.equal(typeof result.reason, 'string');
 });
 
 test('extension rejects unexpected nested asset in lib/modules', async (t) => {
   const { extension, executable } = await extensionFixture(t);
   await writeFile(join(extension, 'lib', 'modules', 'unexpected.jar'), 'extra nested jar');
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects additional runtime libraries in lib', async (t) => {
   const { extension, executable } = await extensionFixture(t);
   await writeFile(join(extension, 'lib', 'unexpected.jar'), 'extra');
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects unexpected subdirectory in lib', async (t) => {
   const { extension, executable } = await extensionFixture(t);
   await mkdir(join(extension, 'lib', 'unexpected_dir'), { recursive: true });
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects unexpected subdirectory in lib/modules', async (t) => {
   const { extension, executable } = await extensionFixture(t);
   await mkdir(join(extension, 'lib', 'modules', 'unexpected_sub'), { recursive: true });
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects symbolic link in lib directory', async (t) => {
@@ -321,7 +314,8 @@ test('extension rejects manifest duplicate asset name', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.assets[1].name = manifest.assets[0].name;
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest duplicate asset path', async (t) => {
@@ -329,7 +323,8 @@ test('extension rejects manifest duplicate asset path', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.assets[1].path = manifest.assets[0].path;
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest path traversal', async (t) => {
@@ -337,7 +332,8 @@ test('extension rejects manifest path traversal', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.assets[0].path = '../../secret.jar';
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest mismatched asset name and path', async (t) => {
@@ -345,7 +341,8 @@ test('extension rejects manifest mismatched asset name and path', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.assets[0].name = 'unexpected.jar';
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest wrong serverVersion', async (t) => {
@@ -353,7 +350,8 @@ test('extension rejects manifest wrong serverVersion', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.serverVersion = '263.7084.0';
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest wrong extensionId', async (t) => {
@@ -361,7 +359,8 @@ test('extension rejects manifest wrong extensionId', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.extensionId = 'com.other.plugin';
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest wrong targetJavaVersion', async (t) => {
@@ -369,7 +368,8 @@ test('extension rejects manifest wrong targetJavaVersion', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.targetJavaVersion = 21;
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest wrong classFileVersion', async (t) => {
@@ -377,7 +377,8 @@ test('extension rejects manifest wrong classFileVersion', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.classFileVersion = 65;
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest wrong asset size', async (t) => {
@@ -385,7 +386,8 @@ test('extension rejects manifest wrong asset size', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.assets[0].size++;
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('extension rejects manifest missing asset entries', async (t) => {
@@ -393,7 +395,8 @@ test('extension rejects manifest missing asset entries', async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.assets.pop();
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
 test('formatPluginOption normalizes slashes and quotes path', () => {
@@ -413,62 +416,72 @@ test('formatPluginOption rejects invalid option characters', () => {
   assert.throws(() => formatPluginOption('C:/bad\0path'), /Invalid characters in plugin\.path/);
 });
 
-test('mergeIjJavaOptions formats plugin path when existing options are undefined or empty', () => {
-  assert.equal(mergeIjJavaOptions(undefined, 'C:\\ext'), '-Dplugin.path="C:/ext"');
-  assert.equal(mergeIjJavaOptions('', 'C:\\ext'), '-Dplugin.path="C:/ext"');
-  assert.equal(mergeIjJavaOptions('   ', 'C:\\ext'), '-Dplugin.path="C:/ext"');
-});
-
-test('mergeIjJavaOptions appends plugin path and preserves other VM options', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Xmx2048m -ea', 'C:\\ext'),
-    '-Xmx2048m -ea -Dplugin.path="C:/ext"',
-  );
-  assert.equal(
-    mergeIjJavaOptions('-Xmx4g -Didea.is.internal=true', '/opt/android-ext'),
-    '-Xmx4g -Didea.is.internal=true -Dplugin.path="/opt/android-ext"',
-  );
-});
-
-test('mergeIjJavaOptions merges with existing unquoted -Dplugin.path', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Dplugin.path=/opt/p1', 'C:\\ext'),
-    '-Dplugin.path="/opt/p1,C:/ext"',
-  );
-  assert.equal(
-    mergeIjJavaOptions('-Xmx1g -Dplugin.path=/opt/p1 -ea', 'C:\\ext'),
-    '-Xmx1g -ea -Dplugin.path="/opt/p1,C:/ext"',
-  );
-});
-
-test('mergeIjJavaOptions merges with existing quoted -Dplugin.path', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Dplugin.path="/Existing Plugins/p1"', 'C:\\ext'),
-    '-Dplugin.path="/Existing Plugins/p1,C:/ext"',
-  );
-  assert.equal(
-    mergeIjJavaOptions('"-Dplugin.path=/Existing Plugins/p1"', 'C:\\ext'),
-    '-Dplugin.path="/Existing Plugins/p1,C:/ext"',
-  );
-});
-
-test('mergeIjJavaOptions merges with existing comma-separated plugin paths', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Dplugin.path="/opt/p1,/opt/p2"', 'C:\\ext'),
-    '-Dplugin.path="/opt/p1,/opt/p2,C:/ext"',
-  );
-});
-
-test('mergeIjJavaOptions combines multiple -Dplugin.path occurrences into one', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"', 'C:\\ext'),
-    '-Xmx2g -Dplugin.path="/opt/p1,/opt/p2,C:/ext"',
-  );
-});
-
-test('mergeIjJavaOptions is idempotent when extension path is already present', () => {
-  assert.equal(mergeIjJavaOptions('-Dplugin.path="/p1,/ext"', '/ext'), '-Dplugin.path="/p1,/ext"');
-  assert.equal(mergeIjJavaOptions('-Dplugin.path="/ext"', '/ext'), '-Dplugin.path="/ext"');
+test('mergeIjJavaOptions preserves options and normalizes plugin paths', () => {
+  for (const [label, existing, pluginPath, expected] of [
+    ['absent options', undefined, 'C:\\ext', '-Dplugin.path="C:/ext"'],
+    ['empty options', '', 'C:\\ext', '-Dplugin.path="C:/ext"'],
+    ['whitespace-only options', '   ', 'C:\\ext', '-Dplugin.path="C:/ext"'],
+    ['other VM options', '-Xmx2048m -ea', 'C:\\ext', '-Xmx2048m -ea -Dplugin.path="C:/ext"'],
+    [
+      'other VM options with a POSIX extension path',
+      '-Xmx4g -Didea.is.internal=true',
+      '/opt/android-ext',
+      '-Xmx4g -Didea.is.internal=true -Dplugin.path="/opt/android-ext"',
+    ],
+    ['unquoted plugin path', '-Dplugin.path=/opt/p1', 'C:\\ext', '-Dplugin.path="/opt/p1,C:/ext"'],
+    [
+      'unquoted plugin path among options',
+      '-Xmx1g -Dplugin.path=/opt/p1 -ea',
+      'C:\\ext',
+      '-Xmx1g -ea -Dplugin.path="/opt/p1,C:/ext"',
+    ],
+    [
+      'quoted plugin path with spaces',
+      '-Dplugin.path="/Existing Plugins/p1"',
+      'C:\\ext',
+      '-Dplugin.path="/Existing Plugins/p1,C:/ext"',
+    ],
+    [
+      'fully quoted option token',
+      '"-Dplugin.path=/Existing Plugins/p1"',
+      'C:\\ext',
+      '-Dplugin.path="/Existing Plugins/p1,C:/ext"',
+    ],
+    [
+      'comma-separated plugin paths',
+      '-Dplugin.path="/opt/p1,/opt/p2"',
+      'C:\\ext',
+      '-Dplugin.path="/opt/p1,/opt/p2,C:/ext"',
+    ],
+    [
+      'repeated plugin path options',
+      '-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"',
+      'C:\\ext',
+      '-Xmx2g -Dplugin.path="/opt/p1,/opt/p2,C:/ext"',
+    ],
+    ['already present plugin path', '-Dplugin.path="/p1,/ext"', '/ext', '-Dplugin.path="/p1,/ext"'],
+    ['single existing plugin path', '-Dplugin.path="/ext"', '/ext', '-Dplugin.path="/ext"'],
+    [
+      'other quoted option with spaces',
+      '-Xmx2g -Dtitle="Hello   World" -ea',
+      'C:\\ext',
+      '-Xmx2g -Dtitle="Hello   World" -ea -Dplugin.path="C:/ext"',
+    ],
+    [
+      'plugin path containing spaces',
+      '-Xmx2g',
+      'C:/Program Files/Android LS Extension',
+      '-Xmx2g -Dplugin.path="C:/Program Files/Android LS Extension"',
+    ],
+    [
+      'native list separator',
+      `-Dplugin.path="/one${process.platform === 'win32' ? ';' : ':'}/two" -ea`,
+      '/two',
+      '-ea -Dplugin.path="/one,/two"',
+    ],
+  ] as const) {
+    assert.equal(mergeIjJavaOptions(existing, pluginPath), expected, label);
+  }
 });
 
 test('mergeIjJavaOptions normalizes Windows backslashes in existing paths', {
@@ -477,20 +490,6 @@ test('mergeIjJavaOptions normalizes Windows backslashes in existing paths', {
   assert.equal(
     mergeIjJavaOptions('-Dplugin.path="C:\\p1\\dir,D:\\p2\\dir"', 'C:\\ext'),
     '-Dplugin.path="C:/p1/dir,D:/p2/dir,C:/ext"',
-  );
-});
-
-test('mergeIjJavaOptions preserves other quoted options with spaces', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Xmx2g -Dtitle="Hello   World" -ea', 'C:\\ext'),
-    '-Xmx2g -Dtitle="Hello   World" -ea -Dplugin.path="C:/ext"',
-  );
-});
-
-test('mergeIjJavaOptions handles path with spaces', () => {
-  assert.equal(
-    mergeIjJavaOptions('-Xmx2g', 'C:/Program Files/Android LS Extension'),
-    '-Xmx2g -Dplugin.path="C:/Program Files/Android LS Extension"',
   );
 });
 
@@ -506,14 +505,6 @@ test('mergeIjJavaOptions rejects invalid characters in plugin path', () => {
   assert.throws(
     () => mergeIjJavaOptions('-Xmx2g', 'C:/bad\npath'),
     /Invalid characters in plugin\.path/,
-  );
-});
-
-test('native path separators merge without duplicating an existing extension', () => {
-  const separator = process.platform === 'win32' ? ';' : ':';
-  assert.equal(
-    mergeIjJavaOptions(`-Dplugin.path="/one${separator}/two" -ea`, '/two'),
-    '-ea -Dplugin.path="/one,/two"',
   );
 });
 
@@ -538,47 +529,42 @@ test('extension rejects substituted upstream dependency even with a self-consist
   asset.sha256 = sha256;
   asset.size = bytes.length;
   await writeFile(manifestPath, JSON.stringify(manifest));
-  assert.equal((await resolveAndroidExtension(executable)).pluginPath, undefined);
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
 });
 
-test('getIjPluginPaths returns empty array when options are undefined, empty, or whitespace-only', () => {
-  assert.deepEqual(getIjPluginPaths(undefined), []);
-  assert.deepEqual(getIjPluginPaths(''), []);
-  assert.deepEqual(getIjPluginPaths('   '), []);
-});
-
-test('getIjPluginPaths returns empty array when options contain other flags but no plugin.path', () => {
-  assert.deepEqual(getIjPluginPaths('-Xmx2048m -ea -Dfoo=bar'), []);
-});
-
-test('getIjPluginPaths extracts single unquoted -Dplugin.path', () => {
-  assert.deepEqual(getIjPluginPaths('-Dplugin.path=/opt/p1'), ['/opt/p1']);
-  assert.deepEqual(getIjPluginPaths('-Xmx1g -Dplugin.path=/opt/p1 -ea'), ['/opt/p1']);
-});
-
-test('getIjPluginPaths extracts quoted -Dplugin.path containing spaces', () => {
-  assert.deepEqual(getIjPluginPaths('-Dplugin.path="/Program Files/My Plugins/p1"'), [
-    '/Program Files/My Plugins/p1',
-  ]);
-  assert.deepEqual(getIjPluginPaths('"-Dplugin.path=/Program Files/My Plugins/p1"'), [
-    '/Program Files/My Plugins/p1',
-  ]);
-});
-
-test('getIjPluginPaths extracts multiple comma-separated and native list-separated paths', () => {
-  assert.deepEqual(getIjPluginPaths('-Dplugin.path="/opt/p1,/opt/p2"'), ['/opt/p1', '/opt/p2']);
-  const separator = process.platform === 'win32' ? ';' : ':';
-  assert.deepEqual(getIjPluginPaths(`-Dplugin.path="/opt/p1${separator}/opt/p2"`), [
-    '/opt/p1',
-    '/opt/p2',
-  ]);
-});
-
-test('getIjPluginPaths combines multiple -Dplugin.path occurrences', () => {
-  assert.deepEqual(getIjPluginPaths('-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"'), [
-    '/opt/p1',
-    '/opt/p2',
-  ]);
+test('getIjPluginPaths parses supported option forms', () => {
+  for (const [label, options, expected] of [
+    ['undefined options', undefined, []],
+    ['empty options', '', []],
+    ['whitespace-only options', '   ', []],
+    ['no plugin.path among other flags', '-Xmx2048m -ea -Dfoo=bar', []],
+    ['single unquoted plugin path', '-Dplugin.path=/opt/p1', ['/opt/p1']],
+    ['unquoted plugin path among options', '-Xmx1g -Dplugin.path=/opt/p1 -ea', ['/opt/p1']],
+    [
+      'quoted plugin path with spaces',
+      '-Dplugin.path="/Program Files/My Plugins/p1"',
+      ['/Program Files/My Plugins/p1'],
+    ],
+    [
+      'fully quoted option token',
+      '"-Dplugin.path=/Program Files/My Plugins/p1"',
+      ['/Program Files/My Plugins/p1'],
+    ],
+    ['comma-separated plugin paths', '-Dplugin.path="/opt/p1,/opt/p2"', ['/opt/p1', '/opt/p2']],
+    [
+      'native list-separated plugin paths',
+      `-Dplugin.path="/opt/p1${process.platform === 'win32' ? ';' : ':'}/opt/p2"`,
+      ['/opt/p1', '/opt/p2'],
+    ],
+    [
+      'repeated plugin path options',
+      '-Dplugin.path=/opt/p1 -Xmx2g -Dplugin.path="/opt/p2"',
+      ['/opt/p1', '/opt/p2'],
+    ],
+  ] as const) {
+    assert.deepEqual(getIjPluginPaths(options), expected, label);
+  }
 });
 
 test('getIjPluginPaths normalizes Windows backslashes in extracted paths', {

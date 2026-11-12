@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runSmokeTests } from './integration-smoke.mjs';
 import { runGradle } from './run-gradle.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -10,6 +11,12 @@ const TARGETS = {
   xml: ['android-xml'],
   engineering: ['engineering'],
   stability: ['stability'],
+};
+const SMOKE_TARGETS = {
+  smoke: ['engineering', 'stability'],
+  'smoke-android': ['android'],
+  'smoke-xml': ['xml'],
+  'smoke-all': ['android', 'xml', 'engineering', 'stability'],
 };
 
 function compileTests() {
@@ -31,25 +38,34 @@ async function main() {
     noPrepare = true;
     args.shift();
   }
-  if (target !== 'all' && !Object.hasOwn(TARGETS, target)) {
+  const smoke = Object.hasOwn(SMOKE_TARGETS, target);
+  if (target !== 'all' && !Object.hasOwn(TARGETS, target) && !smoke) {
     throw new Error(
-      `Unknown integration target "${target}". Expected all, ${Object.keys(TARGETS).join(', ')}.`,
+      `Unknown integration target "${target}". Expected all, ${[...Object.keys(TARGETS), ...Object.keys(SMOKE_TARGETS)].join(', ')}.`,
     );
   }
+  if (smoke && args.length) {
+    throw new Error(
+      'Smoke selection is fixed; use test:integration:<suite> for custom Node filters',
+    );
+  }
+  const suites = target === 'all' ? Object.keys(TARGETS) : smoke ? SMOKE_TARGETS[target] : [target];
   const files =
     target === 'all'
       ? [join('dist-test', 'test', 'integration', '*.test.js')]
-      : TARGETS[target].map((name) => join('dist-test', 'test', 'integration', `${name}.test.js`));
+      : suites
+          .flatMap((suite) => TARGETS[suite])
+          .map((name) => join('dist-test', 'test', 'integration', `${name}.test.js`));
   const required = [
     'OMP_INTELLIJ_TEST_SERVER',
     'OMP_INTELLIJ_TEST_JDK17',
     'OMP_INTELLIJ_TEST_JDK21',
     'OMP_INTELLIJ_TEST_ACCEPTED_EULA_HASH',
   ];
-  if (target === 'all' || target === 'android') required.push('OMP_INTELLIJ_TEST_ANDROID_DEVICE');
+  if (suites.includes('android')) required.push('OMP_INTELLIJ_TEST_ANDROID_DEVICE');
   const missing = required.filter((name) => !process.env[name]?.trim());
   if (
-    (target === 'all' || target === 'android' || target === 'xml') &&
+    (suites.includes('android') || suites.includes('xml')) &&
     !process.env.ANDROID_HOME?.trim() &&
     !process.env.ANDROID_SDK_ROOT?.trim()
   ) {
@@ -63,6 +79,7 @@ async function main() {
     const stageStatus = await runGradle(['stageExtension', '--no-daemon']);
     if (stageStatus !== 0) return stageStatus;
   }
+  if (smoke) return runSmokeTests(files);
   const result = spawnSync(
     process.execPath,
     ['--test', '--test-concurrency=1', '--test-timeout=180000', ...args, ...files],

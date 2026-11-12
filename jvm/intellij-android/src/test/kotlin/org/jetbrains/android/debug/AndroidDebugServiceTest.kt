@@ -127,7 +127,7 @@ class AndroidDebugServiceTest {
     }
 
     @Test
-    fun testTwoPhaseAtomicReservationProtectsConcurrentPrepare() {
+    fun testReservationLifecycleBlocksDuplicateTargetsAndFreesOnCancel() {
         val targetId = AndroidDebugHandles.TargetId("device-1", 1234)
 
         // First reserve succeeds
@@ -155,15 +155,7 @@ class AndroidDebugServiceTest {
             assertEquals("invalid_params", e.reason)
         }
 
-        // Non-loopback IPv6 host
-        try {
-            service.claim("[::2]", 50000, null)
-            fail("Expected invalid_params for non-loopback IPv6 host")
-        } catch (e: AndroidDebugException) {
-            assertEquals("invalid_params", e.reason)
-        }
-
-        // Malformed bracketed host
+        // Bracketed IPv4 must not be treated as loopback by prefix matching
         try {
             service.claim("[127.0.0.1]", 50000, null)
             fail("Expected invalid_params for bracketed IPv4 host")
@@ -171,11 +163,11 @@ class AndroidDebugServiceTest {
             assertEquals("invalid_params", e.reason)
         }
 
-        try {
-            service.claim("[::1:8080]", 50000, null)
-            fail("Expected invalid_params for non-loopback IPv6 host")
-        } catch (e: AndroidDebugException) {
-            assertEquals("invalid_params", e.reason)
+        for (invalid in listOf("[::2]", "[::1:8080]")) {
+            val error = assertThrows(AndroidDebugException::class.java) {
+                service.claim(invalid, 50000, null)
+            }
+            assertEquals("invalid_params", error.reason)
         }
 
         // Null host
@@ -211,11 +203,11 @@ class AndroidDebugServiceTest {
         val c3 = service.claim("::1", 50001, null)
         assertFalse(c3["claimed"]!!.jsonPrimitive.boolean)
 
-        val c4 = service.claim("[::1]", 50001, null)
-        assertFalse(c4["claimed"]!!.jsonPrimitive.boolean)
+        val bracketed = service.claim("[::1]", 50001, null)
+        assertFalse(bracketed["claimed"]!!.jsonPrimitive.boolean)
 
-        val c5 = service.claim("[0:0:0:0:0:0:0:1]", 50001, null)
-        assertFalse(c5["claimed"]!!.jsonPrimitive.boolean)
+        val c4 = service.claim("[0:0:0:0:0:0:0:1]", 50001, null)
+        assertFalse(c4["claimed"]!!.jsonPrimitive.boolean)
     }
 
     @Test
@@ -339,7 +331,6 @@ class AndroidDebugServiceTest {
             assertEquals("process_not_found", error.reason)
         }
         val replacementSamePid = fakeProcess(4100)
-        assertNotSame(first, replacementSamePid)
         assertSame(
             replacementSamePid,
             AndroidDebugService.selectPackageMatch(

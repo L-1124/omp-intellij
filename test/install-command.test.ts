@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import extension from '../src/extension/extension.js';
 import {
   formatInstallDescription,
@@ -13,7 +14,7 @@ import type { ProjectStateResult } from '../src/project/connection-state.js';
 import { DEFAULT_SERVER_VERSION, serverBundle } from '../src/server/bundles.js';
 import type { ServerConfiguration } from '../src/server/config.js';
 import type { InstallResult, InstallState } from '../src/server/install.js';
-import { createMockCtx, createMockPi } from './helpers.js';
+import { createMockCtx, createMockPi, type MockContext } from './helpers.js';
 
 test('parseInstallArgs preserves paths with spaces across quoting styles', () => {
   assert.deepEqual(parseInstallArgs(''), {});
@@ -789,22 +790,23 @@ test('polling preserves in-flight active install when observed state is null or 
   }
 });
 
-test('stale historical install state does not trigger completion notification', async () => {
-  const staleTime = Date.now() - 60000;
-  const observedState: InstallState = {
-    installId: 'old-inst',
-    pid: 1111,
-    installDir: 'F:\\managed',
-    version: '263.7084.0',
-    phase: 'ready',
-    downloadedBytes: 100,
-    totalBytes: 100,
-    updatedAt: staleTime,
-  };
-
+test('observer notifies installed only for fresh install state and suppresses stale history', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let observedState: InstallState | null = null;
   const pi = createMockPi();
+  let sessionStart: ((event: unknown, ctx: unknown) => Promise<void> | void) | undefined;
+  const originalOn = pi.on.bind(pi);
+  pi.on = ((event: string, handler: (...args: never[]) => void) => {
+    if (event === 'session_start') sessionStart = handler as typeof sessionStart;
+    originalOn(event, handler);
+  }) as typeof pi.on;
+
   extension(pi, {
-    pollIntervalMs: 500,
+    pollIntervalMs: 100,
+    readinessApi: {
+      findProjectRoot: () => join(process.cwd(), 'test-fixtures', 'jvm-hybrid-app'),
+      watchIndex: () => () => {},
+    },
     serverConfigApi: {
       async readServerConfig(): Promise<ServerConfiguration> {
         return { mode: 'managed', installDir: 'F:\\managed' };
@@ -820,17 +822,43 @@ test('stale historical install state does not trigger completion notification', 
     },
   });
 
+  const readyState: InstallState = {
+    installId: 'obs-inst',
+    pid: 1111,
+    installDir: 'F:\\managed',
+    version: '263.7084.0',
+    phase: 'ready',
+    downloadedBytes: 100,
+    totalBytes: 100,
+    updatedAt: Date.now() - 60000,
+  };
+  const installedNotifs = (ctx: MockContext) =>
+    ctx.notifications.filter((n) => n.msg.includes('IntelliJ server installed'));
+
   try {
-    const cmd = pi.getCommand('intellij');
-    assert.ok(cmd);
     const ctx = createMockCtx('F:\\my-project');
-
-    await cmd.handler('status', ctx);
-
-    const readyNotifs = ctx.notifications.filter((n) =>
-      n.msg.includes('IntelliJ server installed'),
+    assert.ok(sessionStart);
+    // The observer starts by reading a state produced long before it began watching.
+    observedState = readyState;
+    await sessionStart({}, ctx);
+    t.mock.timers.tick(100);
+    await nextTurn();
+    assert.equal(
+      installedNotifs(ctx).length,
+      0,
+      'History from before the observer started must not notify',
     );
-    assert.equal(readyNotifs.length, 0, 'Stale historical state must not notify ready');
+
+    // A fresh completion reported after the observer started must notify exactly once.
+    observedState = { ...readyState, installId: 'fresh-inst', updatedAt: Date.now() + 1000 };
+    t.mock.timers.tick(100);
+    await nextTurn();
+    assert.equal(installedNotifs(ctx).length, 1);
+    assert.match(installedNotifs(ctx)[0].msg, /263\.7084\.0 at F:\\managed/);
+
+    t.mock.timers.tick(100);
+    await nextTurn();
+    assert.equal(installedNotifs(ctx).length, 1, 'The same install must notify only once');
   } finally {
     pi.emit('session_shutdown');
   }

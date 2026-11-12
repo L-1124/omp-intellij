@@ -199,7 +199,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 7. Android Lint 单文件诊断
 
-阶段 H 的 Java/Kotlin 与阶段 I 的资源 XML/Manifest 诊断均已通过真实 ILS 271 验收。完整运行包含原生无扩展对照，并保留既有 Java/Kotlin/Compose 和导航回归。
+阶段 H 的 Java/Kotlin 与阶段 I 的资源 XML/Manifest 诊断保留真实 ILS 271 验收，覆盖 Java/Kotlin/Compose、导航、原生编译诊断与 Lint 共存。无扩展控制组保留为历史研究证据；持续门禁只运行当前扩展的可观察行为，避免重复构建工程来验证上游服务自身。
 
 - `AndroidRequests.diagnosticQuery` 在分析前记录打开文档版本，在挂起读操作内读取快照；发布前重新进入分析上下文，逐字符核对当前未保存内容，并复核版本与关联磁盘输入。缓存只在复核通过后写入。过期返回 `-32801`，取消传播为 `-32800`。
 - `AndroidLintModelResolver` 先读取当前变体的官方 LintModel XML，再回退到 Gradle 脚本字面量与主 Manifest：优先 `build.gradle.kts` 的 Kotlin PSI，不存在时读取 `build.gradle` 的 Groovy AST。动态 `minSdk`、flavor 或 buildType 覆盖保持前提缺失，不虚构 `minSdk=1`；此时只跳过 `ApiDetector`，其余规则继续运行。
@@ -279,7 +279,7 @@ SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅
 
 集成测试同时隔离原生索引：共享 LSP 测试驱动默认将 `initialize.initializationOptions.indexDir` 设置为沙箱的 `index/<project-id>/`，保留显式初始化选项；CLI/DAP 创建的会话从沙箱工程配置中读取相同的 `rawInitializationOptions`。不同工程使用独立索引目录，索引随沙箱统一回收。仅设置服务端 `systemPath` 不会改变原生索引位置。Gradle 分发包与依赖缓存从已有缓存复制到沙箱，排除锁与未完成下载；构建、导入和清理始终使用沙箱拥有的 Gradle User Home。
 
-沙箱统一将现有 `OMP_ANDROID_LS_EXTENSION_DIR` 指向本仓库当前暂存的扩展资产，同时覆盖进程内模型查询与 Bridge/DAP 子进程，避免 `dist-test/src` 的相对路径误用 `dist-test/resources`。原生基线显式使用空扩展目录，不能依赖资产路径缺失来禁用插件。
+沙箱统一将现有 `OMP_ANDROID_LS_EXTENSION_DIR` 指向本仓库当前暂存的扩展资产，同时覆盖进程内模型查询与 Bridge/DAP 子进程，避免 `dist-test/src` 的相对路径误用 `dist-test/resources`。
 
 ### 3. 反编译器选型横评与技术适用边界
 

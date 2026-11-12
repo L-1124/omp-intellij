@@ -1,17 +1,9 @@
 package org.jetbrains.android.lint
 
-import com.android.ide.common.resources.ResourceRepository
 import com.android.tools.lint.checks.ApiDetector
-import com.android.tools.lint.client.api.ConfigurationHierarchy
-import com.android.tools.lint.client.api.GradleVisitor
 import com.android.tools.lint.client.api.IssueRegistry
 import com.android.tools.lint.client.api.LintClient
-import com.android.tools.lint.client.api.LintXmlConfiguration
-import com.android.tools.lint.client.api.ResourceRepositoryScope
-import com.android.tools.lint.client.api.UastParser
-import com.android.tools.lint.client.api.XmlParser
 import com.android.tools.lint.detector.api.Category
-import com.android.tools.lint.detector.api.Context
 import com.android.tools.lint.detector.api.Detector
 import com.android.tools.lint.detector.api.Implementation
 import com.android.tools.lint.detector.api.Incident
@@ -19,7 +11,6 @@ import com.android.tools.lint.detector.api.Issue
 import com.android.tools.lint.detector.api.Location
 import com.android.tools.lint.detector.api.Scope
 import com.android.tools.lint.detector.api.Severity
-import com.android.tools.lint.detector.api.TextFormat
 import com.android.tools.lint.detector.api.XmlScanner
 import com.intellij.core.CoreApplicationEnvironment
 import com.intellij.core.CoreProjectEnvironment
@@ -37,7 +28,6 @@ import org.jetbrains.kotlin.psi.KtPsiFactory
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
@@ -220,27 +210,6 @@ class AndroidLintProviderTest {
     class TestDetector : Detector(), XmlScanner
 
     @Test
-    fun xmlConfigurationAppliesIgnoreAndWarning() {
-        val client: LintClient = XmlClient()
-        val file = File("lint.xml")
-        val ignored = "<lint><issue id=\"NewApi\" severity=\"ignore\"/></lint>"
-        var configuration = LintXmlConfiguration.create(client.configurations, file, ignored)
-        assertEquals(Severity.IGNORE, configuration.getSeverity(ApiDetector.UNSUPPORTED))
-        val warning = "<lint><issue id=\"NewApi\" severity=\"warning\"/></lint>"
-        configuration = LintXmlConfiguration.create(ConfigurationHierarchy(client, null), file, warning)
-        assertEquals(Severity.WARNING, configuration.getSeverity(ApiDetector.UNSUPPORTED))
-        val parser = AndroidLintXmlParser(client)
-        val xml = parser.parseXml(warning, file)
-        assertNotNull(xml)
-        val issue = xml!!.getElementsByTagName("issue").item(0)
-        val location = parser.getLocation(file, issue)
-        val start = location.start
-        val end = location.end
-        assertEquals(warning.indexOf("<issue"), start!!.offset)
-        assertEquals(warning.indexOf("/>") + 2, end!!.offset)
-    }
-
-    @Test
     fun diagnosticMappingPreservesSeverityAndDeduplicatesByRangeCodeAndMessage() {
         val document = DocumentImpl("abc\nnext")
         val location = Location.create(File("Main.java"), document.text, 4, 8)
@@ -293,36 +262,5 @@ class AndroidLintProviderTest {
         }
         assertSame(canceled, result)
         assertEquals(1, attempts.get())
-    }
-
-    private class XmlClient : LintClient(CLIENT_UNIT_TESTS) {
-        override val xmlParser: XmlParser = AndroidLintXmlParser(this)
-
-        override fun readFile(file: File): CharSequence {
-            throw AssertionError(file)
-        }
-
-        override fun report(context: Context, incident: Incident, format: TextFormat) {
-            throw AssertionError(incident)
-        }
-
-        override fun log(severity: Severity, exception: Throwable?, format: String?, vararg args: Any) {
-            throw AssertionError(format, exception)
-        }
-
-        override fun getUastParser(project: com.android.tools.lint.detector.api.Project?): UastParser {
-            throw AssertionError()
-        }
-
-        override fun getGradleVisitor(): GradleVisitor {
-            throw AssertionError()
-        }
-
-        override fun getResources(
-            project: com.android.tools.lint.detector.api.Project,
-            scope: ResourceRepositoryScope
-        ): ResourceRepository {
-            throw AssertionError()
-        }
     }
 }

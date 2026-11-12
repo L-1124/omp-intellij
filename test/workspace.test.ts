@@ -89,6 +89,22 @@ test('validateJdk verifies bin/java, bin/javac, and release file', async () => {
   }
 });
 
+for (const [label, options, expected] of [
+  ['bin/java', { skipJava: true }, /missing bin\/java/],
+  ['bin/javac', { skipJavac: true }, /missing bin\/javac/],
+  ['release file', { skipRelease: true }, /missing release file/],
+] as const) {
+  test(`validateJdk rejects a JDK missing ${label}`, async () => {
+    const tmp = join(tmpdir(), `omp-test-jdk-missing-${Math.random().toString(36).slice(2)}`);
+    try {
+      await createMockJdk(tmp, options);
+      assert.throws(() => validateJdk(tmp), expected);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
 test('validateJdk rejects malformed JAVA_VERSION in release file', async () => {
   const tmp = join(tmpdir(), `omp-test-jdk-malformed-${Math.random().toString(36).slice(2)}`);
   try {
@@ -567,6 +583,15 @@ test('setWorkspaceEnvVar, unsetWorkspaceEnvVar and setWorkspaceJdk preserve unre
     const unsetRes2 = await unsetWorkspaceEnvVar(projDir, 'NON_EXISTENT', { configDir });
     assert.equal(unsetRes2.wasSet, false);
     assert.deepEqual(unsetRes2.savedEnvKeys, ['GRADLE_OPTS']);
+
+    // 7. Unset the remaining env var; the saved JDK must survive an empty env map
+    const unsetLast = await unsetWorkspaceEnvVar(projDir, 'GRADLE_OPTS', { configDir });
+    assert.equal(unsetLast.wasSet, true);
+    assert.deepEqual(unsetLast.savedEnvKeys, []);
+    info = await getWorkspaceInfo(projDir, { configDir });
+    assert.deepEqual(info.savedEnvKeys, []);
+    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
+    assert.equal(info.savedVersion, '21.0.4');
   } finally {
     await rm(configDir, { recursive: true, force: true });
     await rm(projDir, { recursive: true, force: true });
@@ -757,38 +782,6 @@ test('applyWorkspaceOptions with raw host options cleans up unset env vars', asy
   } finally {
     await rm(configDir, { recursive: true, force: true });
     await rm(projDir, { recursive: true, force: true });
-  }
-});
-
-test('unsetWorkspaceEnvVar cleans up env while preserving JDK and other fields', async () => {
-  const configDir = join(tmpdir(), `omp-test-ws-reset-${Math.random().toString(36).slice(2)}`);
-  const projDir = join(tmpdir(), `omp-test-ws-proj-reset-${Math.random().toString(36).slice(2)}`);
-  const jdk21 = join(tmpdir(), `omp-test-jdk-reset-${Math.random().toString(36).slice(2)}`);
-
-  try {
-    await mkdir(configDir, { recursive: true });
-    await mkdir(projDir, { recursive: true });
-    await createMockJdk(jdk21, { version: '21.0.4' });
-
-    await setWorkspaceJdk(projDir, jdk21, { configDir });
-    await setWorkspaceEnvVar(projDir, 'A', '1', { configDir });
-    await setWorkspaceEnvVar(projDir, 'B', '2', { configDir });
-
-    let info = await getWorkspaceInfo(projDir, { configDir });
-    assert.deepEqual(info.savedEnvKeys, ['A', 'B']);
-    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
-
-    await unsetWorkspaceEnvVar(projDir, 'A', { configDir });
-    const unsetRes = await unsetWorkspaceEnvVar(projDir, 'B', { configDir });
-    assert.deepEqual(unsetRes.savedEnvKeys, []);
-
-    info = await getWorkspaceInfo(projDir, { configDir });
-    assert.deepEqual(info.savedEnvKeys, []);
-    assert.equal(resolve(info.savedJdk || '').toLowerCase(), resolve(jdk21).toLowerCase());
-  } finally {
-    await rm(configDir, { recursive: true, force: true });
-    await rm(projDir, { recursive: true, force: true });
-    await rm(jdk21, { recursive: true, force: true });
   }
 });
 

@@ -36,7 +36,7 @@ async function createTestEnv(t: { after(fn: () => Promise<void>): void }): Promi
   return { root, configDir, systemPath, configFile, eulaConfigFile, projectDir };
 }
 
-test('inspectDoctor: missing install with default or explicit managed config', async (t) => {
+test('inspectDoctor: missing managed install reports install error, unknown EULA, and failing summary', async (t) => {
   const env = await createTestEnv(t);
   const installDir = join(env.root, 'empty-install');
   await mkdir(installDir, { recursive: true });
@@ -326,13 +326,12 @@ test('inspectDoctor: read-only operation does not mutate filesystem', async (t) 
   const beforeFiles = await readdir(env.systemPath);
   assert.equal(beforeFiles.length, 0);
 
-  const report = await inspectDoctor(env.projectDir, {
+  await inspectDoctor(env.projectDir, {
     systemPath: env.systemPath,
     configFile: env.configFile,
     configDir: env.configDir,
   });
 
-  assert.ok(report);
   const afterFiles = await readdir(env.systemPath);
   // No files or leases were created in systemPath
   assert.equal(afterFiles.length, 0);

@@ -39,6 +39,10 @@ npm run build:jvm
 | `npm test`                 | Rebuild TypeScript/test output and run Node unit/component and asset-contract tests; independent of ILS/JDK/device availability |
 | `npm run test:jvm`         | Run Kotlin/JVM tests against the pinned ILS SDK                                                                                 |
 | `npm run build:jvm`        | Stage the implementation, descriptor, upstream JARs, hashes and manifest                                                        |
+| `npm run test:smoke` | Fixed real JVM/ILS smoke: Gradle subproject debug breakpoint/report and sandbox crash recovery; no AVD required |
+| `npm run test:smoke:android` | Fixed real device/AVD normal-attach, variables, step and detach smoke |
+| `npm run test:smoke:xml` | Fixed native XML symbols and resource/manifest references smoke |
+| `npm run test:smoke:all` | All four real smoke scenarios, prepared once and run serially |
 | `npm run test:integration` | Compile tests, stage current JVM assets, then run all real suites sequentially by file |
 | `npm run test:integration:android` | Prepare once and run only the real device/AVD attach suite |
 | `npm run test:integration:xml` | Prepare once and run only Android XML/resource/Lint integration |
@@ -60,6 +64,10 @@ Focused JVM tests use standard Gradle test filtering:
 ```sh
 node scripts/run-gradle.mjs test --tests org.jetbrains.android.debug.AndroidDebugHandlesTest --no-daemon
 ```
+
+Use `test:smoke` for the standard native JVM path, adding the Android or XML smoke entry when that subsystem changes. Smoke cases carry `[smoke]` in their existing names; no test bodies are copied. The runner rejects extra Node filters and requires a successful non-skipped/non-todo marked case in every selected file. Empty selections or removed tags fail instead of accepting Node's file-only pass result.
+
+Full integration retains the complete JDK concurrency, cancellation, ownership, Waiting for Debugger, recovery, XML/Lint and model/reload matrices. Keep protocol combinations and deterministic timer boundaries in Node components, PSI/UAST semantics in JVM tests, and native loading/transport/device behavior in real integration. Add a full-only real case when it exercises a host-specific risk, rather than repeating a component matrix.
 
 Choose the narrowest real suite and pass Node filters after `--`:
 

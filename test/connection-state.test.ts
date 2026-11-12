@@ -209,7 +209,7 @@ test('dead PID: dead connection process is treated as disconnected, avoiding fal
 
     const snapshot = await readProjectState(tempDir, projectPath);
     assert.equal(snapshot.phase, 'disconnected');
-    assert.notEqual(snapshot.phase, 'ready');
+    assert.equal(snapshot.live, false);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -229,7 +229,8 @@ test('metadata errors: corrupt files or missing dirs do not throw and yield safe
 
     const corruptSnapshot = await readProjectState(tempDir, projectPath);
     assert.equal(corruptSnapshot.phase, 'not-started');
-    assert.notEqual(corruptSnapshot.phase, 'ready');
+    // A record still inside the corruption grace window must not be quarantined yet.
+    assert.deepEqual(await readdir(connDir), ['broken.json']);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -587,6 +588,7 @@ test('closed connections downgrade license to unknown; disk writes are sanitized
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
 test('stale failure does not pollute newly started live connection', async () => {
   const tempDir = await mkdtemp(join(tmpdir(), 'omp-stale-live-'));
   try {

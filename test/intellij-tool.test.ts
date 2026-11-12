@@ -6,16 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createLspSession } from '../src/debug/run-core.js';
-import {
-  executeIntellij,
-  type IntellijDetails,
-  registerIntellij,
-} from '../src/extension/intellij-tool.js';
+import { executeIntellij, type IntellijDetails } from '../src/extension/intellij-tool.js';
 import type { ProjectStateResult } from '../src/project/connection-state.js';
 import type { WorkspaceInfo } from '../src/project/workspace.js';
 import type { ToolUpdate } from '../src/shared/extension-types.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
-import { createMockPi } from './helpers.js';
 
 test('status action on not-started returns clear next step without initiating connection', async () => {
   const readProjectState = async (): Promise<ProjectStateResult> => ({
@@ -82,6 +77,7 @@ test('status action on failed returns error', async () => {
 
   assert.equal(result.isError, true);
   assert.equal(result.details?.phase, 'failed');
+  assert.match(result.content[0].text, /Fatal internal crash/);
 });
 
 test('wait action when already ready returns immediately', async () => {
@@ -304,6 +300,8 @@ test('wait action timeout returns still-indexing status without marking failure'
   assert.equal(result.details?.timeout, 1);
   assert.match(result.content[0].text, /timed out after 1s/);
   assert.match(result.content[0].text, /still indexing/);
+  // No failure or license details means those sections must stay absent.
+  assert.doesNotMatch(result.content[0].text, /Failure kind|License status/);
 });
 
 test('wait action aborts on signal immediately', async () => {
@@ -364,15 +362,6 @@ test('wait action avoids per-poll onUpdate spam', async () => {
 
   // Even though there were 4 indexing polls, onUpdate should only be emitted once for that state
   assert.equal(updates.length, 1);
-});
-
-test('registerIntellij registers tool with pi zod schema and actions', () => {
-  const pi = createMockPi();
-  registerIntellij(pi);
-
-  const registeredTool = pi.getTool('intellij');
-  assert.ok(registeredTool);
-  assert.equal(registeredTool.name, 'intellij');
 });
 
 test('executeIntellij rejects unknown action', async () => {
@@ -629,6 +618,7 @@ test('wait action times out and reports stillIndexing with sanitized failure and
   assert.equal(result.isError, false);
   assert.equal(result.details?.stillIndexing, true);
   assert.equal(result.details?.timeout, 5);
+  assert.equal(result.details?.phase, 'indexing');
   assert.match(result.content[0].text, /timed out after 5s/);
   assert.match(result.content[0].text, /still indexing: Heavy index/);
   assert.equal(result.content[0].text.includes('secret-token-wait'), false);

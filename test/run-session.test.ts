@@ -122,28 +122,40 @@ test('timeout validation rejects non-positive or non-finite timeouts', async (t)
 });
 
 test('explicit timeout precedence enforces short initialize timeout override', async (t) => {
+  const initialized = Promise.withResolvers<void>();
   const fake = await createFakeLspServer(t, {
-    onRequest: () => {
-      // Intentionally do not respond to initialize to test timeout precedence
+    onRequest(method) {
+      if (method === 'initialize') initialized.resolve();
     },
   });
-
-  const start = Date.now();
-  await assert.rejects(
-    createLspSession(process.cwd(), {
-      socket: fake.clientSocket,
-      systemPath: fake.systemPath,
-      initializeTimeoutMs: 75,
-    }),
-    (err: unknown) => {
-      assert(err instanceof Error);
-      assert.match(err.message, /LSP request initialize timed out after 75ms/);
-      assert.equal((err as Error & { code?: string }).code, 'ETIMEDOUT');
-      return true;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  const session = createLspSession(process.cwd(), {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+    initializeTimeoutMs: 75,
+    initTimeoutMs: 5000,
+  });
+  const rejected = assert.rejects(session, (err: unknown) => {
+    assert(err instanceof Error);
+    assert.match(err.message, /LSP request initialize timed out after 75ms/);
+    assert.equal((err as Error & { code?: string }).code, 'ETIMEDOUT');
+    return true;
+  });
+  void session.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
     },
   );
-  const elapsed = Date.now() - start;
-  assert(elapsed < 2000, `Expected explicit 75ms timeout to trigger quickly, took ${elapsed}ms`);
+  await initialized.promise;
+  t.mock.timers.tick(74);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  await rejected;
 });
 
 test('legacy timeout alias initTimeoutMs is accepted and validated', async (t) => {

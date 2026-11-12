@@ -170,11 +170,16 @@ for (const mode of ['module', 'explicit', 'project'] as const) {
   });
 }
 
-test('isDirectExecution distinguishes direct CLI execution vs imported module', () => {
+test('isDirectExecution matches the entry script by path, suffix, and empty entry', () => {
   const currentFile = fileURLToPath(import.meta.url);
   assert.equal(isDirectExecution(currentFile, import.meta.url), true);
   assert.equal(isDirectExecution('', import.meta.url), false);
   assert.equal(isDirectExecution('/some/other/script.js', import.meta.url), false);
+
+  // The CLI is often launched without an extension or through a shim, so a bare
+  // entry path must still resolve to the same module.
+  const withoutExtension = currentFile.replace(/\.js$/, '');
+  assert.equal(isDirectExecution(withoutExtension, import.meta.url), true);
 });
 
 interface SpawnedProxy {
@@ -645,22 +650,29 @@ for (const failure of ['refused', 'timeout', 'eof'] as const) {
 test('early configuration is sent after startup and attach uses the JDWP host instead of the backend endpoint', async (t) => {
   const h = await createDapTestHarness(t);
   await h.request('configurationDone');
-  await h.request('attach', { host: 'remote.example', port: 5005, timeout: 50 });
+  await h.request('attach', { host: 'remote.example', port: 5005, timeout: 60 });
   await h.request('threads');
   const attach = h.backendRequests.find((r) => r.command === 'attach');
   assert.equal(attach?.arguments?.hostName, 'remote.example');
   assert.equal(attach?.arguments?.port, 5005);
   assert.equal(attach?.arguments?.host, undefined);
+  // Seconds are normalized to milliseconds; values already in ms pass through.
+  assert.equal(attach?.arguments?.timeout, 60000);
   const commands = h.backendRequests.map((r) => r.command);
   assert(commands.indexOf('configurationDone') > commands.indexOf('attach'));
   assert.equal(commands.filter((c) => c === 'configurationDone').length, 1);
 });
-test('attach timeout normalizes seconds to milliseconds while preserving millisecond values', async (t) => {
-  const h = await createDapTestHarness(t);
-  await h.request('configurationDone');
-  await h.request('attach', { host: 'remote.example', port: 5005, timeout: 60 });
-  const attach = h.backendRequests.find((r) => r.command === 'attach');
-  assert.equal(attach?.arguments?.timeout, 60000);
+
+test('attach timeout keeps the 300-unit boundary between seconds and milliseconds', async (t) => {
+  for (const [timeout, expected] of [
+    [300, 300000],
+    [301, 301],
+  ] as const) {
+    const h = await createDapTestHarness(t);
+    assert.equal((await h.request('attach', { port: 5005, timeout })).success, true);
+    const attach = h.backendRequests.find((r) => r.command === 'attach');
+    assert.equal(attach?.arguments?.timeout, expected, `timeout ${timeout}`);
+  }
 });
 
 test('concurrent backend responses preserve each client request and its failure', async (t) => {

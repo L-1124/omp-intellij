@@ -108,7 +108,6 @@ async function prepareJUnitRepository(sandbox: IntegrationSandbox): Promise<stri
 }
 
 test('multi-module Maven reactor & Gradle: model inspection (sourceRoots, SDKs, libraries) and disambiguated module launch', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -439,7 +438,6 @@ application {
 });
 
 test('workspace reload: adding dependency jar and switching project JDK updates index, classpath, and runtime JVM', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified');
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
@@ -626,8 +624,7 @@ public class App {
   }
 });
 
-test('Gradle subproject test debug: custom debugOptions port, --tests filter, DAP attach, breakpoint hit, and XML report', async () => {
-  assert.ok(prerequisites?.eulaDoc, 'Prerequisites must be verified');
+test('Gradle subproject test debug: custom debugOptions port, --tests filter, DAP attach, breakpoint hit, and XML report [smoke]', async () => {
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {

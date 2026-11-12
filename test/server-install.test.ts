@@ -213,6 +213,13 @@ test('installing another version retains usable older versions and a checksum fa
     (await listInstalledVersions(installDir)).map((entry) => entry.version),
     ['263.2000.0', '263.1000.0'],
   );
+  // The rejected version must not be activated, and the failure must be recorded.
+  await assert.rejects(stat(join(installDir, 'versions', '263.3000.0')), (err: unknown) =>
+    Boolean(err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT'),
+  );
+  const failedState = await readInstallState(installDir);
+  assert.equal(failedState?.phase, 'failed');
+  assert.match(failedState?.error ?? '', /checksum|sha-?256/i);
   const previous = await findInstalled(installDir, { version: '263.1000.0' });
   assert.ok(previous);
   assert.equal(await readFile(previous.executable, 'utf8'), 'first-version-launcher');
@@ -268,68 +275,6 @@ test('archive with single top-level wrapper directory is normalized correctly', 
   assert.equal(receiptJson.version, '263.7084.0');
   assert.equal(receiptJson.sha256, archiveInfo.sha256.toLowerCase());
   assert.equal(receiptJson.launcher, LAUNCHER_NAME);
-});
-
-test('checksum mismatch leaves previous installation completely intact and fails with error', async (t: TestContext) => {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'omp server install test '));
-  t.after(() => rm(tempRoot, { recursive: true, force: true }));
-
-  const v1Archive = await createTestArchive({
-    dir: tempRoot,
-    name: 'v1.zip',
-    kind: 'zip',
-    files: { [LAUNCHER_NAME]: 'v1-binary' },
-  });
-
-  const mockServer = await startMockServer(async (req, res) => {
-    if (req.url === '/v1.zip') {
-      const buf = await readFile(v1Archive.archivePath);
-      res.writeHead(200, { 'Content-Length': buf.length.toString() });
-      res.end(buf);
-      return;
-    }
-    if (req.url === '/v2-corrupt.zip') {
-      const buf = await readFile(v1Archive.archivePath);
-      res.writeHead(200, { 'Content-Length': buf.length.toString() });
-      res.end(buf);
-      return;
-    }
-    res.writeHead(404).end();
-  });
-  t.after(() => mockServer.close());
-
-  const installDir = join(tempRoot, 'target_install');
-  const v1Bundle: ServerBundle = {
-    version: '1.0.0',
-    url: `${mockServer.url}/v1.zip`,
-    sha256: v1Archive.sha256,
-    archive: 'zip',
-  };
-
-  const v1Result = await ensureInstalled(installDir, { bundle: v1Bundle });
-  assert.equal(await readFile(v1Result.executable, 'utf8'), 'v1-binary');
-
-  const v2BogusBundle: ServerBundle = {
-    version: '2.0.0',
-    url: `${mockServer.url}/v2-corrupt.zip`,
-    sha256: 'deadbeef'.repeat(8),
-    archive: 'zip',
-  };
-
-  await assert.rejects(
-    () => ensureInstalled(installDir, { bundle: v2BogusBundle }),
-    /Checksum mismatch/,
-  );
-
-  assert.equal(await readFile(v1Result.executable, 'utf8'), 'v1-binary');
-
-  await assert.rejects(stat(join(installDir, 'versions', '2.0.0')), (err: unknown) =>
-    Boolean(err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT'),
-  );
-
-  const state = await readInstallState(installDir);
-  assert.equal(state?.phase, 'failed');
-  assert.ok(state?.error?.includes('Checksum mismatch'));
 });
 
 test('HTTP failure (404) fails gracefully with explicit error and cleans up temp files', async (t: TestContext) => {

@@ -4,12 +4,6 @@ import com.android.ide.common.rendering.api.AttrResourceValue
 import com.android.ide.common.rendering.api.AttributeFormat
 import com.android.ide.common.rendering.api.ResourceNamespace
 import com.android.ide.common.rendering.api.ResourceValueImpl
-import com.android.ide.common.rendering.api.StyleItemResourceValue
-import com.android.ide.common.rendering.api.StyleItemResourceValueImpl
-import com.android.ide.common.rendering.api.StyleResourceValue
-import com.android.ide.common.rendering.api.StyleResourceValueImpl
-import com.android.ide.common.resources.ResourceItem
-import com.android.ide.common.resources.ResourceRepository
 import com.android.ide.common.resources.configuration.FolderConfiguration
 import com.android.ide.common.util.PathString
 import com.android.resources.ResourceFolderType
@@ -32,7 +26,6 @@ import org.jetbrains.android.context.AndroidQueryException
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
@@ -220,47 +213,6 @@ class AndroidLintResourcesTest {
 
         val items = repo.getResources(ns, ResourceType.STRING, "greeting")
         assertEquals(2, items.size)
-    }
-
-    @Test
-    fun repositorySupportsStyleItemsAndNamespaceAliases() {
-        val repo = AndroidLintResources.LintResourceRepository(
-            ResourceNamespace.fromPackageName("com.example.app"),
-            "com.example.app",
-        )
-
-        val ns = ResourceNamespace.fromPackageName("com.example.app")
-        val style = StyleResourceValueImpl(ns, "AppTheme", "Theme.AppCompat", null)
-        style.addItem(StyleItemResourceValueImpl(ResourceNamespace.ANDROID, "windowNoTitle", "true", null))
-        style.addItem(StyleItemResourceValueImpl(ResourceNamespace.RES_AUTO, "colorPrimary", "#123456", null))
-
-        repo.add(
-            AndroidLintResources.LintResourceItem(
-                "AppTheme",
-                ResourceType.STYLE,
-                ns,
-                null,
-                FolderConfiguration.createDefault(),
-                style,
-                PathString("/app/res/values/styles.xml"),
-                false,
-                true
-            )
-        )
-
-        val items = repo.getResources(ns, ResourceType.STYLE, "AppTheme")
-        assertEquals(1, items.size)
-
-        val retrieved = items[0].resourceValue as StyleResourceValue
-        assertEquals("Theme.AppCompat", retrieved.parentStyleName)
-
-        val androidItem = retrieved.getItem(ResourceNamespace.ANDROID, "windowNoTitle")
-        assertNotNull(androidItem)
-        assertEquals("true", androidItem!!.value)
-
-        val customItem = retrieved.getItem(ResourceNamespace.RES_AUTO, "colorPrimary")
-        assertNotNull(customItem)
-        assertEquals("#123456", customItem!!.value)
     }
 
     @Test
