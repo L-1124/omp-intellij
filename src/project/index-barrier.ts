@@ -6,7 +6,6 @@ export { reduceConnectionState };
 
 const REQUEST_FAILED = -32803;
 const REQUEST_CANCELLED = -32800;
-const CONTENT_MODIFIED = -32801;
 const MAX_PENDING_INDEX_REQUESTS = 128;
 const MAX_QUEUED_INDEX_BYTES = 16 * 1024 * 1024;
 
@@ -43,6 +42,7 @@ export class IndexBarrier {
   sendClient: (frame: Buffer) => void;
   requestWaitTimeoutMs: number;
   onStateChange: ((state: StateRecord) => void) | null;
+  onRequestRejected: ((id: unknown) => void) | null;
   ready: boolean;
   failure: string | null;
   failureKind?: string;
@@ -58,6 +58,7 @@ export class IndexBarrier {
     requestWaitTimeoutMs?: number;
     waitMs?: number;
     onStateChange?: (state: StateRecord) => void;
+    onRequestRejected?: (id: unknown) => void;
   }) {
     const timeout = options.requestWaitTimeoutMs ?? options.waitMs ?? 300000;
     if (!Number.isFinite(timeout) || timeout <= 0) {
@@ -67,6 +68,7 @@ export class IndexBarrier {
     this.sendClient = options.sendClient;
     this.requestWaitTimeoutMs = timeout;
     this.onStateChange = options.onStateChange ?? null;
+    this.onRequestRejected = options.onRequestRejected ?? null;
     this.ready = false;
     this.failure = null;
     this.failureKind = undefined;
@@ -134,6 +136,7 @@ export class IndexBarrier {
   }
 
   reject(message: { id: unknown }, code: number, reason: string, failure?: FailureDetail): void {
+    this.onRequestRejected?.(message.id);
     const safeReason = sanitizeString(reason);
     const safeRootUri = typeof this.root === 'string' ? sanitizeString(this.root) : this.root;
     const errorData: Record<string, unknown> = {
@@ -158,6 +161,7 @@ export class IndexBarrier {
   }
 
   rejectTimeout(message: { id: unknown }, elapsed: number): void {
+    this.onRequestRejected?.(message.id);
     const safeRootUri = typeof this.root === 'string' ? sanitizeString(this.root) : this.root;
     this.sendClient(
       encode({
@@ -249,21 +253,6 @@ export class IndexBarrier {
         return;
       }
     }
-    if (message.method === 'textDocument/didChange' || message.method === 'textDocument/didClose') {
-      const params = message.params as { textDocument?: { uri: string } } | undefined;
-      const uri = params?.textDocument?.uri;
-      for (const [id, entry] of Array.from(this.pending.entries())) {
-        const entryParams = entry.message.params as { textDocument?: { uri: string } } | undefined;
-        if (!entryParams?.textDocument || entryParams.textDocument.uri === uri) {
-          this.take(id);
-          this.reject(
-            entry.message,
-            CONTENT_MODIFIED,
-            'Document changed while the request was waiting for IntelliJ indexing; retry with the current document',
-          );
-        }
-      }
-    }
     if (
       message.method === 'workspace/didChangeWorkspaceFolders' &&
       this.state.workspaceFolderChangeNotifications
@@ -312,8 +301,8 @@ export class IndexBarrier {
     this.queuedBytes += frame.length;
   }
 
-  fromServer(message: Record<string, unknown>, frame: Buffer): void {
-    this.sendClient(frame);
+  fromServer(message: Record<string, unknown>, frame: Buffer, forward = true): void {
+    if (forward) this.sendClient(frame);
     this._applyState(message, 'server');
 
     const isInitResponse =

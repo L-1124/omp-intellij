@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ANDROID_DEBUG_COMMANDS,
   claimAndroidDebug,
@@ -97,56 +97,83 @@ export function resolveSourceFile(cwd: string, program?: string): string | null 
   return direct;
 }
 
-/**
- * Normalizes all file:// URIs in DAP response/event bodies to local filesystem paths for OMP.
- */
-export function normalizeSourcePaths(obj: unknown): unknown {
+export function normalizeSourcePaths(obj: unknown, format: 'path' | 'uri' = 'path'): unknown {
   if (!obj || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) {
-    for (let i = 0; i < obj.length; i++) {
-      obj[i] = normalizeSourcePaths(obj[i]);
-    }
+    for (const item of obj) normalizeSourcePaths(item, format);
     return obj;
   }
   const record = obj as Record<string, unknown>;
-  for (const [key, val] of Object.entries(record)) {
-    if ((key === 'source' || key === 'sources') && val && typeof val === 'object') {
-      if (Array.isArray(val)) {
-        for (const item of val) {
-          if (
-            item &&
-            typeof item === 'object' &&
-            'path' in item &&
-            typeof item.path === 'string' &&
-            item.path.startsWith('file://')
-          ) {
-            try {
-              item.path = fileURLToPath(item.path.replace(/%3A/gi, ':'));
-            } catch {
-              // ignore invalid file URI
-            }
-          }
-        }
-      } else if ('path' in val && typeof val.path === 'string' && val.path.startsWith('file://')) {
+  for (const key of Object.keys(record)) {
+    const value = record[key];
+    if (key === 'path' && typeof value === 'string') {
+      if (format === 'path' && value.startsWith('file://')) {
         try {
-          const valRecord = val as Record<string, unknown>;
-          valRecord.path = fileURLToPath(val.path.replace(/%3A/gi, ':'));
+          record[key] = fileURLToPath(value.replace(/%3A/gi, ':'));
         } catch {
-          // ignore invalid file URI
+          // Preserve non-file sources and malformed URIs for the adapter.
         }
+      } else if (format === 'uri' && isAbsolute(value)) {
+        record[key] = pathToFileURL(value).href;
       }
-    } else if (key === 'path' && typeof val === 'string' && val.startsWith('file://')) {
-      try {
-        record[key] = fileURLToPath(val.replace(/%3A/gi, ':'));
-      } catch {
-        // ignore invalid file URI
-      }
-    } else if (typeof val === 'object' && val !== null) {
-      normalizeSourcePaths(val);
+    } else if (value && typeof value === 'object' && key !== 'adapterData' && key !== 'data') {
+      normalizeSourcePaths(value, format);
     }
   }
   return obj;
 }
+
+function convertPositions(value: unknown, lineDelta: number, columnDelta: number): void {
+  if (!value || typeof value !== 'object' || (!lineDelta && !columnDelta)) return;
+  if (Array.isArray(value)) {
+    for (const item of value) convertPositions(item, lineDelta, columnDelta);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    const position = record[key];
+    const delta =
+      key === 'line' || key === 'endLine'
+        ? lineDelta
+        : key === 'column' || key === 'endColumn'
+          ? columnDelta
+          : 0;
+    if (delta && typeof position === 'number' && (delta > 0 || position > 0)) {
+      record[key] = position + delta;
+    } else if (key === 'lines' && Array.isArray(position) && lineDelta) {
+      record[key] = position.map((line) =>
+        typeof line === 'number' && (lineDelta > 0 || line > 0) ? line + lineDelta : line,
+      );
+    } else if (
+      key === 'breakpoints' ||
+      key === 'breakpoint' ||
+      key === 'stackFrames' ||
+      key === 'targets' ||
+      key === 'instructions' ||
+      key === 'scopes' ||
+      key === 'source' ||
+      key === 'sources' ||
+      key === 'locations' ||
+      key === 'location'
+    ) {
+      convertPositions(position, lineDelta, columnDelta);
+    }
+  }
+}
+
+const PROXY_CAPABILITIES = {
+  supportsConfigurationDoneRequest: true,
+  supportsTerminateRequest: true,
+  supportTerminateDebuggee: false,
+  supportSuspendDebuggee: false,
+  supportsCancelRequest: false,
+};
+
+const BREAKPOINT_FEATURES = [
+  ['condition', 'supportsConditionalBreakpoints'],
+  ['hitCondition', 'supportsHitConditionalBreakpoints'],
+  ['logMessage', 'supportsLogPoints'],
+] as const;
 
 /**
  * Checks whether this module is executed directly as a script vs imported by another module.
@@ -274,6 +301,13 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
   let supportsFunctionBreakpoints = false;
   let entryFunctionBreakpointOwned = false;
   let supportsThreadDump = false;
+  let supportsConfigurationDone = false;
+  let clientInitializeArgs: Record<string, unknown> | null = null;
+  let clientPathFormat: 'path' | 'uri' = 'path';
+  let clientLineDelta = 0;
+  let clientColumnDelta = 0;
+  let clientVariableType = false;
+  const nativeCapabilities: Record<string, unknown> = {};
   let phase: DebugPhase = 'closed';
   let projectRoot = process.cwd();
   let backendPort: number | undefined;
@@ -292,7 +326,10 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     }
   >();
   const nativeSeqToClientSeq = new Map<number, DapRequestMessage>();
-  const bufferedBreakpoints = new Map<string, Record<string, unknown>>();
+  const bufferedBreakpoints = new Map<string, { args: Record<string, unknown>; ids: number[] }>();
+  const nativeBreakpointIds = new Map<number, number>();
+  const deferredBreakpointEvents: Record<string, unknown>[] = [];
+  let nextBreakpointId = 1;
   let bufferedExceptionBreakpoints: Record<string, unknown> | null = null;
 
   function snapshot(): DebugSnapshot {
@@ -312,7 +349,33 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
   }
 
   function sendToClient(msg: unknown): void {
-    stdout.write(encode(normalizeSourcePaths(msg)));
+    if (msg && typeof msg === 'object' && 'body' in msg) {
+      convertPositions(msg.body, -clientLineDelta, -clientColumnDelta);
+      if (
+        !clientVariableType &&
+        'command' in msg &&
+        msg.command === 'variables' &&
+        msg.body &&
+        typeof msg.body === 'object' &&
+        'variables' in msg.body &&
+        Array.isArray(msg.body.variables)
+      ) {
+        for (const variable of msg.body.variables) {
+          if (variable && typeof variable === 'object' && 'type' in variable) delete variable.type;
+        }
+      }
+    }
+    stdout.write(encode(normalizeSourcePaths(msg, clientPathFormat)));
+  }
+
+  function updateCapabilities(body: unknown): Record<string, unknown> {
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      Object.assign(nativeCapabilities, body);
+    }
+    supportsFunctionBreakpoints = nativeCapabilities.supportsFunctionBreakpoints === true;
+    supportsThreadDump = nativeCapabilities.supportsThreadDumpRequest === true;
+    supportsConfigurationDone = nativeCapabilities.supportsConfigurationDoneRequest === true;
+    return { ...nativeCapabilities, ...PROXY_CAPABILITIES };
   }
 
   function respond(
@@ -572,10 +635,33 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           msg.success = false;
           msg.message = (msg.body as Record<string, unknown>).result as string;
         }
+        if (request.command.startsWith('set') && request.command.endsWith('Breakpoints')) {
+          mapNativeBreakpointBody(msg.body);
+        }
         sendToClient({ ...msg, seq: proxySeq++, request_seq: request.seq });
       }
     } else if (msg.type === 'event') {
       if (isShuttingDown) return;
+      if (msg.event === 'breakpoint') {
+        if (!backendInitialized) {
+          deferredBreakpointEvents.push(msg);
+          return;
+        }
+        mapNativeBreakpointBody(msg.body);
+      }
+      if (msg.event === 'stopped' && msg.body && typeof msg.body === 'object') {
+        const body = msg.body as Record<string, unknown>;
+        if (Array.isArray(body.hitBreakpointIds)) {
+          body.hitBreakpointIds = body.hitBreakpointIds.map((id) =>
+            typeof id === 'number' ? mapNativeBreakpointId(id) : id,
+          );
+        }
+      }
+      if (msg.event === 'capabilities' && msg.body && typeof msg.body === 'object') {
+        const body = msg.body as Record<string, unknown>;
+        body.capabilities = updateCapabilities(body.capabilities);
+        flushConfigurationDone();
+      }
       if (msg.event === 'stopped') phase = 'stopped';
       if (msg.event === 'continued') phase = 'running';
       if (msg.event === 'initialized') {
@@ -726,41 +812,62 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       void shutdown(1);
     });
     const initialized = await sendNativeRequest('initialize', {
+      ...clientInitializeArgs,
       clientID: 'omp',
       clientName: 'OMP',
       adapterID: 'intellij_jvm',
       pathFormat: 'path',
       linesStartAt1: true,
       columnsStartAt1: true,
-      supportsVariableType: true,
+      supportsVariableType: clientVariableType,
       supportsRunInTerminalRequest: false,
+      supportsStartDebuggingRequest: false,
     });
-    supportsFunctionBreakpoints =
-      !!initialized.body &&
-      typeof initialized.body === 'object' &&
-      'supportsFunctionBreakpoints' in initialized.body &&
-      initialized.body.supportsFunctionBreakpoints === true;
-    supportsThreadDump =
-      !!initialized.body &&
-      typeof initialized.body === 'object' &&
-      'supportsThreadDumpRequest' in initialized.body &&
-      initialized.body.supportsThreadDumpRequest === true;
-    if (initialized.body) {
-      sendToClient({
-        seq: proxySeq++,
-        type: 'event',
-        event: 'capabilities',
-        body: { capabilities: initialized.body },
-      });
+    sendToClient({
+      seq: proxySeq++,
+      type: 'event',
+      event: 'capabilities',
+      body: { capabilities: updateCapabilities(initialized.body) },
+    });
+  }
+
+  function mapNativeBreakpointId(nativeId: number, preferredId?: number): number {
+    const id = preferredId ?? nativeBreakpointIds.get(nativeId) ?? nextBreakpointId++;
+    nativeBreakpointIds.set(nativeId, id);
+    return id;
+  }
+
+  function mapNativeBreakpoint(breakpoint: unknown, preferredId?: number): void {
+    if (!breakpoint || typeof breakpoint !== 'object') return;
+    const record = breakpoint as Record<string, unknown>;
+    record.id =
+      typeof record.id === 'number'
+        ? mapNativeBreakpointId(record.id, preferredId)
+        : (preferredId ?? nextBreakpointId++);
+  }
+
+  function mapNativeBreakpointBody(body: unknown): void {
+    if (!body || typeof body !== 'object') return;
+    if ('breakpoint' in body) mapNativeBreakpoint(body.breakpoint);
+    if ('breakpoints' in body && Array.isArray(body.breakpoints)) {
+      for (const breakpoint of body.breakpoints) mapNativeBreakpoint(breakpoint);
     }
   }
 
-  function emitBreakpoints(response: DapResponseMessage, reason: string): void {
+  function emitBreakpoints(response: DapResponseMessage, reason: string, ids?: number[]): void {
     if (!response.body || typeof response.body !== 'object' || !('breakpoints' in response.body)) {
+      if (ids) throw new Error('Native debugger returned no breakpoint results');
       return;
     }
-    if (!Array.isArray(response.body.breakpoints)) return;
-    for (const breakpoint of response.body.breakpoints) {
+    if (!Array.isArray(response.body.breakpoints)) {
+      if (ids) throw new Error('Native debugger returned invalid breakpoint results');
+      return;
+    }
+    if (ids && response.body.breakpoints.length !== ids.length) {
+      throw new Error('Native debugger returned a different number of breakpoints');
+    }
+    for (const [index, breakpoint] of response.body.breakpoints.entries()) {
+      mapNativeBreakpoint(breakpoint, ids?.[index]);
       sendToClient({
         seq: proxySeq++,
         type: 'event',
@@ -770,13 +877,34 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     }
   }
 
+  function unsupportedBreakpointFeature(args: Record<string, unknown>): string | undefined {
+    if (!Array.isArray(args.breakpoints)) return;
+    for (const breakpoint of args.breakpoints) {
+      if (!breakpoint || typeof breakpoint !== 'object') continue;
+      for (const [field, capability] of BREAKPOINT_FEATURES) {
+        if (
+          typeof breakpoint[field] === 'string' &&
+          breakpoint[field].length > 0 &&
+          nativeCapabilities[capability] !== true
+        )
+          return `Native debugger does not support breakpoint ${field}`;
+      }
+    }
+  }
+
   async function replayBreakpoints(): Promise<void> {
     while (bufferedBreakpoints.size > 0) {
       const first = bufferedBreakpoints.entries().next().value;
       if (!first) break;
-      const [sourcePath, args] = first;
-      bufferedBreakpoints.delete(sourcePath);
-      emitBreakpoints(await sendNativeRequest('setBreakpoints', args, 10000), 'changed');
+      const [sourceKey, pending] = first;
+      bufferedBreakpoints.delete(sourceKey);
+      const unsupported = unsupportedBreakpointFeature(pending.args);
+      if (unsupported) throw new Error(unsupported);
+      emitBreakpoints(
+        await sendNativeRequest('setBreakpoints', pending.args, 10000),
+        'changed',
+        pending.ids,
+      );
     }
     while (bufferedExceptionBreakpoints) {
       const args = bufferedExceptionBreakpoints;
@@ -784,10 +912,13 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       await sendNativeRequest('setExceptionBreakpoints', args, 10000);
     }
     backendInitialized = true;
+    for (const event of deferredBreakpointEvents) handleDebugServerMessage(event);
+    deferredBreakpointEvents.length = 0;
   }
 
   function flushConfigurationDone(): void {
     if (
+      !supportsConfigurationDone ||
       !backendInitialized ||
       !nativeInitializedEvent ||
       !startupSent ||
@@ -879,30 +1010,80 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       return;
     }
     if (command === 'initialize') {
-      respond(request, true, {
-        supportsConfigurationDoneRequest: true,
-        supportsConditionalBreakpoints: true,
-        supportsDelayedStackTraceLoading: true,
-        supportTerminateDebuggee: true,
-        supportsTerminateRequest: true,
-      });
+      if (clientInitializeArgs || isStarting || backendInitialized) {
+        respond(request, false, undefined, 'Debug adapter already initialized');
+        return;
+      }
+      if (
+        args.pathFormat !== undefined &&
+        args.pathFormat !== 'path' &&
+        args.pathFormat !== 'uri'
+      ) {
+        respond(request, false, undefined, 'Unsupported path format');
+        return;
+      }
+      clientInitializeArgs = args;
+      clientPathFormat = args.pathFormat === 'uri' ? 'uri' : 'path';
+      clientLineDelta = args.linesStartAt1 === false ? 1 : 0;
+      clientColumnDelta = args.columnsStartAt1 === false ? 1 : 0;
+      clientVariableType = args.supportsVariableType === true;
+      respond(request, true, PROXY_CAPABILITIES);
       return;
+    }
+    if (command === 'cancel') {
+      respond(request, false, undefined, 'Cancellation is not supported by this proxy');
+      return;
+    }
+    if (
+      command === 'setBreakpoints' ||
+      command === 'breakpointLocations' ||
+      command === 'gotoTargets' ||
+      command === 'source'
+    ) {
+      normalizeSourcePaths(args);
+      convertPositions(args, clientLineDelta, clientColumnDelta);
+    }
+    if (command === 'setBreakpoints' && backendInitialized) {
+      const unsupported = unsupportedBreakpointFeature(args);
+      if (unsupported) {
+        respond(request, false, undefined, unsupported);
+        return;
+      }
     }
     if (command === 'setBreakpoints' && !backendInitialized) {
       const source =
         args.source && typeof args.source === 'object' && !Array.isArray(args.source)
           ? (args.source as Record<string, unknown>)
           : undefined;
-      if (typeof source?.path === 'string') bufferedBreakpoints.set(source.path, args);
-      const breakpoints = Array.isArray(args.breakpoints) ? args.breakpoints : [];
+      const sourceKey =
+        typeof source?.path === 'string'
+          ? `path:${source.path}`
+          : typeof source?.sourceReference === 'number' && source.sourceReference > 0
+            ? `reference:${source.sourceReference}`
+            : undefined;
+      if (!sourceKey) {
+        respond(request, false, undefined, 'Breakpoint source requires a path or sourceReference');
+        return;
+      }
+      const breakpoints = Array.isArray(args.breakpoints)
+        ? args.breakpoints
+        : Array.isArray(args.lines)
+          ? args.lines.map((line) => ({ line }))
+          : [];
+      const ids = breakpoints.map(() => nextBreakpointId++);
+      bufferedBreakpoints.set(sourceKey, { args, ids });
       hasClientBreakpoints ||= breakpoints.length > 0;
       respond(request, true, {
-        breakpoints: breakpoints.map((breakpoint: unknown) => ({
+        breakpoints: breakpoints.map((breakpoint: unknown, index: number) => ({
+          id: ids[index],
           verified: false,
           line:
             breakpoint && typeof breakpoint === 'object' && 'line' in breakpoint
               ? breakpoint.line
               : 0,
+          ...(breakpoint && typeof breakpoint === 'object' && 'column' in breakpoint
+            ? { column: breakpoint.column }
+            : {}),
           message: 'Pending native debug server initialization',
         })),
       });
@@ -1244,7 +1425,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     if (backendInitialized && dapSocket && !dapSocket.destroyed) {
       const nativeSeq = nextNativeSeq++;
       nativeSeqToClientSeq.set(nativeSeq, request);
-      sendToDebugServer({ ...raw, seq: nativeSeq });
+      sendToDebugServer({ ...request, seq: nativeSeq });
     } else {
       respond(request, false, undefined, 'Debug session not active');
     }

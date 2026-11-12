@@ -23,7 +23,6 @@ import {
   migrateProjectMetadata,
   recordConnection,
   recordReadiness,
-  replaceLease,
 } from './project/metadata.js';
 import { findBuildRoot } from './project/readiness.js';
 import { applyWorkspaceOptions } from './project/workspace.js';
@@ -78,34 +77,34 @@ export async function startBridge(): Promise<void> {
   let barrier: IndexBarrier;
   let leaseHandle: LeaseHandle | null = null;
   let initializeTimer: NodeJS.Timeout | null = null;
+  let pendingInitialize: { id: unknown } | null = null;
+  let clientWorkDoneProgress = false;
+  const ownedProgressTokens = new Set<unknown>();
 
   const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
   const documentSymbols = new DocumentSymbolAdapter();
 
-  let socket: net.Socket;
-  try {
-    const session = await connectWithLease({
-      systemPath: settings.systemPath,
-      kind: 'bridge',
-      projectPath,
-    });
-    socket = session.socket;
-    leaseHandle = session.lease;
-  } catch (error: unknown) {
-    await connState.update({ root: process.cwd() });
-    await connState.close(
-      connectionCloseState(error instanceof Error ? error : new Error(String(error)), {
-        stage: 'connect',
-        systemPath: settings.systemPath,
-      }),
-    );
-    throw error;
-  }
+  let socket: net.Socket | null = null;
 
   const upstream = asyncFramedStream(async (messageRaw: unknown, frame: Buffer) => {
+    if (closing) return;
     const message = messageRaw as Record<string, unknown> | null;
     if (message) documentSymbols.fromClient(message);
     if (message?.method === 'initialize') {
+      if (socket || pendingInitialize) {
+        throw new Error('Bridge already received initialize');
+      }
+      pendingInitialize = { id: message.id };
+      initializeTimer = setTimeout(() => {
+        close(
+          Object.assign(
+            new Error(`IntelliJ initialize handshake timed out after ${initializeTimeoutMs}ms`),
+            { code: 'ETIMEDOUT' },
+          ),
+          { kind: 'timeout', stage: 'initialize' },
+        );
+      }, initializeTimeoutMs);
+      initializeTimer.unref();
       const p = message.params as
         | { rootUri?: string; rootPath?: string; workspaceFolders?: Array<{ uri: string }> }
         | undefined;
@@ -138,15 +137,6 @@ export async function startBridge(): Promise<void> {
           .update({ root: projectPath, phase: 'connecting', detail: 'Initializing connection' })
           .catch(() => {});
         recordConnection(settings.systemPath, projectPath, Date.now()).catch(() => {});
-        replaceLease(settings.systemPath, leaseHandle, { kind: 'bridge', projectPath })
-          .then((newLease) => {
-            if (closing) {
-              void newLease.release().catch(() => {});
-              return;
-            }
-            leaseHandle = newLease;
-          })
-          .catch(() => {});
       }
 
       let rawInitializationOptions: Record<string, unknown> | undefined;
@@ -160,6 +150,7 @@ export async function startBridge(): Promise<void> {
 
         // Enable workDoneProgress so server-initiated progress is emitted.
         const windowCaps = (caps.window as Record<string, unknown>) || {};
+        clientWorkDoneProgress = windowCaps.workDoneProgress === true;
         windowCaps.workDoneProgress = true;
         caps.window = windowCaps;
 
@@ -235,16 +226,31 @@ export async function startBridge(): Promise<void> {
         }
       }
 
-      initializeTimer = setTimeout(() => {
-        close(
-          Object.assign(
-            new Error(`IntelliJ initialize handshake timed out after ${initializeTimeoutMs}ms`),
-            { code: 'ETIMEDOUT' },
-          ),
-          { kind: 'timeout', stage: 'initialize' },
-        );
-      }, initializeTimeoutMs);
-      initializeTimer.unref();
+      if (closing) return;
+      try {
+        const session = await connectWithLease({
+          systemPath: settings.systemPath,
+          kind: 'bridge',
+          projectPath,
+        });
+        if (closing) {
+          session.socket.destroy();
+          await session.lease.release();
+          return;
+        }
+        socket = session.socket;
+        leaseHandle = session.lease;
+        socket.on('error', (err: Error) => close(err));
+        socket.on('end', () => close());
+        upstream.pipe(socket);
+        socket.pipe(downstream);
+      } catch (error: unknown) {
+        close(error instanceof Error ? error : new Error(String(error)), {
+          kind: 'connection',
+          stage: 'connect',
+        });
+        return;
+      }
 
       const newFrame = encode(message);
       barrier.fromClient(message, newFrame);
@@ -292,22 +298,73 @@ export async function startBridge(): Promise<void> {
     }
 
     if (message) {
+      if (closing) return;
+      const params = message.params;
+      if (
+        message.method === 'window/workDoneProgress/cancel' &&
+        params &&
+        typeof params === 'object' &&
+        'token' in params &&
+        ownedProgressTokens.has(params.token)
+      ) {
+        return;
+      }
       barrier.fromClient(message, frame);
     }
   });
 
   const downstream = asyncFramedStream(async (messageRaw: unknown, frame: Buffer) => {
     const message = messageRaw as Record<string, unknown> | null;
-    if (!message) return;
+    if (!message || closing) return;
 
     if (
-      initializeTimer &&
-      message.id === barrier.initializeRequestId &&
+      pendingInitialize &&
+      message.id === pendingInitialize.id &&
       (message.result !== undefined || message.error !== undefined) &&
       !message.method
     ) {
-      clearTimeout(initializeTimer);
+      pendingInitialize = null;
+      clearTimeout(initializeTimer ?? undefined);
       initializeTimer = null;
+    }
+    if (
+      message.method === 'window/workDoneProgress/create' &&
+      message.id !== undefined &&
+      !clientWorkDoneProgress
+    ) {
+      const params = message.params;
+      const token =
+        params && typeof params === 'object' && 'token' in params ? params.token : undefined;
+      if (typeof token !== 'string' && typeof token !== 'number') {
+        upstream.push(
+          encode({
+            jsonrpc: '2.0',
+            id: message.id,
+            error: { code: -32602, message: 'Progress token must be a string or number' },
+          }),
+        );
+      } else {
+        ownedProgressTokens.add(token);
+        upstream.push(encode({ jsonrpc: '2.0', id: message.id, result: null }));
+      }
+      return;
+    }
+    const params = message.params;
+    const progress =
+      message.method === '$/progress' && params && typeof params === 'object' && 'token' in params
+        ? params
+        : undefined;
+    const ownedProgress = progress !== undefined && ownedProgressTokens.has(progress.token);
+    if (
+      ownedProgress &&
+      progress &&
+      'value' in progress &&
+      progress.value &&
+      typeof progress.value === 'object' &&
+      'kind' in progress.value &&
+      progress.value.kind === 'end'
+    ) {
+      ownedProgressTokens.delete(progress.token);
     }
     if (message.method === 'intellij/ready-for-test') {
       recordReadiness(settings.systemPath, projectPath, Date.now()).catch(() => {});
@@ -323,13 +380,18 @@ export async function startBridge(): Promise<void> {
         pendingConfigRequests.set(message.id, params.items);
       }
     }
-    barrier.fromServer(message, documentSymbols.fromServer(message) ? encode(message) : frame);
+    barrier.fromServer(
+      message,
+      documentSymbols.fromServer(message) ? encode(message) : frame,
+      !ownedProgress,
+    );
   });
 
   barrier = new IndexBarrier({
     requestWaitTimeoutMs,
     sendServer: (frame: Buffer) => upstream.push(frame),
     sendClient: (frame: Buffer) => downstream.push(frame),
+    onRequestRejected: (id) => documentSymbols.discard(id),
     onStateChange: (state: StateRecord) => {
       connState
         .update({
@@ -386,6 +448,24 @@ export async function startBridge(): Promise<void> {
         }
       : undefined;
 
+    if (pendingInitialize) {
+      downstream.push(
+        encode({
+          jsonrpc: '2.0',
+          id: pendingInitialize.id,
+          error: {
+            code: -32803,
+            message: sanitizeString(
+              error?.message ?? 'IntelliJ connection closed during initialize',
+            ),
+            data: failureDetail ? { failure: sanitizeStatus(failureDetail) } : undefined,
+          },
+        }),
+      );
+      pendingInitialize = null;
+    }
+    ownedProgressTokens.clear();
+
     barrier.fail(
       error?.message ?? 'IntelliJ connection closed before queued requests completed',
       failureDetail,
@@ -394,15 +474,15 @@ export async function startBridge(): Promise<void> {
 
     process.stdin.unpipe(upstream);
     process.stdin.pause();
-    upstream.unpipe(socket);
+    if (socket) {
+      upstream.unpipe(socket);
+      socket.unpipe(downstream);
+      socket.destroy();
+    }
     upstream.destroy();
-    socket.unpipe(downstream);
-    socket.destroy();
     downstream.end();
   }
 
-  socket.on('error', (err: Error) => close(err));
-  socket.on('end', () => close());
   upstream.on('error', (err: Error) => close(err));
   downstream.on('error', (err: Error) => close(err));
   process.stdin.on('error', (err: Error) => close(err));
@@ -411,8 +491,8 @@ export async function startBridge(): Promise<void> {
   process.on('SIGTERM', () => close(undefined, { kind: 'cancelled', stage: 'connect' }));
   process.on('SIGINT', () => close(undefined, { kind: 'cancelled', stage: 'connect' }));
 
-  process.stdin.pipe(upstream).pipe(socket);
-  socket.pipe(downstream).pipe(process.stdout);
+  downstream.pipe(process.stdout);
+  process.stdin.pipe(upstream);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

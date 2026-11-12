@@ -393,7 +393,9 @@ export function killProcessSafely(pid: number, sandbox: IntegrationSandbox): voi
     throw new Error(`Refusing termination: PID ${pid} is not owned by this sandbox`);
   }
   if (process.platform === 'win32') {
-    const result = spawnSync('taskkill.exe', ['/F', '/PID', String(pid)], {
+    // Server-owned import workers retain sandbox locks after their parent is killed.
+    const args = child ? ['/F', '/PID', String(pid)] : ['/F', '/T', '/PID', String(pid)];
+    const result = spawnSync('taskkill.exe', args, {
       windowsHide: true,
       encoding: 'utf8',
       timeout: 5000,

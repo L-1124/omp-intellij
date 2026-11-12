@@ -198,7 +198,7 @@ export async function createDapTestHarness(
             break;
           }
           case 'attach': {
-            pendingAttach = true;
+            pendingAttach = options.capabilities?.supportsConfigurationDoneRequest !== false;
             respond(req);
             break;
           }

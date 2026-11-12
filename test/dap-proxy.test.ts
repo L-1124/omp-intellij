@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   type DebugSnapshot,
   isLoopbackHost,
@@ -22,6 +22,16 @@ import {
 } from '../src/debug/dap-proxy.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
 import { createDapTestHarness, type DapRequest, type DapTestHarness } from './dap-fixture.js';
+
+function breakpointResults(response: { body?: unknown }): Record<string, unknown>[] {
+  const body = response.body;
+  assert.ok(body && typeof body === 'object' && 'breakpoints' in body);
+  assert.ok(Array.isArray(body.breakpoints));
+  for (const breakpoint of body.breakpoints) {
+    assert.ok(breakpoint && typeof breakpoint === 'object' && !Array.isArray(breakpoint));
+  }
+  return body.breakpoints as Record<string, unknown>[];
+}
 
 function getProxyScriptPath(): string {
   const compiledPath = fileURLToPath(new URL('../src/debug/dap-proxy.js', import.meta.url));
@@ -271,17 +281,6 @@ test('dap-proxy subprocess handles initialize over stdio and exits on stdin clos
   assert.equal(resp.request_seq, 1);
   assert.equal(resp.command, 'initialize');
   assert.equal(resp.success, true);
-
-  const body =
-    resp.body && typeof resp.body === 'object' && !Array.isArray(resp.body)
-      ? (resp.body as Record<string, unknown>)
-      : {};
-
-  assert.equal(body.supportsConfigurationDoneRequest, true);
-  assert.equal(body.supportsConditionalBreakpoints, true);
-  assert.equal(body.supportsDelayedStackTraceLoading, true);
-  assert.equal(body.supportTerminateDebuggee, true);
-  assert.equal(body.supportsTerminateRequest, true);
 
   proxy.child.stdin?.end();
   const [exitCode] = await proxy.closed;
@@ -1107,4 +1106,324 @@ test('attach host normalization preserves loopback classification', () => {
   assert.equal(isLoopbackHost('[::1:8080]'), false);
   assert.equal(isLoopbackHost(''), false);
   assert.equal(isLoopbackHost('example.com'), false);
+});
+
+test('zero-based URI clients retain locations across buffered and live breakpoint requests', async (t) => {
+  let h: DapTestHarness;
+  let sourcePath = '';
+  h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'setBreakpoints') {
+        h.respond(request, {
+          breakpoints: [
+            { id: 1, verified: true, line: 1, column: 1, source: { path: sourcePath } },
+          ],
+        });
+        return true;
+      }
+      if (request.command === 'stackTrace') {
+        h.respond(request, {
+          stackFrames: [
+            {
+              id: 1,
+              name: 'main',
+              line: 6,
+              column: 3,
+              endLine: 8,
+              endColumn: 5,
+              source: { path: sourcePath, adapterData: { path: 'opaque', line: 99 } },
+            },
+          ],
+          totalFrames: 1,
+        });
+        return true;
+      }
+      if (request.command === 'variables') {
+        h.respond(request, {
+          variables: [{ name: 'count', value: '1', type: 'int', variablesReference: 0 }],
+        });
+        return true;
+      }
+    },
+  });
+  sourcePath = join(h.systemPath, 'App.java');
+  const sourceUri = pathToFileURL(sourcePath).href;
+  await h.request('initialize', {
+    pathFormat: 'uri',
+    linesStartAt1: false,
+    columnsStartAt1: false,
+    supportsVariableType: false,
+  });
+  const buffered = await h.request('setBreakpoints', {
+    source: { path: sourceUri },
+    breakpoints: [{ line: 0, column: 0 }],
+  });
+  const pendingId = breakpointResults(buffered)[0].id;
+  assert.equal(typeof pendingId, 'number');
+  assert.deepEqual(buffered.body, {
+    breakpoints: [
+      {
+        id: pendingId,
+        verified: false,
+        line: 0,
+        column: 0,
+        message: 'Pending native debug server initialization',
+      },
+    ],
+  });
+  assert.equal((await h.request('attach', { port: 5005 })).success, true);
+  const replayed = h.backendRequests.find((request) => request.command === 'setBreakpoints');
+  assert.deepEqual(replayed?.arguments, {
+    source: { path: sourcePath },
+    breakpoints: [{ line: 1, column: 1 }],
+  });
+  const changed = await h.waitFor(
+    (message) => message.type === 'event' && message.event === 'breakpoint',
+  );
+  assert.deepEqual(changed.body, {
+    reason: 'changed',
+    breakpoint: {
+      id: pendingId,
+      verified: true,
+      line: 0,
+      column: 0,
+      source: { path: sourceUri },
+    },
+  });
+  const live = await h.request('setBreakpoints', {
+    source: { path: sourceUri },
+    breakpoints: [{ line: 0, column: 0 }],
+  });
+  assert.deepEqual(live.body, {
+    breakpoints: [
+      {
+        id: pendingId,
+        verified: true,
+        line: 0,
+        column: 0,
+        source: { path: sourceUri },
+      },
+    ],
+  });
+  assert.deepEqual((await h.request('stackTrace', { threadId: 1 })).body, {
+    stackFrames: [
+      {
+        id: 1,
+        name: 'main',
+        line: 5,
+        column: 2,
+        endLine: 7,
+        endColumn: 4,
+        source: { path: sourceUri, adapterData: { path: 'opaque', line: 99 } },
+      },
+    ],
+    totalFrames: 1,
+  });
+  const variables = await h.request('variables', { variablesReference: 1 });
+  assert.equal(variables.type, 'response');
+  assert.deepEqual(variables.body, {
+    variables: [{ name: 'count', value: '1', variablesReference: 0 }],
+  });
+});
+
+test('proxy-created entry breakpoints stay one-based for the backend and zero-based for clients', async (t) => {
+  const h = await createDapTestHarness(t);
+  await h.request('initialize', { linesStartAt1: false });
+  await h.request('configurationDone');
+  const launched = await h.request('launch', {
+    program: javaTestProgram,
+    build: false,
+    stopOnEntry: true,
+  });
+  assert.equal(launched.success, true, launched.message);
+  const entry = h.backendRequests.find((request) => request.command === 'setBreakpoints');
+  assert.deepEqual(entry?.arguments?.breakpoints, [{ line: 8 }]);
+  const changed = await h.waitFor(
+    (message) => message.type === 'event' && message.event === 'breakpoint',
+  );
+  assert.deepEqual(changed.body, { reason: 'new', breakpoint: { id: 1, verified: true, line: 7 } });
+});
+
+test('backend capabilities cannot enable unsupported cancellation or configuration forwarding', async (t) => {
+  const h = await createDapTestHarness(t, {
+    capabilities: {
+      supportsCancelRequest: true,
+      supportsConfigurationDoneRequest: false,
+      supportsConditionalBreakpoints: false,
+      exceptionBreakpointFilters: [{ filter: 'uncaught', label: 'Uncaught' }],
+    },
+  });
+  const initial = await h.request('initialize');
+  assert.ok(initial.body && typeof initial.body === 'object');
+  assert.equal('supportsConditionalBreakpoints' in initial.body, false);
+  await h.request('configurationDone');
+  assert.equal((await h.request('attach', { port: 5005 })).success, true);
+  await h.request('threads');
+  assert.equal(
+    h.backendRequests.some((request) => request.command === 'configurationDone'),
+    false,
+  );
+  const event = h.messages.find(
+    (message) => message.type === 'event' && message.event === 'capabilities',
+  );
+  const body = event?.body;
+  assert.ok(body && typeof body === 'object' && 'capabilities' in body);
+  const capabilities = body.capabilities;
+  assert.ok(capabilities && typeof capabilities === 'object');
+  assert.ok('supportsCancelRequest' in capabilities);
+  assert.equal(capabilities.supportsCancelRequest, false);
+  assert.ok('exceptionBreakpointFilters' in capabilities);
+  assert.deepEqual(capabilities.exceptionBreakpointFilters, [
+    { filter: 'uncaught', label: 'Uncaught' },
+  ]);
+  h.emit('capabilities', {
+    capabilities: { supportsCancelRequest: true, supportsLogPoints: true },
+  });
+  await h.request('threads');
+  const latest = h.messages
+    .filter((message) => message.type === 'event' && message.event === 'capabilities')
+    .at(-1)?.body;
+  assert.ok(latest && typeof latest === 'object' && 'capabilities' in latest);
+  assert.ok(latest.capabilities && typeof latest.capabilities === 'object');
+  assert.ok('supportsCancelRequest' in latest.capabilities);
+  assert.equal(latest.capabilities.supportsCancelRequest, false);
+  const cancelled = await h.request('cancel', { requestId: 999 });
+  assert.equal(cancelled.success, false);
+  assert.match(cancelled.message ?? '', /not supported/);
+  assert.equal(
+    h.backendRequests.some((request) => request.command === 'cancel'),
+    false,
+  );
+});
+
+for (const phase of ['buffered', 'live'] as const) {
+  test(`unsupported conditional breakpoints fail explicitly in the ${phase} phase`, async (t) => {
+    const h = await createDapTestHarness(t, {
+      capabilities: { supportsConditionalBreakpoints: false },
+    });
+    await h.request('initialize');
+    const args = {
+      source: { path: join(h.systemPath, 'App.java') },
+      breakpoints: [{ line: 1, condition: 'count > 0' }],
+    };
+    if (phase === 'buffered') {
+      await h.request('setBreakpoints', args);
+      const attached = await h.request('attach', { port: 5005 });
+      assert.equal(attached.success, false);
+      assert.match(attached.message ?? '', /does not support breakpoint condition/);
+    } else {
+      await h.request('attach', { port: 5005 });
+      const result = await h.request('setBreakpoints', args);
+      assert.equal(result.success, false);
+      assert.match(result.message ?? '', /does not support breakpoint condition/);
+    }
+    assert.equal(
+      h.backendRequests.some((request) => request.command === 'setBreakpoints'),
+      false,
+    );
+  });
+}
+
+test('variable types are preserved for clients that advertise support', async (t) => {
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command !== 'variables') return;
+      h.respond(request, {
+        variables: [{ name: 'count', value: '1', type: 'int', variablesReference: 0 }],
+      });
+      return true;
+    },
+  });
+  await h.request('initialize', { supportsVariableType: true });
+  await h.request('attach', { port: 5005 });
+  assert.deepEqual((await h.request('variables', { variablesReference: 1 })).body, {
+    variables: [{ name: 'count', value: '1', type: 'int', variablesReference: 0 }],
+  });
+});
+
+test('buffered reference-only sources retain breakpoint identity through early events and stops', async (t) => {
+  let h: DapTestHarness;
+  h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command !== 'setBreakpoints') return;
+      const source = request.arguments?.source;
+      assert.ok(source && typeof source === 'object' && 'sourceReference' in source);
+      const reference = source.sourceReference;
+      assert.ok(reference === 7 || reference === 8);
+      if (reference === 7) {
+        h.emit('breakpoint', {
+          reason: 'changed',
+          breakpoint: {
+            id: 107,
+            verified: true,
+            line: 3,
+            source: { sourceReference: 7 },
+          },
+        });
+      }
+      h.respond(request, {
+        breakpoints: [
+          {
+            id: 100 + reference,
+            verified: reference === 8,
+            line: reference === 7 ? 1 : 2,
+            source,
+          },
+        ],
+      });
+      return true;
+    },
+  });
+  await h.request('initialize', { linesStartAt1: false });
+  const first = await h.request('setBreakpoints', {
+    source: { sourceReference: 7 },
+    breakpoints: [{ line: 0 }],
+  });
+  const second = await h.request('setBreakpoints', {
+    source: { sourceReference: 8 },
+    lines: [1],
+  });
+  const firstId = breakpointResults(first)[0].id;
+  const secondId = breakpointResults(second)[0].id;
+  assert.equal(typeof firstId, 'number');
+  assert.equal(typeof secondId, 'number');
+  assert.notEqual(firstId, secondId);
+  assert.equal((await h.request('attach', { port: 5005 })).success, true);
+  assert.deepEqual(
+    h.backendRequests
+      .filter((request) => request.command === 'setBreakpoints')
+      .map((request) => request.arguments),
+    [
+      { source: { sourceReference: 7 }, breakpoints: [{ line: 1 }] },
+      { source: { sourceReference: 8 }, lines: [2] },
+    ],
+  );
+  assert.deepEqual(
+    h.messages
+      .filter((message) => message.type === 'event' && message.event === 'breakpoint')
+      .map((message) => message.body),
+    [
+      {
+        reason: 'changed',
+        breakpoint: { id: firstId, verified: false, line: 0, source: { sourceReference: 7 } },
+      },
+      {
+        reason: 'changed',
+        breakpoint: { id: secondId, verified: true, line: 1, source: { sourceReference: 8 } },
+      },
+      {
+        reason: 'changed',
+        breakpoint: { id: firstId, verified: true, line: 2, source: { sourceReference: 7 } },
+      },
+    ],
+  );
+  h.emit('stopped', { reason: 'breakpoint', threadId: 1, hitBreakpointIds: [107, 108] });
+  const stopped = await h.waitFor(
+    (message) => message.type === 'event' && message.event === 'stopped',
+  );
+  assert.deepEqual(stopped.body, {
+    reason: 'breakpoint',
+    threadId: 1,
+    hitBreakpointIds: [firstId, secondId],
+  });
 });

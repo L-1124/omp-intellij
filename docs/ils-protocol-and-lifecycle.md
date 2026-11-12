@@ -391,9 +391,17 @@ npm run update-bundle -- --sync-marketplace --check
 
 ### 3. LSP 客户端初始化参数配置推荐
 
-能力声明必须与实际宿主处理器配套。Bridge 保留宿主的编辑与模板能力，仅为本项目确实处理的进度和状态补充声明；以下示例省略宿主负责的编辑能力：
+能力声明必须与实际处理器配套。Bridge 保留宿主的编辑与模板能力，并补充自己处理的进度能力。宿主已声明 `window.workDoneProgress` 时，创建请求和进度通知保持透传；宿主未声明时，Bridge 应答 `window/workDoneProgress/create`，通过连接状态记录进度，并吞掉自己持有 token 的通知。客户端请求携带的部分结果 token 保持独立。以下示例省略宿主负责的编辑能力：
 
 `workspace/didChangeWorkspaceFolders` 只有在服务端声明 `workspace.workspaceFolders.changeNotifications` 为 `true` 或注册 ID 时才关闭索引屏障并进入重新导入状态。仅声明 `supported: true` 不代表订阅变更；ILS 271 当前不订阅此通知，收到它不会触发导入。显式 `intellij/reloadWorkspace` 仍按原流程等待导入和索引完成。
+
+Bridge 从接收 `initialize` 开始计时，覆盖工程配置、原生连接和握手响应；收到原生成功或错误响应后结束计时。期间超时、配置失败或连接关闭时，对仍未完成的请求回一个错误响应，再关闭输出流；已完成的初始化不会在关闭时重复应答。原生连接在初始化参数准备完成后建立，迟到的连接只释放自身 socket 和租约。
+
+初始工作区身份按构建聚合根规范化：`rootUri`、旧式 `rootPath` 和 `workspaceFolders` 提升到对应构建根，文件夹按工程身份去重。该映射用于导入和租约身份；模块执行上下文仍来自服务端模型。
+
+索引等待期间，`textDocument/didChange` 和 `didClose` 继续透传并保留排队请求，由客户端决定结果是否仍有用；显式取消返回 `RequestCancelled`。请求超时、工程失败和关闭仍分别结束等待。Bridge 本地拒绝请求时同步清理符号结果关联。
+
+`documentSymbol` 按宿主层级能力决定是否展平，并按 `tagSupport` 保留标签；旧式 `deprecated` 字段独立保留。终态结果与 `partialResultToken` 关联的数组分片使用同一适配规则，工作进度对象保持独立。终态响应、本地拒绝和连接关闭都会释放 ID/token 关联。
 
 ```json
 {
@@ -467,7 +475,7 @@ Agent 修改 POM、Gradle 或 JPS 构建配置后，显式调用现有 `intellij
 
 ### 7. Worktree 索引分叉实测与默认策略
 
-原生 `initializationOptions.fromWorkspace` 决定索引来源。仅当当前目录属于 linked worktree，且主工作区已有就绪账本和路径归属匹配的初始化记录时，`applyWorkspaceOptions` 自动填写记录中的原始 `rootUri`；来源不确定则冷启动。显式 `fromWorkspace`（含 `null` 禁用）优先，插件不改写 URI、不复制内部 RocksDB 文件。
+原生 `initializationOptions.fromWorkspace` 决定索引来源。仅当当前目录属于 linked worktree，且主工作区已有就绪账本和路径归属匹配的初始化记录时，`applyWorkspaceOptions` 自动填写记录中的原始 `rootUri`；来源不确定则冷启动。显式 `fromWorkspace`（含 `null` 禁用）优先；此选项始终透传源工作区的原始 URI，不复制内部 RocksDB 文件。
 
 在隔离 JPS Git 工程上，主工作区、冷 worktree、新热 worktree 和已有热 worktree 均完成真实符号查询；分支新增方法可见，导航位置指向对应 worktree。透传原始源 URI 后，日志出现 `Forking the workspace database from ...`；再次连接已有目标索引没有再次分叉。
 

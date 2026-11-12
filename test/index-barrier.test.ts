@@ -231,7 +231,7 @@ test('a failed import rejects waiting and future queries, even if a ready signal
   h.barrier.dispose();
 });
 
-test('document changes invalidate stale positions without cancelling unrelated document queries', () => {
+test('document changes and closes preserve queued queries until readiness or client cancellation', () => {
   const h = harness();
   h.client(query(3, 'file:///project/A.java'));
   h.client(query(4, 'file:///project/B.java'));
@@ -241,17 +241,21 @@ test('document changes invalidate stale positions without cancelling unrelated d
     method: 'textDocument/didChange',
     params: { textDocument: { uri: 'file:///project/A.java', version: 2 }, contentChanges: [] },
   });
+  h.client({
+    jsonrpc: '2.0',
+    method: 'textDocument/didClose',
+    params: { textDocument: { uri: 'file:///project/B.java' } },
+  });
+  assert.equal(h.downstream.length, 0);
+  h.client({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id: 3 } });
   assert.deepEqual(
-    h.downstream.filter((m) => m.error).map((m) => [m.id, m.error?.code]),
-    [
-      [3, -32801],
-      [5, -32801],
-    ],
+    h.downstream.map((m) => [m.id, m.error?.code]),
+    [[3, -32800]],
   );
   h.server(ready);
   assert.deepEqual(
     h.upstream.filter((m) => m.id !== undefined).map((m) => m.id),
-    [4],
+    [4, 5],
   );
   h.barrier.dispose();
 });

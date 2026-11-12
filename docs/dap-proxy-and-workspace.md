@@ -11,12 +11,13 @@
    - 守护进程所有权检查使用 PID、启动标识、可执行文件和 `--system-path` 参数；连接记录使用可取得的进程启动标识识别 PID 重用，无法确认身份时保守保留。
 
 3. **IntelliJ Native DAP 与 VS Code / OMP 契约对齐**：
-   - **路径转换**：IntelliJ DAP 原生响应与事件下发 `file://` URI（并在 Windows 下将盘符冒号编码为 `%3A`），OMP 与 VS Code 期望本地文件系统绝对路径。代理在输出层（`normalizeSourcePaths`）对所有 `source.path`、`sources` 和 `path` 执行递归扁平化转译。
+   - **初始化参数与位置转换**：代理保存客户端的 `pathFormat`、行列基数和客户端能力，原生连接统一使用本地路径与 1-based 行列。客户端断点、断点位置查询和跳转目标请求进入时转换；原生响应、事件和代理生成的断点在输出时按客户端约定转换。URI 客户端收到文件 URI，默认客户端收到本地路径；`adapterData` 和输出 `data` 等不透明数据保持原样。变量类型仅向声明支持的客户端返回。
    - **求值错误重映射**：IntelliJ DAP 在栈帧不可用或无挂起上下文时，`evaluate` 请求返回 HTTP/RPC 级别的 `success: true`，但将错误信息置于 `body.result`（如 `"Evaluation is supported for stack frames only"` 或 `"No active suspend context"`）。代理内置 `EVAL_ERROR_SENTINELS` 拦截器，重映射为 `success: false` 与结构化 `message`，防止前端误判为有效变量。
    - **反向请求拦截**：IntelliJ DAP 服务端可能向客户端主动下发 `type: "request"` 反向请求，代理统一拦截并即时回应 `success: false`（`"Reverse request not supported by proxy"`），防止反向握手悬挂超时。
+   - **能力协商**：初始响应只声明代理自身支持的配置完成和终止请求。后端能力通过标准 `capabilities` 事件更新，并在后续变更时继续筛选；取消、任意终止目标和挂起目标选项保持关闭。`cancel` 请求明确失败，不向原生发送错误编号。条件、命中条件和日志断点只在后端支持时执行，缓冲重放和直通路径均会明确报告不支持的特性。
 
 4. **握手生命周期阻塞与双模 Entry Breakpoint 拦截**：
-   - **Attach 时序对齐**：OMP 默认在收到 `attach` 响应后再发送 `configurationDone`，而底层 JDWP 握手需要先完成配置就绪才能确认连接。代理在 Attach 流程内部主动将 `clientConfigurationDone` 置为 `true`，收到服务端 `initialized` 事件后立即下发 `configurationDone`，打破握手死锁。
+   - **Attach 时序对齐**：OMP 默认在收到 `attach` 响应后再发送 `configurationDone`，而底层 JDWP 握手需要先完成配置就绪才能确认连接。代理在 Attach 流程内部主动将 `clientConfigurationDone` 置为 `true`；仅当后端广告支持且完成 `initialized`、缓冲重放和启动发送后，才下发原生 `configurationDone`，打破握手死锁。
    - **Main 运行行断点**：对于普通主类启动（`stopOnEntry: true` 且无客户端显式断点），代理结合 LSP 符号与源码 AST 正则（`findMainMethodLine`）自动解析 `main` 方法首行，注入临时行断点。
    - **Test 运行器函数断点**：对于测试运行（`isTestLaunch: true`），测试通常由包装类拉起，行断点无法精确定位。代理向原生调试器注册 `${mainClass}.main` 函数断点（`setFunctionBreakpoints`），标记所有权（`entryFunctionBreakpointOwned = true`）；当收到首次 `stopped` 事件后，立即自动向服务端发送空断点列表注销该入口断点，避免测试框架后续执行其他方法时被意外反复拦截。
 
@@ -27,7 +28,7 @@
 
 6. **轻量 DAP 仿真与真实工程集成测试准则**：
    - **轻量仿真**：构建基于 Node.js 原生 TCP 的伪 LSP 与伪 DAP 双服务器（`createDapTestHarness`），实现毫秒级端到端握手、断点命中、堆栈遍历与时序竞争验证，摆脱外部商业版许可证依赖，全套测试秒级跑通。
-   - **真实测试安全准则**：针对真实工程的集成测试必须遵循：源码文件只读与 SHA-256 基线核验、沙箱隔离目录运行、Gradle 缓存共享与离线 properties 注入、进程树严格注册与退出清理校验，严禁全局进程强杀。
+   - **真实测试安全准则**：针对真实工程的集成测试必须遵循：源码文件只读与 SHA-256 基线核验、沙箱隔离目录运行、Gradle 缓存共享与离线 properties 注入、进程树严格注册与退出清理校验，严禁全局进程强杀。Windows 下仅对已验证归属的沙箱 ILS 服务连同导入后代终止，避免迟到的 Gradle daemon 锁住待删缓存；代理强杀仍只结束代理进程，保留 EOF 回收与兄弟会话隔离的验收语义。
 
 ---
 
@@ -425,9 +426,9 @@ graph TD
 
 | DAP 指令                   | 处理模式   | 行为描述与契约                                                                                                                                                                                                          |
 | -------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `initialize`               | 本地应答   | 立即向客户端返回能力：`supportsConfigurationDoneRequest: true`、`supportsConditionalBreakpoints: true`、`supportsDelayedStackTraceLoading: true` 等。                                                                   |
-| `setBreakpoints`           | 缓冲/直通  | 后端未就绪时推入 `bufferedBreakpoints` 暂存，返回 `verified: false`；后端就绪后调用 `replayBreakpoints` 向原生调试器全量重放并向前端发送 `breakpoint` 变更事件。                                                        |
-| `configurationDone`        | 时序阻塞   | 客户端下发后，代理记录 `clientConfigurationDone = true`；仅当满足 `backendInitialized && nativeInitializedEvent && startupSent && clientConfigurationDone` 四重条件时，才调用 `flushConfigurationDone` 转发至原生服务。 |
+| `initialize`               | 本地应答   | 保存客户端约定并立即返回代理能力，避免等待 launch/attach 才建立的原生连接；后端能力经筛选后通过标准事件补齐，不预先声明条件断点或延迟堆栈能力。 |
+| `setBreakpoints`           | 缓冲/直通  | 缓冲请求按路径或 `sourceReference` 区分，兼容旧式 `lines`；立即返回带代理 ID 的未验证断点。重放后沿用该 ID，并映射后续原生断点事件与 `stopped.hitBreakpointIds`；重放期间早到的断点事件在关联建立后再发送。 |
+| `configurationDone`        | 时序阻塞   | 记录客户端配置完成；仅当后端支持且满足 `backendInitialized && nativeInitializedEvent && startupSent && clientConfigurationDone` 时，才向原生转发一次。 |
 | `evaluate`                 | 哨兵转换   | 检查 `body.result`，若命中 `EVAL_ERROR_SENTINELS`，强转为 `success: false` 并赋予错误文本。                                                                                                                             |
 | `launch`                   | 构建与执行 | 1. 触发 `textDocument/didOpen` 注册源码；<br>2. 识别主类与模块构建规约（Gradle 或 JPS）；<br>3. 建立标记 `-Domp.intellij.run.id=<UUID>`；<br>4. 挂载入口断点；<br>5. 触发原生 `launch`。                                |
 | `attach`                   | JDWP 挂载  | 1. 校验端口 `1–65535` 与主机名；<br>2. 预置 `clientConfigurationDone = true`；<br>3. 触发原生 `attach`；<br>4. 循环调用 `intellij/threadDump` 验证 JVM 真正进入会话上下文。                                             |
