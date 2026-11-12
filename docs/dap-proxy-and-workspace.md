@@ -463,54 +463,11 @@ graph TD
 
 ## 最佳实践与操作指引
 
-### 1. 轻量 DAP 测试仿真搭建（`createDapTestHarness`）
+### 1. 分层与定向验证
 
-编写单元测试时，无需依赖外部 IntelliJ 安装包或商业授权，使用轻量测试脚手架可在普通 Node.js 环境下毫秒级验证 DAP 交互：
+`npm test` 覆盖 Node 协议、组件与资产契约，独立于真实 ILS、JDK 和设备。`createDapTestHarness` 使用真实本地 TCP 传输模拟后端响应，适合验证请求关联、能力协商、取消、错误及关闭时序；它不证明原生插件可见性或真实 JVM/ART 行为。
 
-```ts
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { createDapTestHarness } from './test/dap-fixture.js';
-
-test('verify breakpoint setting and evaluation', async (t) => {
-  const harness = await createDapTestHarness(t, {
-    defaultMainClass: 'com.example.App',
-    onDapRequest(req) {
-      if (req.command === 'evaluate') {
-        // 模拟特定求值结果
-        harness.respond(req, { result: '42', type: 'int', variablesReference: 0 });
-        return true;
-      }
-      return undefined;
-    },
-  });
-
-  // 1. 初始化握手
-  await harness.request('initialize', { clientID: 'unit-test' });
-
-  // 2. 预设断点
-  await harness.request('setBreakpoints', {
-    source: { path: 'F:/source/App.java' },
-    breakpoints: [{ line: 10 }],
-  });
-
-  // 3. 启动 Launch
-  await harness.request('launch', {
-    file: 'F:/source/App.java',
-    noDebug: false,
-  });
-
-  // 4. 模拟断点命中并求值
-  harness.emit('stopped', { reason: 'breakpoint', threadId: 1 });
-  const evalResp = await harness.request('evaluate', { expression: 'x', frameId: 1 });
-  assert.equal(evalResp.success, true);
-  assert.equal((evalResp.body as any).result, '42');
-
-  // 5. 退出
-  await harness.request('disconnect');
-  assert.equal(await harness.closed, 0);
-});
-```
+真实验收分为 Android attach、XML/Lint、工程模型与稳定性四个入口。各定向入口统一编译测试并暂存当前 JVM 资产，保留 Node 名称过滤；不省略前置条件、不提高超时，也不扩大设备并发。完整 `test:integration` 仍运行全部文件，`test:acceptance` 在运行 Node 资产契约前先暂存/测试 JVM，再复用本次已准备输出进入完整真实验收。命令与前置条件见 [开发验证说明](../AGENTS.md#verification)。
 
 ---
 
@@ -524,7 +481,7 @@ test('verify breakpoint setting and evaluation', async (t) => {
    - 使用 `copyWorkspaceFixture` 将工程拷贝至沙箱临时目录（`sandboxDir/workspaces/...`）中操作；
    - 测试结束清理后重新核对原工程哈希，确保原工程零污染。
 2. **Gradle 缓存共享与离线注入**：
-   - 为避免每个沙箱重新下载几百兆 Gradle 运行时与依赖库，使用 `copyCachedWrapper` 发现宿主机现有缓存并链接至 `sandbox.gradleUserHome`；
+   - 为避免每个沙箱重新下载 Gradle 与依赖，`copyCachedWrapper` 和 `copyCachedDependencies` 将现有缓存复制到私有 `sandbox.gradleUserHome`；daemon、锁和可变状态保持隔离，不直接共享可写缓存。
    - 在测试工程的 `gradle.properties` 中显式注入禁止自动探测与下载，强制绑定目标 JDK：
 
      ```properties
@@ -539,6 +496,11 @@ test('verify breakpoint setting and evaluation', async (t) => {
    - 清理阶段调用 `killProcessSafely` 前校验 PID 归属（必须包含沙箱专有 `--system-path`），杜绝越权杀进程；
    - 显式调用 `GradleWrapperMain --stop` 关闭对应沙箱的 Gradle Daemon；
    - 验证无残留锁文件（`omp-start.lock`）与活动租约。
+   - 单个资源关闭失败后继续处理其他资源，最后汇总错误；环境变量始终在 `finally` 恢复。关闭或归属校验失败时保留沙箱与日志，并在错误中返回路径。
+4. **运行级 APK 与阶段证据**：
+   - Android attach 首次成功构建的 APK 原子发布到本次运行拥有的临时目录；目录独立于任何场景沙箱，后续场景可在生产者沙箱删除后复用 APK。
+   - 工程复制排除旧 `build` 和 `.gradle`，构建失败不发布产物，运行结束销毁缓存。ILS、工程、索引、Gradle home 和设备应用状态仍按场景隔离。
+   - 输出缓存准备、LSP/DAP 握手与启动、APK 构建/命中、资源停止和删除阶段的开始、结果及耗时，区分业务等待与清理阻塞；性能结论以对应阶段实测为依据。
 
 ---
 

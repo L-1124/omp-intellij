@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { terminateMarkedProcess } from '../../src/debug/run-core.js';
 import { saveProjectConfiguration } from '../../src/project/configuration.js';
@@ -18,6 +18,24 @@ import { sanitizeString } from '../../src/shared/runtime-status.js';
 export { readServerEula };
 
 const initialGradleUserHome = process.env.GRADLE_USER_HOME;
+
+async function integrationPhase<T>(
+  sandboxDir: string,
+  phase: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const prefix = `[integration ${basename(sandboxDir)}] ${phase}`;
+  const started = performance.now();
+  console.error(`${prefix}: start`);
+  let outcome = 'failed';
+  try {
+    const result = await operation();
+    outcome = 'ok';
+    return result;
+  } finally {
+    console.error(`${prefix}: ${outcome} ${Math.round(performance.now() - started)}ms`);
+  }
+}
 
 export interface IntegrationPrerequisites {
   serverExecutable: string;
@@ -254,70 +272,129 @@ export async function createIntegrationSandbox(
   };
 
   const cleanup = async () => {
-    for (const child of Array.from(ownedProcesses)) {
-      if (child.exitCode !== null || child.signalCode !== null) continue;
-      if (child.stdin?.writable) child.stdin.end();
-      else child.kill();
-      await waitForProcessExit(child);
-    }
-    for (const marker of ownedMarkers) {
-      await terminateMarkedProcess(
-        marker,
-        join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
-      );
-    }
-    for (const socket of ownedSockets) socket.destroy();
-    for (const server of Array.from(ownedServers)) {
-      if (server.listening) {
-        const { promise, resolve, reject } = Promise.withResolvers<void>();
-        server.close((error) => (error ? reject(error) : resolve()));
-        await promise;
+    const errors: Error[] = [];
+    const attempt = async (phase: string, operation: () => Promise<void>) => {
+      try {
+        await integrationPhase(sandboxDir, phase, operation);
+      } catch (error: unknown) {
+        errors.push(
+          new Error(
+            `${phase}: ${sanitizeString(error instanceof Error ? error.message : String(error))}`,
+          ),
+        );
       }
-    }
-    const serverOwnerFile = join(systemPath, 'omp-server.json');
-    if (existsSync(serverOwnerFile)) {
-      const owner = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid: number };
-      if (isProcessAlive(owner.pid)) {
-        killProcessSafely(owner.pid, sandbox);
-        const deadline = Date.now() + 5000;
-        while (isProcessAlive(owner.pid) && Date.now() < deadline) {
-          await sleep(100);
+    };
+    try {
+      for (const child of Array.from(ownedProcesses)) {
+        if (child.exitCode !== null || child.signalCode !== null) continue;
+        await attempt(`process-${child.pid}`, async () => {
+          try {
+            if (child.stdin?.writable) child.stdin.end();
+            else child.kill();
+            await waitForProcessExit(child);
+          } catch (error: unknown) {
+            if (child.pid && isProcessAlive(child.pid)) {
+              killProcessSafely(child.pid, sandbox);
+              await waitForProcessExit(child);
+            }
+            throw error;
+          }
+        });
+      }
+      for (const marker of ownedMarkers) {
+        await attempt('marked-jvm', async () => {
+          await terminateMarkedProcess(
+            marker,
+            join(
+              prerequisites.jdk21Path,
+              'bin',
+              process.platform === 'win32' ? 'java.exe' : 'java',
+            ),
+          );
+        });
+      }
+      for (const socket of ownedSockets) {
+        await attempt('socket', async () => {
+          socket.destroy();
+        });
+      }
+      for (const server of Array.from(ownedServers)) {
+        if (!server.listening) continue;
+        await attempt('server', async () => {
+          const { promise, resolve, reject } = Promise.withResolvers<void>();
+          const timer = setTimeout(
+            () => reject(new Error('Owned server did not close within 15000ms')),
+            15000,
+          );
+          try {
+            server.close((error) => {
+              if (error) reject(error);
+              else resolve();
+            });
+            await promise;
+          } finally {
+            clearTimeout(timer);
+          }
+        });
+      }
+      await attempt('ils-stop', async () => {
+        const serverOwnerFile = join(systemPath, 'omp-server.json');
+        if (!existsSync(serverOwnerFile)) return;
+        const owner = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid: number };
+        if (isProcessAlive(owner.pid)) {
+          killProcessSafely(owner.pid, sandbox);
+          const deadline = Date.now() + 5000;
+          while (isProcessAlive(owner.pid) && Date.now() < deadline) await sleep(100);
+          if (isProcessAlive(owner.pid))
+            throw new Error(`Sandbox server ${owner.pid} survived termination`);
         }
-        if (isProcessAlive(owner.pid))
-          throw new Error(`Sandbox server ${owner.pid} survived termination`);
+      });
+      await attempt('gradle-stop', async () => {
+        if (!existsSync(join(gradleUserHome, 'daemon'))) return;
+        const stopped = spawnSync(
+          join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
+          [
+            '-cp',
+            resolve('test-fixtures/concurrency/jdk21/gradle/wrapper/gradle-wrapper.jar'),
+            'org.gradle.wrapper.GradleWrapperMain',
+            '--stop',
+          ],
+          {
+            cwd: resolve('test-fixtures/concurrency/jdk21'),
+            env: { ...env, GRADLE_USER_HOME: gradleUserHome },
+            encoding: 'utf8',
+            timeout: 30000,
+            windowsHide: true,
+          },
+        );
+        if (stopped.status !== 0) {
+          throw new Error(
+            `Sandbox Gradle shutdown failed: ${sanitizeString(stopped.stderr || '')}`,
+          );
+        }
+      });
+      await attempt('ownership', async () => {
+        if ((await getActiveLeases(systemPath)).length)
+          throw new Error('Sandbox has active leases after cleanup');
+        if (existsSync(join(systemPath, 'omp-start.lock')))
+          throw new Error('Sandbox lifecycle lock remains');
+      });
+      if (errors.length === 0) {
+        await attempt('remove-sandbox', () =>
+          rm(sandboxDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }),
+        );
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
       }
     }
-    if (existsSync(join(gradleUserHome, 'daemon'))) {
-      const stopped = spawnSync(
-        join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
-        [
-          '-cp',
-          resolve('test-fixtures/concurrency/jdk21/gradle/wrapper/gradle-wrapper.jar'),
-          'org.gradle.wrapper.GradleWrapperMain',
-          '--stop',
-        ],
-        {
-          cwd: resolve('test-fixtures/concurrency/jdk21'),
-          env: {
-            ...env,
-            GRADLE_USER_HOME: gradleUserHome,
-          },
-          encoding: 'utf8',
-          timeout: 30000,
-          windowsHide: true,
-        },
+    if (errors.length) {
+      throw new AggregateError(
+        errors,
+        `Sandbox cleanup failed; artifacts retained at ${sandboxDir}`,
       );
-      if (stopped.status !== 0)
-        throw new Error(`Sandbox Gradle shutdown failed: ${sanitizeString(stopped.stderr || '')}`);
-    }
-    if ((await getActiveLeases(systemPath)).length)
-      throw new Error('Sandbox has active leases after cleanup');
-    if (existsSync(join(systemPath, 'omp-start.lock')))
-      throw new Error('Sandbox lifecycle lock remains');
-    await rm(sandboxDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
-    for (const [key, val] of Object.entries(previousEnvironment)) {
-      if (val === undefined) delete process.env[key];
-      else process.env[key] = val;
     }
   };
 
@@ -341,7 +418,16 @@ export async function createIntegrationSandbox(
     trackServer,
     cleanup,
   };
-  await copyCachedWrapper(sandbox);
+  try {
+    await integrationPhase(sandboxDir, 'wrapper-cache', () => copyCachedWrapper(sandbox));
+  } catch (error: unknown) {
+    try {
+      await cleanup();
+    } catch (cleanupError: unknown) {
+      throw new AggregateError([error, cleanupError], `Sandbox setup failed at ${sandboxDir}`);
+    }
+    throw error;
+  }
   return sandbox;
 }
 
@@ -442,7 +528,9 @@ export async function copyCachedDependencies(sandbox: IntegrationSandbox): Promi
       resolve(dir) !== resolve(sandbox.gradleUserHome) && existsSync(join(dir, relativePath)),
   );
   if (cache) {
-    await copyGradleCache(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath));
+    await integrationPhase(sandbox.sandboxDir, 'dependency-cache', () =>
+      copyGradleCache(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath)),
+    );
   }
 }
 
@@ -663,13 +751,19 @@ export function createLspClientDriver(
     }
     const id = nextId++;
     child.stdin?.write(encode({ jsonrpc: '2.0', id, method, params: finalParams }));
-    const resp = await waitFor((message) => message.id === id && !message.method, timeoutMs);
-    if (resp.error) {
-      throw new Error(
-        `RPC Error [${resp.error.code}]: ${sanitizeString(resp.error.message || '')}`,
-      );
-    }
-    return resp.result;
+    const response = waitFor((message) => message.id === id && !message.method, timeoutMs).then(
+      (resp) => {
+        if (resp.error) {
+          throw new Error(
+            `RPC Error [${resp.error.code}]: ${sanitizeString(resp.error.message || '')}`,
+          );
+        }
+        return resp.result;
+      },
+    );
+    return method === 'initialize'
+      ? integrationPhase(sandbox.sandboxDir, 'lsp-initialize', () => response)
+      : response;
   };
 
   const waitForExit = (timeoutMs = 15000) => waitForProcessExit(child, timeoutMs);
@@ -784,11 +878,17 @@ export function createDapClientDriver(
     timeoutMs = command === 'launch' ? 120000 : 30000,
   ): Promise<DapMessage> => {
     const s = send(command, args);
-    const resp = await waitFor((m) => m.type === 'response' && m.request_seq === s, timeoutMs);
-    if (resp.success === false) {
-      throw new Error(`DAP command '${command}' failed: ${resp.message || 'unknown error'}`);
-    }
-    return resp;
+    const response = waitFor((m) => m.type === 'response' && m.request_seq === s, timeoutMs).then(
+      (resp) => {
+        if (resp.success === false) {
+          throw new Error(`DAP command '${command}' failed: ${resp.message || 'unknown error'}`);
+        }
+        return resp;
+      },
+    );
+    return command === 'initialize' || command === 'launch' || command === 'attach'
+      ? integrationPhase(sandbox.sandboxDir, `dap-${command}`, () => response)
+      : response;
   };
 
   const evaluate = async (

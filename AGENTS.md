@@ -39,8 +39,12 @@ npm run build:jvm
 | `npm test`                 | Rebuild TypeScript/test output and run Node unit/component and asset-contract tests; independent of ILS/JDK/device availability |
 | `npm run test:jvm`         | Run Kotlin/JVM tests against the pinned ILS SDK                                                                                 |
 | `npm run build:jvm`        | Stage the implementation, descriptor, upstream JARs, hashes and manifest                                                        |
-| `npm run test:integration` | Run strict real ILS/device integration tests sequentially by file                                                               |
-| `npm run test:acceptance`  | Build/stage JVM assets, run JVM and Node tests, then real integration                                                           |
+| `npm run test:integration` | Compile tests, stage current JVM assets, then run all real suites sequentially by file |
+| `npm run test:integration:android` | Prepare once and run only the real device/AVD attach suite |
+| `npm run test:integration:xml` | Prepare once and run only Android XML/resource/Lint integration |
+| `npm run test:integration:engineering` | Prepare once and run only module models, reload and Gradle debug integration |
+| `npm run test:integration:stability` | Prepare once and run only JVM concurrency, cancellation and recovery integration |
+| `npm run test:acceptance` | Stage/test JVM in one Gradle invocation, rebuild/run Node tests, then run all real suites without repeating preparation |
 | `npm run typecheck`        | Check production and test TypeScript without emitting files                                                                     |
 | `npm run check`            | Check Biome lint and formatting rules                                                                                           |
 
@@ -57,6 +61,16 @@ Focused JVM tests use standard Gradle test filtering:
 node scripts/run-gradle.mjs test --tests org.jetbrains.android.debug.AndroidDebugHandlesTest --no-daemon
 ```
 
+Choose the narrowest real suite and pass Node filters after `--`:
+
+```sh
+npm run test:integration:stability -- --test-name-pattern='^crash recovery:'
+```
+
+`test:integration` remains the complete real gate. The internal `--no-prepare` runner flag is only for chaining from an already staged/compiled acceptance run; directed entries prepare their own current outputs by default. Filters do not relax prerequisite checks, serial execution or the 180-second test timeout.
+
+Missing prerequisite variables fail before compilation/staging. The selected real suite still validates paths, the accepted EULA hash and device availability; the entrypoint never invents acceptance or skips unavailable coverage.
+
 Real integration requires these explicit prerequisites:
 
 - `OMP_INTELLIJ_TEST_SERVER`: pinned ILS executable.
@@ -69,6 +83,10 @@ Real integration requires these explicit prerequisites:
 Explicit integration runs must fail when prerequisites are missing or the selected device is offline; a skipped suite is incomplete acceptance. Stage current JVM assets before validating the assembled system. Changes to plugin metadata/classloading require real ILS verification; JVM test classpaths do not reproduce host plugin visibility. Android debugger changes require actual device/AVD attach coverage, not only mocked DAP responses.
 
 Keep every integration client's native `indexDir` under its sandbox, including CLI/DAP-created sessions. Use the existing persisted raw initialization options rather than test-only production environment variables. Cleanup may stop only fixture-owned processes/daemons and the selected fixture application; never kill unrelated Java, Gradle or ADB processes. Do not restart or reimport a user's shared project to run tests.
+
+Android attach builds its APK once into a run-owned artifact directory outside all sandboxes. Later scenarios copy that artifact after the producer sandbox is removed; generated `build` and `.gradle` inputs are excluded from source copies. Failed builds are never captured, and the run-level hook disposes the artifact directory.
+
+Fixtures report cache preparation, LSP/DAP initialization/startup and each cleanup stage with elapsed time. Cleanup continues across resource failures, restores the caller's environment in `finally`, and retains the sandbox with an aggregate error when shutdown or ownership checks fail. Use the reported sandbox path for diagnosis rather than globally stopping processes or clearing caches.
 
 Run the narrowest meaningful check while fixing a defect, then the relevant complete gate after integration. Permanent tests should catch observable behavior, boundaries, errors, cancellation or ownership transitions. Avoid tests that merely pin source text, imports, forwarding or mock echoes. Report unavailable coverage and unrelated baseline failures explicitly; do not weaken assertions, add retries or increase timeouts to hide failures.
 

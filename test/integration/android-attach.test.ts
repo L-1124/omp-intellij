@@ -24,6 +24,7 @@ import {
   seedSandboxProjectConfig,
   verifyPrerequisites,
 } from './fixture.js';
+import { createRunArtifactStore } from './run-artifact.js';
 
 const TEST_PACKAGE = 'com.example.ompattachfixture';
 const TEST_ACTIVITY = 'com.example.ompattachfixture/.MainActivity';
@@ -309,7 +310,31 @@ function findSourceLine(filePath: string, needle: string): number {
   throw new Error(`Needle "${needle}" not found in source file: ${filePath}`);
 }
 
-let cachedBuiltApkPath: string | null = null;
+const APK_ARTIFACT = 'app-debug.apk';
+// Each scenario deletes its sandbox; the APK belongs to the run.
+const artifactStore = await createRunArtifactStore('omp-intellij-android-attach-apk-');
+const realBuilds: { sandboxDir: string; status: number | null }[] = [];
+
+test.after(async () => {
+  try {
+    const successful = realBuilds.filter((build) => build.status === 0).length;
+    console.error(
+      `[integration android-attach] apk-builds: ${successful}, attempts: ${realBuilds.length}`,
+    );
+    const builtIn = realBuilds.map((build) => build.sandboxDir).join(', ');
+    assert.ok(
+      successful <= 1,
+      `APK must be built at most once per suite, saw ${successful} builds in: ${builtIn}`,
+    );
+  } finally {
+    await artifactStore.dispose();
+    assert.equal(
+      existsSync(artifactStore.dir),
+      false,
+      'Run artifact directory must be removed after the suite',
+    );
+  }
+});
 
 async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
   targetDir: string;
@@ -318,7 +343,13 @@ async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
 }> {
   const sourceDir = resolve('test-fixtures', 'android-attach');
   const targetDir = join(sandbox.workspacesDir, 'android-attach');
-  await cp(sourceDir, targetDir, { recursive: true });
+  const generated = new Set([
+    join(sourceDir, 'app', 'build'),
+    join(sourceDir, 'build'),
+    join(sourceDir, '.gradle'),
+  ]);
+  // Source fixtures may carry stale APKs and Gradle state from local builds.
+  await cp(sourceDir, targetDir, { recursive: true, filter: (source) => !generated.has(source) });
 
   const androidSdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
   if (!androidSdk || !existsSync(androidSdk)) {
@@ -379,9 +410,8 @@ async function ensureApkBuilt(
   sandbox: IntegrationSandbox,
   apkPath: string,
 ): Promise<string> {
-  if (cachedBuiltApkPath && existsSync(cachedBuiltApkPath)) {
-    await mkdir(join(targetDir, 'app', 'build', 'outputs', 'apk', 'debug'), { recursive: true });
-    await cp(cachedBuiltApkPath, apkPath);
+  if (await artifactStore.materialize(APK_ARTIFACT, apkPath)) {
+    console.error(`[integration ${sandbox.sandboxDir}] apk-cache: hit`);
     return apkPath;
   }
 
@@ -391,6 +421,8 @@ async function ensureApkBuilt(
     process.platform === 'win32' ? 'java.exe' : 'java',
   );
   const wrapperJar = join(targetDir, 'gradle', 'wrapper', 'gradle-wrapper.jar');
+  const started = performance.now();
+  console.error(`[integration ${sandbox.sandboxDir}] apk-build: start`);
   const gradleResult = spawnSync(
     javaExe,
     [
@@ -414,13 +446,17 @@ async function ensureApkBuilt(
     },
   );
 
+  realBuilds.push({ sandboxDir: sandbox.sandboxDir, status: gradleResult.status });
+  console.error(
+    `[integration ${sandbox.sandboxDir}] apk-build: ${gradleResult.status === 0 ? 'ok' : 'failed'} ${Math.round(performance.now() - started)}ms`,
+  );
   assert.equal(
     gradleResult.status,
     0,
     `Gradle build failed: ${gradleResult.error ?? ''}\n${gradleResult.stdout}\n${gradleResult.stderr}`,
   );
   assert.ok(existsSync(apkPath), `Built APK not found at ${apkPath}`);
-  cachedBuiltApkPath = apkPath;
+  await artifactStore.capture(APK_ARTIFACT, apkPath);
   return apkPath;
 }
 
