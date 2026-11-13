@@ -188,6 +188,39 @@ test('extension rejects companion sha256 mismatch for nested module', async (t) 
   assert.equal(result.pluginPath, undefined);
 });
 
+test('extension rejects missing nested dap implementation module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.dap.jar'));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
+
+test('extension rejects tampered nested dap implementation module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await writeFile(
+    join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.dap.jar'),
+    'tampered dap bytecode',
+  );
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
+
+test('extension rejects missing companion sha256 for nested dap module', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(
+    join(extension, 'lib', 'modules', 'language-server.api.features.impl.android.dap.jar.sha256'),
+  );
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
+
+test('extension rejects missing builder-model upstream library', async (t) => {
+  const { extension, executable } = await extensionFixture(t);
+  await rm(join(extension, 'lib', 'builder-model-9.4.1.jar'));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
+
 test('extension rejects missing descriptor jar', async (t) => {
   const { extension, executable } = await extensionFixture(t);
   await rm(join(extension, 'lib', 'language-server-plugins-android-lsp.jar'));
@@ -245,6 +278,36 @@ test('extension rejects flattened implementation module in lib', async (t) => {
   );
   if (asset) {
     asset.path = 'lib/language-server.api.features.impl.android.jar';
+  }
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
+
+test('extension rejects flattened dap implementation module in lib', async (t) => {
+  const { extension, executable, manifestPath } = await extensionFixture(t);
+  const nestedJar = join(
+    extension,
+    'lib',
+    'modules',
+    'language-server.api.features.impl.android.dap.jar',
+  );
+  const flattenedJar = join(extension, 'lib', 'language-server.api.features.impl.android.dap.jar');
+  const nestedSha = `${nestedJar}.sha256`;
+  const flattenedSha = `${flattenedJar}.sha256`;
+
+  await cp(nestedJar, flattenedJar);
+  await cp(nestedSha, flattenedSha);
+  await rm(nestedJar);
+  await rm(nestedSha);
+
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const asset = manifest.assets.find(
+    (a: { name: string }) => a.name === 'language-server.api.features.impl.android.dap.jar',
+  );
+  if (asset) {
+    asset.path = 'lib/language-server.api.features.impl.android.dap.jar';
   }
   await writeFile(manifestPath, JSON.stringify(manifest));
 
@@ -521,6 +584,22 @@ test('extension rejects substituted upstream dependency even with a self-consist
   const { extension, executable, manifestPath } = await extensionFixture(t);
   const name = 'lint-api-32.4.1.jar';
   const bytes = Buffer.from('substituted dependency');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  await writeFile(join(extension, 'lib', name), bytes);
+  await writeFile(join(extension, 'lib', `${name}.sha256`), `${sha256} *${name}\n`);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const asset = manifest.assets.find((item: { name: string }) => item.name === name);
+  asset.sha256 = sha256;
+  asset.size = bytes.length;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const result = await resolveAndroidExtension(executable);
+  assert.equal(result.pluginPath, undefined);
+});
+
+test('extension rejects substituted builder-model dependency even with a self-consistent manifest', async (t) => {
+  const { extension, executable, manifestPath } = await extensionFixture(t);
+  const name = 'builder-model-9.4.1.jar';
+  const bytes = Buffer.from('substituted builder-model');
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   await writeFile(join(extension, 'lib', name), bytes);
   await writeFile(join(extension, 'lib', `${name}.sha256`), `${sha256} *${name}\n`);

@@ -12,14 +12,20 @@
     {
       "name": "language-server-plugins-android-lsp.jar",
       "path": "lib/language-server-plugins-android-lsp.jar",
-      "sha256": "613c8087b75608a6d9270aa3486e5bbf1bd9a5917f1eefde7005053a387d949e",
-      "size": 1074
+      "sha256": "1ea406b7c4076ee32eb192f32b1a2ec6ea1d94b1e4e78fa5053bacbf9c1ddcca",
+      "size": 1142
+    },
+    {
+      "name": "language-server.api.features.impl.android.dap.jar",
+      "path": "lib/modules/language-server.api.features.impl.android.dap.jar",
+      "sha256": "daca40cfca897fb9f44397aa35d8490894568a325c0ee22637b82ca70da55211",
+      "size": 1406064
     },
     {
       "name": "language-server.api.features.impl.android.jar",
       "path": "lib/modules/language-server.api.features.impl.android.jar",
-      "sha256": "4d49b97475fc62223886d05ac0fb02da4b86aa420288955d7307e139bf2318e0",
-      "size": 1248922
+      "sha256": "7c816b7c7f44369e808ca5602925e7f2154e4693423dd4c0275a312bab2fa001",
+      "size": 1277455
     },
     {
       "name": "adblib-9.4.1.jar",
@@ -32,6 +38,12 @@
       "path": "lib/adblib-tools-9.4.1.jar",
       "sha256": "2ff23e54a6989a2417aee3da1b1ff6d58ed7b6abce38bfdde6ba567fe14b918c",
       "size": 2009058
+    },
+    {
+      "name": "builder-model-9.4.1.jar",
+      "path": "lib/builder-model-9.4.1.jar",
+      "sha256": "6fcae3cf38fa06c4b2d5eabe5616c8e0f5c9da86512cb9b1efbb69b2f8019b60",
+      "size": 143245
     },
     {
       "name": "common-32.4.1.jar",
