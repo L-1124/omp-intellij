@@ -15,5 +15,6 @@
   </dependencies>
   <content namespace="jetbrains">
     <module name="language-server.api.features.impl.android" loading="required" />
+    <module name="language-server.api.features.impl.android.dap" />
   </content>
 </idea-plugin>

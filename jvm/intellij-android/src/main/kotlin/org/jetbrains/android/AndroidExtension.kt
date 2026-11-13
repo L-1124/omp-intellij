@@ -10,9 +10,8 @@ import com.intellij.xdebugger.settings.XDebuggerSettingsManager
 import com.jetbrains.ls.api.features.LanguageServerExtension
 import com.jetbrains.ls.api.features.language.LSConfigurationPiece
 import com.jetbrains.ls.api.features.language.LSLanguage
+import org.jetbrains.annotations.ApiStatus
 import org.jetbrains.android.compose.ComposeSuppressor
-import org.jetbrains.android.debug.AndroidDebugCommands
-import org.jetbrains.android.debug.JvmLaunchCommands
 import org.jetbrains.android.lint.AndroidLintProvider
 import org.jetbrains.android.navigation.AndroidCompiledResourceClassFinder
 import org.jetbrains.android.navigation.AndroidDefinitionProvider
@@ -22,6 +21,8 @@ import org.jetbrains.android.navigation.AndroidResourceNavigation
 import org.jetbrains.android.xml.AndroidDocumentSymbols
 
 class AndroidExtension : LanguageServerExtension {
+    @Suppress("UnstableApiUsage")
+    @get:ApiStatus.Internal
     override val configuration: LSConfigurationPiece
         get() {
             Logger.getInstance(AndroidExtension::class.java).info("OMP Android providers loaded for ILS 271.2085.0")
@@ -50,12 +51,10 @@ class AndroidExtension : LanguageServerExtension {
                     AndroidReferencesProvider(),
                     AndroidDefinitionProvider(),
                     ComposeSuppressor.Entry(),
-                    AndroidDebugCommands(),
                     AndroidResourceCommands(),
                     AndroidCompiledResourceClassFinder.Entry(),
                     AndroidResourceNavigation.Entry(),
-                    AndroidLintProvider(),
-                    JvmLaunchCommands()
+                    AndroidLintProvider()
                 ),
                 listOf(module.parent),
                 emptyList()

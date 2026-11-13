@@ -28,6 +28,40 @@ open class AndroidDebugHandles private constructor(
         CLOSED
     }
 
+    enum class ExecutionKind {
+        APPLICATION,
+        JDWP
+    }
+
+    data class DeploymentKey(val deviceId: String, val userId: Int, val packageName: String) {
+        init {
+            require(deviceId.isNotBlank()) { "deviceId must not be blank" }
+            require(userId >= 0) { "userId must be non-negative" }
+            require(packageName.isNotBlank()) { "packageName must not be blank" }
+        }
+    }
+
+    data class ProcessInstanceIdentity(
+        val pid: Int,
+        val userId: Int,
+        val uid: Int? = null,
+        val packageName: String,
+        val processName: String,
+        val startSeq: Long? = null,
+        val amsRecord: String? = null
+    ) {
+        fun matchesInstance(other: ProcessInstanceIdentity): Boolean {
+            if (pid != other.pid) return false
+            if (userId != other.userId) return false
+            if (packageName != other.packageName) return false
+            if (processName != other.processName) return false
+            if (uid != null && other.uid != null && uid != other.uid) return false
+            if (startSeq != null && other.startSeq != null && startSeq != other.startSeq) return false
+            if (amsRecord != null && other.amsRecord != null && amsRecord != other.amsRecord) return false
+            return true
+        }
+    }
+
     @JvmRecord
     data class TargetId(val deviceId: String, val pid: Int) {
         init {
@@ -46,6 +80,7 @@ open class AndroidDebugHandles private constructor(
         val childSession: AdbSession?
     ) {
         val targetId: TargetId = TargetId(deviceId, pid)
+        val kind: ExecutionKind = ExecutionKind.JDWP
 
         @Volatile
         var state: HandleState = HandleState.PREPARED
@@ -71,6 +106,30 @@ open class AndroidDebugHandles private constructor(
         @Volatile
         var closeFuture: CompletableFuture<Boolean> = CompletableFuture()
             internal set
+    }
+
+    class ApplicationHandle(
+        val cleanupKey: String,
+        val deploymentKey: DeploymentKey,
+        val identity: ProcessInstanceIdentity,
+        val jdwpCleanupKey: String?,
+        val port: Int?
+    ) {
+        val kind: ExecutionKind = ExecutionKind.APPLICATION
+
+        @Volatile
+        var state: HandleState = HandleState.CLAIMED
+            internal set
+
+        @Volatile
+        var ownerJob: Job? = null
+            internal set
+
+        @Volatile
+        internal var ownerDisposableHandle: DisposableHandle? = null
+
+        @Volatile
+        internal var onDisposeCleanup: (() -> Unit)? = null
     }
 
     @JvmRecord
@@ -99,6 +158,8 @@ open class AndroidDebugHandles private constructor(
     private val handlesByKey = HashMap<String, DebugHandle>()
     private val handlesByPort = HashMap<Int, DebugHandle>()
     private val activeTargets = HashMap<TargetId, Any>()
+    private val activeDeployments = HashMap<DeploymentKey, Any>()
+    private val appHandlesByKey = HashMap<String, ApplicationHandle>()
 
     private val expiredPortTombstones = object : LinkedHashMap<Int, Long>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Long>?): Boolean {
@@ -134,6 +195,105 @@ open class AndroidDebugHandles private constructor(
                 activeTargets.remove(targetId)
             }
         }
+    }
+
+    fun tryReserveDeployment(key: DeploymentKey): Boolean {
+        synchronized(lock) {
+            if (activeDeployments.containsKey(key)) {
+                return false
+            }
+            activeDeployments[key] = DEPLOYMENT_RESERVATION_PLACEHOLDER
+            return true
+        }
+    }
+
+    fun cancelDeploymentReservation(key: DeploymentKey) {
+        synchronized(lock) {
+            if (activeDeployments[key] === DEPLOYMENT_RESERVATION_PLACEHOLDER) {
+                activeDeployments.remove(key)
+            }
+        }
+    }
+
+    fun isDeploymentReserved(key: DeploymentKey): Boolean {
+        synchronized(lock) {
+            return activeDeployments.containsKey(key)
+        }
+    }
+
+    @JvmOverloads
+    fun recordApplication(
+        key: DeploymentKey,
+        identity: ProcessInstanceIdentity,
+        jdwpCleanupKey: String? = null,
+        port: Int? = null,
+        ownerJob: Job? = null,
+        onDisposeCleanup: (() -> Unit)? = null
+    ): ApplicationHandle {
+        val cleanupKey = UUID.randomUUID().toString()
+        synchronized(lock) {
+            val existing = activeDeployments[key]
+            if (existing != null && existing !== DEPLOYMENT_RESERVATION_PLACEHOLDER) {
+                throw AndroidDebugException(
+                    "target_busy",
+                    "Application target $key is already active"
+                )
+            }
+            if (ownerJob != null && (ownerJob.isCompleted || ownerJob.isCancelled)) {
+                if (existing === DEPLOYMENT_RESERVATION_PLACEHOLDER) {
+                    activeDeployments.remove(key)
+                }
+                throw AndroidDebugException(
+                    "lease_conflict",
+                    "Owner connection scope is already cancelled or closed"
+                )
+            }
+
+            val handle = ApplicationHandle(
+                cleanupKey = cleanupKey,
+                deploymentKey = key,
+                identity = identity,
+                jdwpCleanupKey = jdwpCleanupKey,
+                port = port
+            )
+            handle.ownerJob = ownerJob
+            handle.onDisposeCleanup = onDisposeCleanup
+            activeDeployments[key] = handle
+            appHandlesByKey[cleanupKey] = handle
+            return handle
+        }
+    }
+
+    fun getApplicationHandle(cleanupKey: String): ApplicationHandle? {
+        synchronized(lock) {
+            return appHandlesByKey[cleanupKey]
+        }
+    }
+
+    fun getActiveApplication(key: DeploymentKey): ApplicationHandle? {
+        synchronized(lock) {
+            return activeDeployments[key] as? ApplicationHandle
+        }
+    }
+
+    fun releaseApplication(cleanupKey: String): Boolean {
+        val handle: ApplicationHandle?
+        synchronized(lock) {
+            handle = appHandlesByKey.remove(cleanupKey) ?: return false
+            handle.state = HandleState.CLOSED
+            handle.onDisposeCleanup = null
+            handle.ownerDisposableHandle?.let {
+                try {
+                    it.dispose()
+                } catch (_: Throwable) {
+                }
+                handle.ownerDisposableHandle = null
+            }
+            if (activeDeployments[handle.deploymentKey] === handle) {
+                activeDeployments.remove(handle.deploymentKey)
+            }
+        }
+        return true
     }
 
     @JvmOverloads
@@ -317,19 +477,16 @@ open class AndroidDebugHandles private constructor(
             val childSession = handle.childSession
             if (childSession != null) {
                 childSession.close()
-                val scope = childSession.scope
-                if (scope != null) {
-                    val job = scope.coroutineContext.job
-                    if (!job.isCompleted) {
-                        val jobDone = CompletableFuture<Unit?>()
-                        val registration = job.invokeOnCompletion { _ ->
-                            jobDone.complete(null)
-                        }
-                        try {
-                            jobDone.get(1, TimeUnit.SECONDS)
-                        } finally {
-                            registration.dispose()
-                        }
+                val job = childSession.scope.coroutineContext.job
+                if (!job.isCompleted) {
+                    val jobDone = CompletableFuture<Unit?>()
+                    val registration = job.invokeOnCompletion { _ ->
+                        jobDone.complete(null)
+                    }
+                    try {
+                        jobDone.get(1, TimeUnit.SECONDS)
+                    } finally {
+                        registration.dispose()
                     }
                 }
             }
@@ -390,11 +547,35 @@ open class AndroidDebugHandles private constructor(
 
     fun closeAll() {
         val toClose = mutableListOf<CompletableFuture<Boolean>>()
+        val appDisposeCallbacks = mutableListOf<() -> Unit>()
         synchronized(lock) {
+            for (appHandle in appHandlesByKey.values) {
+                if (appHandle.state != HandleState.CLOSED) {
+                    appHandle.state = HandleState.CLOSED
+                    appHandle.ownerDisposableHandle?.let {
+                        try {
+                            it.dispose()
+                        } catch (_: Throwable) {
+                        }
+                        appHandle.ownerDisposableHandle = null
+                    }
+                    appHandle.onDisposeCleanup?.let { cb ->
+                        appDisposeCallbacks.add(cb)
+                    }
+                    appHandle.onDisposeCleanup = null
+                }
+            }
             for (handle in handlesByKey.values) {
                 if (handle.state != HandleState.CLOSED) {
                     toClose.add(beginCloseLocked(handle))
                 }
+            }
+        }
+
+        for (cb in appDisposeCallbacks) {
+            try {
+                cb()
+            } catch (_: Throwable) {
             }
         }
 
@@ -409,6 +590,8 @@ open class AndroidDebugHandles private constructor(
             handlesByKey.clear()
             handlesByPort.clear()
             activeTargets.clear()
+            activeDeployments.clear()
+            appHandlesByKey.clear()
             expiredPortTombstones.clear()
         }
 
@@ -439,5 +622,6 @@ open class AndroidDebugHandles private constructor(
         const val DEFAULT_TTL_MS: Long = 300_000L // 5 minutes
         const val MAX_EXPIRED_PORT_TOMBSTONES: Int = 128
         private val RESERVATION_PLACEHOLDER = Any()
+        private val DEPLOYMENT_RESERVATION_PLACEHOLDER = Any()
     }
 }

@@ -528,4 +528,102 @@ class AndroidDebugHandlesTest {
         assertTrue("Newly prepared lease on tombstoned port must be claimable", claimNew.claimed)
         assertEquals(rePrepared.cleanupKey, claimNew.cleanupKey)
     }
+
+    @Test
+    fun testDeploymentReservationAndApplicationHandleOwnership() {
+        val keyUser0 = AndroidDebugHandles.DeploymentKey("device-1", 0, "com.example.app")
+        val keyUser10 = AndroidDebugHandles.DeploymentKey("device-1", 10, "com.example.app")
+        val keyDevice2 = AndroidDebugHandles.DeploymentKey("device-2", 0, "com.example.app")
+
+        assertTrue(handles!!.tryReserveDeployment(keyUser0))
+        assertFalse(
+            "Duplicate deployment reservation for same device/user/package must fail",
+            handles!!.tryReserveDeployment(keyUser0)
+        )
+        assertTrue("Different userId should reserve independently", handles!!.tryReserveDeployment(keyUser10))
+        assertTrue("Different deviceId should reserve independently", handles!!.tryReserveDeployment(keyDevice2))
+
+        handles!!.cancelDeploymentReservation(keyUser10)
+        assertFalse(handles!!.isDeploymentReserved(keyUser10))
+        assertTrue(handles!!.tryReserveDeployment(keyUser10))
+
+        val owner = Job()
+        val identity = AndroidDebugHandles.ProcessInstanceIdentity(
+            pid = 4321,
+            userId = 0,
+            uid = 10243,
+            packageName = "com.example.app",
+            processName = "com.example.app",
+            startSeq = 79L,
+            amsRecord = "a368399 4321:com.example.app/u0a243"
+        )
+        val appHandle = handles!!.recordApplication(
+            key = keyUser0,
+            identity = identity,
+            jdwpCleanupKey = null,
+            port = null,
+            ownerJob = owner
+        )
+        assertEquals(AndroidDebugHandles.ExecutionKind.APPLICATION, appHandle.kind)
+        assertNull(appHandle.port)
+        assertNull(
+            "noDebug application handle without port must not be indexed in handlesByPort",
+            handles!!.getHandleByPort(0)
+        )
+        assertSame(appHandle, handles!!.getActiveApplication(keyUser0))
+        assertSame(appHandle, handles!!.getApplicationHandle(appHandle.cleanupKey))
+
+        // Canceling placeholder after handle is recorded must not remove active handle
+        handles!!.cancelDeploymentReservation(keyUser0)
+        assertTrue(handles!!.isDeploymentReserved(keyUser0))
+
+        assertTrue(handles!!.releaseApplication(appHandle.cleanupKey))
+        assertFalse(handles!!.releaseApplication(appHandle.cleanupKey))
+        assertFalse(handles!!.isDeploymentReserved(keyUser0))
+        assertNull(handles!!.getActiveApplication(keyUser0))
+        owner.cancel()
+    }
+
+    @Test
+    fun testProcessInstanceIdentityMatchesAndDetectsExternalRestart() {
+        val original = AndroidDebugHandles.ProcessInstanceIdentity(
+            pid = 5234,
+            userId = 0,
+            uid = 10243,
+            packageName = "com.example.app",
+            processName = "com.example.app",
+            startSeq = 79L,
+            amsRecord = "a368399 5234:com.example.app/u0a243"
+        )
+        assertTrue(original.matchesInstance(original.copy()))
+        assertFalse(original.matchesInstance(original.copy(pid = 5313)))
+        assertFalse(
+            "Same PID with newer startSeq must not match stale instance",
+            original.matchesInstance(original.copy(startSeq = 80L))
+        )
+        assertFalse(original.matchesInstance(original.copy(amsRecord = "b869cb4 5234:com.example.app/u0a243")))
+        assertFalse(original.matchesInstance(original.copy(userId = 10)))
+        assertFalse(original.matchesInstance(original.copy(uid = 1010243)))
+    }
+
+    @Test
+    fun testCloseAllCleansApplicationHandlesAndCallbacks() {
+        val key = AndroidDebugHandles.DeploymentKey("device-1", 0, "com.example.app")
+        assertTrue(handles!!.tryReserveDeployment(key))
+        val callbackRan = AtomicBoolean(false)
+        val appHandle = handles!!.recordApplication(
+            key = key,
+            identity = AndroidDebugHandles.ProcessInstanceIdentity(
+                pid = 100,
+                userId = 0,
+                packageName = "com.example.app",
+                processName = "com.example.app"
+            ),
+            onDisposeCleanup = { callbackRan.set(true) }
+        )
+        handles!!.closeAll()
+        assertTrue(callbackRan.get())
+        assertEquals(AndroidDebugHandles.HandleState.CLOSED, appHandle.state)
+        assertFalse(handles!!.isDeploymentReserved(key))
+    }
 }

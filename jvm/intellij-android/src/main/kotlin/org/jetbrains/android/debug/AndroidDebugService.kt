@@ -3,11 +3,11 @@ package org.jetbrains.android.debug
 import com.android.adblib.*
 import com.android.adblib.tools.debugging.*
 import com.intellij.openapi.Disposable
-import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.util.Disposer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.serialization.json.*
 import java.io.File
 import java.net.InetSocketAddress
@@ -19,6 +19,13 @@ import java.util.*
 import java.util.concurrent.*
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import org.jetbrains.annotations.TestOnly
+
+data class AndroidEnumeratedDevice(
+    val deviceId: String,
+    val state: String,
+    val abis: List<String>
+)
 
 open class AndroidDebugService(
     val host: AdbSessionHost,
@@ -322,6 +329,328 @@ open class AndroidDebugService(
             map["reason"] = JsonPrimitive(result.reason)
         }
         return JsonObject(map)
+    }
+
+    open suspend fun acquireAdbSession(adbPath: String? = null, timeoutMs: Long = 10_000L): AdbSession {
+        if (disposed.get()) {
+            throw AndroidDebugException("cleanup_failed", "Android debug service has been disposed")
+        }
+        val existing = parentSession
+        if (existing != null && adbPath == null) {
+            return existing
+        }
+        withContext(Dispatchers.IO) {
+            ensureAdbSessionInitialized(adbPath, timeoutMs)
+        }
+        return parentSession ?: throw AndroidDebugException("adb_unavailable", "ADB session is not initialized")
+    }
+
+    @TestOnly
+    internal fun setParentSessionForTesting(
+        session: AdbSession?,
+        provider: AdbServerChannelProvider? = null
+    ) {
+        synchronized(adbLock) {
+            parentSession = session
+            channelProvider = provider
+        }
+    }
+
+    protected open fun createChildAdbSession(parent: AdbSession, timeoutMs: Long): AdbSession {
+        val provider = channelProvider
+            ?: throw AndroidDebugException("adb_unavailable", "ADB channel provider is not initialized")
+        return AdbSession.createChildSession(parent, host, provider, Duration.ofMillis(timeoutMs))
+    }
+
+    open suspend fun listOnlineDevices(
+        requestedDeviceId: String? = null,
+        adbPath: String? = null,
+        timeoutMs: Long = 10_000L
+    ): List<AndroidEnumeratedDevice> {
+        if (requestedDeviceId != null && requestedDeviceId.isBlank()) {
+            throw AndroidDebugException("invalid_params", "deviceId must not be blank")
+        }
+        val session = acquireAdbSession(adbPath, timeoutMs)
+        val devices = awaitDevicesInitialized(session, timeoutMs)
+        if (requestedDeviceId != null) {
+            val device = devices.firstOrNull { it.serialNumber == requestedDeviceId }
+            if (device == null || device.deviceInfo.deviceState != DeviceState.ONLINE) {
+                throw AndroidDebugException(
+                    "device_offline",
+                    "Device $requestedDeviceId is not online"
+                )
+            }
+            val abis = readDeviceAbis(device)
+            return listOf(AndroidEnumeratedDevice(device.serialNumber, "online", abis))
+        }
+
+        val result = ArrayList<AndroidEnumeratedDevice>()
+        for (device in devices) {
+            if (!device.isOnline) continue
+            try {
+                val abis = readDeviceAbis(device)
+                if (device.isOnline) {
+                    result.add(AndroidEnumeratedDevice(device.serialNumber, "online", abis))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                if (device.isOnline) {
+                    result.add(AndroidEnumeratedDevice(device.serialNumber, "online", emptyList()))
+                }
+            }
+        }
+        return result
+    }
+
+    open suspend fun resolveOnlineDevice(
+        deviceId: String,
+        adbPath: String? = null,
+        timeoutMs: Long = 10_000L
+    ): ConnectedDevice {
+        if (deviceId.isBlank()) {
+            throw AndroidDebugException("invalid_params", "deviceId must not be blank")
+        }
+        val session = acquireAdbSession(adbPath, timeoutMs)
+        val devices = awaitDevicesInitialized(session, timeoutMs)
+        val device = devices.firstOrNull { it.serialNumber == deviceId }
+            ?: throw AndroidDebugException("device_offline", "Device $deviceId is not connected")
+        return when (val state = device.deviceInfo.deviceState) {
+            DeviceState.ONLINE -> device
+            DeviceState.UNAUTHORIZED -> throw AndroidDebugException(
+                "device_offline",
+                "Device $deviceId is unauthorized"
+            )
+
+            else -> throw AndroidDebugException(
+                "device_offline",
+                "Device $deviceId is offline ($state)"
+            )
+        }
+    }
+
+    open suspend fun readDeviceAbis(device: ConnectedDevice): List<String> {
+        val props = try {
+            device.deviceProperties().allReadonly()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            throw AndroidDebugException(
+                "device_offline",
+                "Failed to read device properties for ${device.serialNumber}: ${t.message}",
+                t
+            )
+        }
+        val abiList = props[DevicePropertyNames.RO_PRODUCT_CPU_ABILIST]
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
+        if (abiList.isNotEmpty()) {
+            return abiList.distinct()
+        }
+        return listOfNotNull(
+            props[DevicePropertyNames.RO_PRODUCT_CPU_ABI]?.trim()?.takeIf { it.isNotEmpty() },
+            props[DevicePropertyNames.RO_PRODUCT_CPU_ABI2]?.trim()?.takeIf { it.isNotEmpty() }
+        ).distinct()
+    }
+
+    open suspend fun readDeviceApiLevel(device: ConnectedDevice): Int {
+        val api = try {
+            device.deviceProperties().api(-1)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            throw AndroidDebugException(
+                "device_offline",
+                "Failed to read API level for ${device.serialNumber}: ${t.message}",
+                t
+            )
+        }
+        if (api <= 0) {
+            if (device.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
+                throw AndroidDebugException("device_offline", "Device ${device.serialNumber} is offline")
+            }
+            throw AndroidDebugException(
+                "prerequisite_missing",
+                "Unable to determine API level for device ${device.serialNumber}"
+            )
+        }
+        return api
+    }
+
+    open suspend fun prepareByPid(
+        device: ConnectedDevice,
+        pid: Int,
+        ownerJob: Job?,
+        timeoutMs: Long = 10_000L
+    ): AndroidDebugHandles.DebugHandle {
+        if (disposed.get()) {
+            throw AndroidDebugException("cleanup_failed", "Android debug service has been disposed")
+        }
+        if (pid <= 0) {
+            throw AndroidDebugException("invalid_params", "pid must be a positive integer")
+        }
+        if (ownerJob != null && (ownerJob.isCompleted || ownerJob.isCancelled)) {
+            throw AndroidDebugException("lease_conflict", "Owner connection scope is already cancelled or closed")
+        }
+        if (device.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
+            throw AndroidDebugException("device_offline", "Device ${device.serialNumber} is offline")
+        }
+
+        val parent = acquireAdbSession(timeoutMs = timeoutMs)
+        val targetId = AndroidDebugHandles.TargetId(device.serialNumber, pid)
+        if (!handles.tryReserveTarget(targetId)) {
+            throw AndroidDebugException(
+                "target_busy",
+                "Target $targetId is already prepared or claimed by another debug session"
+            )
+        }
+
+        var childSession: AdbSession? = null
+        var recordedHandle: AndroidDebugHandles.DebugHandle? = null
+        var published = false
+        try {
+            val createdChild = createChildAdbSession(parent, timeoutMs)
+            childSession = createdChild
+
+            val result = try {
+                withTimeout(timeoutMs) {
+                    val childDevices = awaitDevicesInitialized(createdChild, timeoutMs)
+                    val childDevice = childDevices.firstOrNull { it.serialNumber == device.serialNumber }
+                        ?: throw AndroidDebugException("device_offline", "Device ${device.serialNumber} is offline")
+                    if (childDevice.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
+                        throw AndroidDebugException(
+                            "device_offline",
+                            "Device ${device.serialNumber} is offline (${childDevice.deviceInfoFlow.value.deviceState})"
+                        )
+                    }
+
+                    val processFlow = childDevice.jdwpProcessTracker.processesFlow
+                    processFlow.first { !it.flowStatus.isStartOfFlow }
+                    if (processFlow.value.none { it.pid == pid }) {
+                        checkPidDebuggable(childDevice, pid)
+                    }
+
+                    val process = processFlow.mapNotNull { list -> list.firstOrNull { it.pid == pid } }.first()
+                    val status = process.jdwpProxySocketServer.proxyStatusFlow
+                        .first { it.socketAddress.hasValue || it.socketAddress.isError }
+                    if (status.socketAddress.isError) {
+                        throw AndroidDebugException(
+                            "proxy_failed",
+                            status.socketAddress.getErrorMessageOrThrow()
+                        )
+                    }
+                    val port = status.socketAddress.getOrThrow().port
+                    if (port <= 0 || port > 65535) {
+                        throw AndroidDebugException("proxy_failed", "Invalid proxy port bound: $port")
+                    }
+                    if (childDevice.deviceInfoFlow.value.deviceState != DeviceState.ONLINE || !process.scope.isActive) {
+                        throw AndroidDebugException(
+                            "target_changed",
+                            "Target device or process exited before debug session established"
+                        )
+                    }
+                    Triple(childDevice, process, port)
+                }
+            } catch (timeout: TimeoutCancellationException) {
+                try {
+                    val childDevice = createdChild.connectedDevicesTracker.device(device.serialNumber)
+                    if (childDevice != null) {
+                        checkPidDebuggable(childDevice, pid)
+                    }
+                } catch (e: AndroidDebugException) {
+                    throw e
+                } catch (_: Throwable) {
+                }
+                throw AndroidDebugException("timeout", "Timed out waiting for JDWP process PID $pid", timeout)
+            }
+
+            val childDevice = result.first
+            val process = result.second
+            val port = result.third
+            val processName = resolveProcessName(process)
+            val handle = handles.recordPrepared(
+                device.serialNumber,
+                process.pid,
+                processName,
+                "127.0.0.1",
+                port,
+                createdChild,
+                AndroidDebugHandles.DEFAULT_TTL_MS
+            )
+            recordedHandle = handle
+
+            val claim = handles.claim("127.0.0.1", port, ownerJob)
+            if (!claim.claimed) {
+                throw AndroidDebugException("proxy_failed", "Failed to claim JDWP proxy on port $port")
+            }
+
+            process.scope.coroutineContext.job.invokeOnCompletion { _ ->
+                scheduler.execute {
+                    try {
+                        handles.release(handle.cleanupKey)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+            childDevice.scope.coroutineContext.job.invokeOnCompletion { _ ->
+                scheduler.execute {
+                    try {
+                        handles.release(handle.cleanupKey)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+
+            published = true
+            return handle
+        } finally {
+            if (!published) {
+                if (recordedHandle != null) {
+                    try {
+                        handles.release(recordedHandle.cleanupKey)
+                    } catch (_: Throwable) {
+                    }
+                } else {
+                    handles.cancelReservation(targetId)
+                    try {
+                        childSession?.close()
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun awaitDevicesInitialized(session: AdbSession, timeoutMs: Long): ConnectedDeviceList {
+        return try {
+            withTimeout(timeoutMs) {
+                session.connectedDevicesTracker.connectedDevices.first { !it.flowStatus.isStartOfFlow }
+            }
+        } catch (e: TimeoutCancellationException) {
+            throw AndroidDebugException("device_offline", "Timed out waiting for ADB device tracker", e)
+        }
+    }
+
+    private fun checkPidDebuggable(device: ConnectedDevice, pid: Int) {
+        try {
+            val appProcesses = device.appProcessTracker.appProcessFlow.value
+            for (ap in appProcesses) {
+                if (ap.pid == pid && !ap.debuggable) {
+                    throw AndroidDebugException(
+                        "not_debuggable",
+                        "Process $pid exists but is not debuggable"
+                    )
+                }
+            }
+        } catch (e: AndroidDebugException) {
+            throw e
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            if (t is LinkageError) throw t
+        }
     }
 
     private fun remainingMs(deadlineNanos: Long): Long {
@@ -767,38 +1096,28 @@ open class AndroidDebugService(
     }
 
     companion object {
-        @Volatile
-        private var instance: AndroidDebugService? = null
+        private val instances = IdentityHashMap<Job, AndroidDebugService>()
         private val instanceLock = Any()
 
         @JvmStatic
-        fun getInstance(): AndroidDebugService {
-            var s = instance
-            if (s == null) {
-                synchronized(instanceLock) {
-                    s = instance
-                    if (s == null) {
-                        s = AndroidDebugService()
-                        val app = ApplicationManager.getApplication()
-                        if (app != null) {
-                            try {
-                                Disposer.register(app, s!!)
-                            } catch (_: Throwable) {
-                            }
-                        }
-                        instance = s
+        fun getInstance(ownerJob: Job): AndroidDebugService {
+            synchronized(instanceLock) {
+                ownerJob.ensureActive()
+                instances[ownerJob]?.let { return it }
+                val created = AndroidDebugService()
+                instances[ownerJob] = created
+                // Scoped debugger applications end before their owning LSP connection.
+                ownerJob.invokeOnCompletion {
+                    synchronized(instanceLock) {
+                        instances.remove(ownerJob)
                     }
+                    created.dispose()
                 }
+                ownerJob.ensureActive()
+                return created
             }
-            return s!!
         }
 
-        @JvmStatic
-        fun setInstanceForTesting(testInstance: AndroidDebugService?) {
-            synchronized(instanceLock) {
-                instance = testInstance
-            }
-        }
 
         @JvmStatic
         fun matchesPackageName(props: JdwpProcessProperties, targetPackage: String): Boolean {

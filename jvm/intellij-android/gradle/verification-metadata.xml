@@ -60,6 +60,20 @@
             <sha256 value="66a8f669bcef45c523b85d583d3390bba21849f2eb9120dee3c801ed285bd93e" origin="Official Google Maven"/>
          </artifact>
       </component>
+      <component group="com.android.tools.build" name="builder-model" version="9.4.1">
+         <artifact name="builder-model-9.4.1-sources.jar">
+            <sha256 value="693dfab33520c576f9f3177b7ab2f32e45dba0ed2f3f980f3d95c64e22405b0f" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="builder-model-9.4.1.jar">
+            <sha256 value="6fcae3cf38fa06c4b2d5eabe5616c8e0f5c9da86512cb9b1efbb69b2f8019b60" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="builder-model-9.4.1.module">
+            <sha256 value="ae5744cd18007649dddd5baa7d637167b4e70a954063793fc4d787fad29904e4" origin="Official Google Maven"/>
+         </artifact>
+         <artifact name="builder-model-9.4.1.pom">
+            <sha256 value="7ece17c3a783c19bb1dd29d49903f1b613233d4e334563cf8080f607408476c1" origin="Official Google Maven"/>
+         </artifact>
+      </component>
       <component group="com.android.tools.build" name="manifest-merger" version="32.4.1">
          <artifact name="manifest-merger-32.4.1-sources.jar">
             <sha256 value="655b5ee5fe2b1c47abb4489e752565271391fd02d682488e6ba84e0a2fe4ac71" origin="Official Google Maven"/>

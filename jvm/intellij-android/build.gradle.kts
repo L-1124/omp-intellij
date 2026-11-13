@@ -92,9 +92,21 @@ val ilsLibJars = fileTree(ilsHomeDir.resolve("lib")) {
 val ilsPluginJars = fileTree(ilsHomeDir.resolve("plugins")) {
     include("**/*.jar")
 }
-val compileSdkJars = ilsLibJars + fileTree(ilsHomeDir.resolve("plugins")) {
-    include("java/**/*.jar", "kotlin/**/*.jar", "xml/**/*.jar", "dap-jvm/**/*.jar")
+val coreIlsLibJars = fileTree(ilsHomeDir.resolve("lib")) {
+    include("*.jar")
+    exclude("language-server.dap.*.jar", "intellij.platform.dap.*.jar", "intellij.libraries.kotlinx.io.jar")
 }
+val coreCompileSdkJars = coreIlsLibJars + fileTree(ilsHomeDir.resolve("plugins")) {
+    include("java/**/*.jar", "kotlin/**/*.jar", "xml/**/*.jar", "dap-jvm/**/*.jar")
+    exclude("**/language-server.dap.*.jar")
+}
+val dapCompileSdkJars = ilsLibJars + fileTree(ilsHomeDir.resolve("plugins")) {
+    include("java/**/*.jar", "kotlin/**/*.jar", "kotlin.lsp/**/*.jar", "xml/**/*.jar", "dap-jvm/**/*.jar")
+}
+val gradleActionCompileSdkJars = files(
+    ilsHomeDir.resolve("lib/util-8.jar"),
+    ilsHomeDir.resolve("plugins/kotlin.lsp/lib/modules/intellij.libraries.gradle.tooling.jar")
+)
 
 java {
     toolchain {
@@ -122,15 +134,46 @@ dependencyLocking {
     lockAllConfigurations()
 }
 
+val builderModelVersion = "9.4.1"
 val adblibVersion = "9.4.1"
 val lintVersion = "32.4.1"
 val kxml2Version = "2.3.0"
 val groovyVersion = "4.0.29"
 
+val gradleAction by sourceSets.creating
+val dap by sourceSets.creating
+
+// Gradle loads the action in the project's JDK, independently of the ILS JBR.
+tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>("compileGradleActionKotlin") {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+}
+tasks.named<JavaCompile>(gradleAction.compileJavaTaskName) {
+    options.release.set(17)
+}
+
+configurations.named(dap.implementationConfigurationName) {
+    extendsFrom(configurations.named("implementation").get())
+}
+configurations.named("testImplementation") {
+    extendsFrom(configurations.named(dap.implementationConfigurationName).get())
+}
+
 dependencies {
-    compileOnly(compileSdkJars)
-    testCompileOnly(compileSdkJars)
+    compileOnly(coreCompileSdkJars)
+    "gradleActionCompileOnly"(gradleActionCompileSdkJars)
+    "gradleActionImplementation"("com.android.tools.build:builder-model:$builderModelVersion") {
+        isTransitive = false
+    }
+    "dapCompileOnly"(gradleAction.output)
+    "dapCompileOnly"(sourceSets.main.get().output)
+    "dapCompileOnly"(dapCompileSdkJars)
+    "dapImplementation"("com.android.tools.build:builder-model:$builderModelVersion") {
+        isTransitive = false
+    }
+    testCompileOnly(dapCompileSdkJars)
     testRuntimeOnly(ilsLibJars + ilsPluginJars)
+    testImplementation(dap.output)
+    testImplementation(gradleAction.output)
 
 
     implementation("com.android.tools.adblib:adblib:$adblibVersion") {
@@ -195,8 +238,19 @@ val descriptorJar = tasks.register<Jar>("descriptorJar") {
     isReproducibleFileOrder = true
 }
 
+val dapJar = tasks.register<Jar>("dapJar") {
+    archiveBaseName.set("language-server.api.features.impl.android.dap")
+    archiveVersion.set("")
+    archiveClassifier.set("")
+    from(dap.output)
+    from(gradleAction.output)
+    entryCompression = ZipEntryCompression.STORED
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 tasks.named("assemble") {
-    dependsOn(descriptorJar)
+    dependsOn(descriptorJar, dapJar)
 }
 
 abstract class StageExtensionTask : DefaultTask() {
@@ -204,13 +258,16 @@ abstract class StageExtensionTask : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NAME_ONLY)
     abstract val descriptorJar: RegularFileProperty
 
-    @get:InputFile
+    @get:InputFiles
     @get:PathSensitive(PathSensitivity.NAME_ONLY)
-    abstract val moduleJar: RegularFileProperty
+    abstract val moduleJars: ConfigurableFileCollection
 
     @get:InputFiles
     @get:Classpath
     abstract val runtimeClasspath: ConfigurableFileCollection
+
+    @get:Input
+    abstract val expectedModuleNames: SetProperty<String>
 
     @get:Input
     abstract val expectedUpstreamNames: SetProperty<String>
@@ -230,12 +287,21 @@ abstract class StageExtensionTask : DefaultTask() {
         if (!descFile.exists()) {
             throw GradleException("Descriptor JAR does not exist at: ${descFile.absolutePath}")
         }
-        val modFile = moduleJar.get().asFile
-        if (!modFile.exists()) {
-            throw GradleException("Module JAR does not exist at: ${modFile.absolutePath}")
+        val modFiles = moduleJars.files.filter { it.extension == "jar" }
+        for (modFile in modFiles) {
+            if (!modFile.exists()) {
+                throw GradleException("Module JAR does not exist at: ${modFile.absolutePath}")
+            }
+        }
+        val expectedMods = expectedModuleNames.get()
+        val actualMods = modFiles.map { it.name }.toSet()
+        if (actualMods != expectedMods) {
+            throw GradleException("Unexpected module JARs: expected $expectedMods, got $actualMods")
         }
 
-        val upstreamJars = runtimeClasspath.files.filter { it.extension == "jar" && it != descFile && it != modFile }
+        val modFileSet = modFiles.toSet()
+        val upstreamJars =
+            runtimeClasspath.files.filter { it.extension == "jar" && it != descFile && it !in modFileSet }
         val expectedNames = expectedUpstreamNames.get()
         val actualNames = upstreamJars.map { it.name }.toSet()
         if (actualNames != expectedNames) {
@@ -246,7 +312,9 @@ abstract class StageExtensionTask : DefaultTask() {
 
         val assetList = buildList {
             add(StagedAsset(descFile, "lib/${descFile.name}"))
-            add(StagedAsset(modFile, "lib/modules/${modFile.name}"))
+            for (modFile in modFiles.sortedBy { it.name }) {
+                add(StagedAsset(modFile, "lib/modules/${modFile.name}"))
+            }
             for (jar in upstreamJars.sortedBy { it.name }) {
                 add(StagedAsset(jar, "lib/${jar.name}"))
             }
@@ -343,6 +411,7 @@ $assetsJson
                 for (stagedFile in stagedFiles) {
                     val rel = stagedFile.relativeTo(stagingDir).invariantSeparatorsPath
                     val target = outDir.resolve(rel)
+                    if (target.isFile && Files.mismatch(stagedFile.toPath(), target.toPath()) == -1L) continue
                     replaceFile(stagedFile, target)
                 }
 
@@ -393,12 +462,25 @@ tasks.register<StageExtensionTask>("stageExtension") {
         "Stages extension and dependency JARs, SHA-256 and manifest into resources/ils/$targetVersion/android.lsp/"
 
     descriptorJar.set(tasks.named<Jar>("descriptorJar").flatMap { it.archiveFile })
-    moduleJar.set(tasks.named<Jar>("jar").flatMap { it.archiveFile })
-    runtimeClasspath.from(configurations.named("runtimeClasspath"))
+    moduleJars.from(
+        tasks.named<Jar>("jar").flatMap { it.archiveFile },
+        dapJar.flatMap { it.archiveFile }
+    )
+    expectedModuleNames.set(
+        setOf(
+            "language-server.api.features.impl.android.jar",
+            "language-server.api.features.impl.android.dap.jar"
+        )
+    )
+    runtimeClasspath.from(
+        configurations.named("runtimeClasspath"),
+        configurations.named(dap.runtimeClasspathConfigurationName)
+    )
     expectedUpstreamNames.set(
         setOf(
             "adblib-$adblibVersion.jar",
             "adblib-tools-$adblibVersion.jar",
+            "builder-model-$builderModelVersion.jar",
             "lint-api-$lintVersion.jar",
             "lint-checks-$lintVersion.jar",
             "lint-model-$lintVersion.jar",

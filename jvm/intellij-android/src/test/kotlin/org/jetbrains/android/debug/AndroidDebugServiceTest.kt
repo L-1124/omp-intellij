@@ -11,6 +11,13 @@ import org.junit.Before
 import org.junit.Test
 import java.lang.reflect.Proxy
 import java.nio.file.Files
+import com.android.adblib.DeviceInfo
+import com.android.adblib.DeviceList
+import com.android.adblib.DeviceSelector
+import com.android.adblib.DeviceState
+import com.android.adblib.testing.FakeAdbSession
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 
 class AndroidDebugServiceTest {
     private lateinit var host: AdbSessionHost
@@ -354,6 +361,92 @@ class AndroidDebugServiceTest {
             assertTrue(error.payload is JsonObject)
             val data = error.payload as JsonObject
             assertEquals("test_reason", data["reason"]!!.jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun testListOnlineDevicesAndReadAbisAndApiLevelUsingFakeAdbSession() = runBlocking {
+        val fakeSession = FakeAdbSession()
+        try {
+            fakeSession.hostServices.devices = DeviceList(
+                listOf(
+                    DeviceInfo("emulator-5580", DeviceState.ONLINE),
+                    DeviceInfo("offline-1", DeviceState.OFFLINE)
+                ),
+                emptyList()
+            )
+            fakeSession.deviceServices.configureDeviceProperties(
+                DeviceSelector.fromSerialNumber("emulator-5580"),
+                mapOf(
+                    "ro.build.version.sdk" to "35",
+                    "ro.product.cpu.abilist" to "arm64-v8a,armeabi-v7a,armeabi"
+                )
+            )
+            service.setParentSessionForTesting(fakeSession)
+
+            val allOnline = service.listOnlineDevices()
+            assertEquals(1, allOnline.size)
+            assertEquals("emulator-5580", allOnline[0].deviceId)
+            assertEquals("online", allOnline[0].state)
+            assertEquals(listOf("arm64-v8a", "armeabi-v7a", "armeabi"), allOnline[0].abis)
+
+            val device = service.resolveOnlineDevice("emulator-5580")
+            assertEquals(35, service.readDeviceApiLevel(device))
+            assertEquals(listOf("arm64-v8a", "armeabi-v7a", "armeabi"), service.readDeviceAbis(device))
+
+            try {
+                service.listOnlineDevices("offline-1")
+                fail("Expected device_offline for offline device")
+            } catch (e: AndroidDebugException) {
+                assertEquals("device_offline", e.reason)
+            }
+
+            try {
+                service.resolveOnlineDevice("missing-device")
+                fail("Expected device_offline for missing device")
+            } catch (e: AndroidDebugException) {
+                assertEquals("device_offline", e.reason)
+            }
+        } finally {
+            service.setParentSessionForTesting(null)
+            fakeSession.close()
+        }
+    }
+
+    @Test
+    fun testPrepareByPidRejectsCancelledOwnerAndDuplicateTargetReservation() = runBlocking {
+        val fakeSession = FakeAdbSession()
+        try {
+            fakeSession.hostServices.devices = DeviceList(
+                listOf(DeviceInfo("emulator-5580", DeviceState.ONLINE)),
+                emptyList()
+            )
+            service.setParentSessionForTesting(fakeSession)
+            val device = service.resolveOnlineDevice("emulator-5580")
+
+            val cancelledOwner = Job().apply { cancel() }
+            try {
+                service.prepareByPid(device, 1234, cancelledOwner)
+                fail("Expected lease_conflict for cancelled ownerJob")
+            } catch (e: AndroidDebugException) {
+                assertEquals("lease_conflict", e.reason)
+            }
+
+            val targetId = AndroidDebugHandles.TargetId("emulator-5580", 1234)
+            assertTrue(handles.tryReserveTarget(targetId))
+            val activeOwner = Job()
+            try {
+                service.prepareByPid(device, 1234, activeOwner)
+                fail("Expected target_busy when target PID is already reserved")
+            } catch (e: AndroidDebugException) {
+                assertEquals("target_busy", e.reason)
+            } finally {
+                handles.cancelReservation(targetId)
+                activeOwner.cancel()
+            }
+        } finally {
+            service.setParentSessionForTesting(null)
+            fakeSession.close()
         }
     }
 }
