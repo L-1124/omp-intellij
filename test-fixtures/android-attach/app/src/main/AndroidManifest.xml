@@ -2,8 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:label="OmpAttachFixture"
-        android:hasCode="true"
-        android:debuggable="true">
+        android:hasCode="true">
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -12,5 +11,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ProcessActivity"
+            android:process=":worker"
+            android:exported="true" />
+        <activity-alias
+            android:name=".AliasActivity"
+            android:targetActivity=".MainActivity"
+            android:exported="true" />
+        <activity-alias
+            android:name=".WorkerAliasActivity"
+            android:targetActivity=".ProcessActivity"
+            android:exported="true" />
     </application>
 </manifest>

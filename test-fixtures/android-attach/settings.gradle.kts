@@ -16,3 +16,7 @@ dependencyResolutionManagement {
 }
 rootProject.name = "android-attach"
 include(":app")
+include(":lib", ":unrelated")
+includeBuild("included") {
+    name = "included-attach"
+}

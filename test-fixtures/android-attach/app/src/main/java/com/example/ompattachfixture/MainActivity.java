@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import com.example.ompattachfixture.lib.LibHelper;
 
 public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -12,6 +13,8 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             tick();
+            LibHelper.record(counter);
+            GeneratedCounter.record(counter);
             handler.postDelayed(this, 1000);
         }
     };

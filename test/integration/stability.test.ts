@@ -183,7 +183,7 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
       file: app21Source,
       project: jdk21Dir,
       noDebug: true,
-      build: false,
+      build: true,
       mainClass: 'com.example.App',
     });
     await dap21Second.request('configurationDone');
@@ -649,7 +649,7 @@ test('process isolation: killed proxy marks session unrecoverable and preserves 
       file: app21Source,
       project: jdk21Dir,
       noDebug: true,
-      build: false,
+      build: true,
       mainClass: 'com.example.App',
     });
     await survivingClient.request('configurationDone');
@@ -737,7 +737,7 @@ test('crash recovery: terminated server transitions connection to disconnected w
           file: app17Source,
           project: jdk17Dir,
           noDebug: true,
-          build: false,
+          build: true,
           mainClass: 'com.example.App',
         },
         10000,

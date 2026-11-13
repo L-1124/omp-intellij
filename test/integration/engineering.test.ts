@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { executeIntellij } from '../../src/extension/intellij-tool.js';
@@ -17,9 +18,12 @@ import {
   createIntegrationSandbox,
   createLspClientDriver,
   type IntegrationSandbox,
+  isProcessAlive,
   seedSandboxProjectConfig,
   verifyPrerequisites,
 } from './fixture.js';
+import { createNativeAndroidClient, type NativeAndroidClient } from './native-android-client.js';
+import { createOmpHostDriver, type OmpHostDriver } from './omp-host-client.js';
 
 const prerequisites = await verifyPrerequisites();
 
@@ -255,21 +259,29 @@ application {
     );
     assert.equal(typeof alphaModel.libraryCount, 'number');
 
+    // Inspection reports registered build tooling and imported structure only. Runtime
+    // classpath and build argv are resolved at execution time, so they must be absent here.
+    for (const model of [alphaModel, betaModel, betaIntModel]) {
+      assert.equal('classpath' in model, false, 'Inspection must not claim a runtime classpath');
+      assert.equal('javaExec' in model, false, 'Inspection must not claim a JVM executable');
+      assert.equal('buildCommand' in model, false, 'Inspection must not claim build argv');
+      assert.equal('workingDirectory' in model, false);
+      assert.equal(
+        model.supported,
+        model.buildTool !== undefined,
+        `supported must mirror the registered build tool: ${JSON.stringify(model.buildTool)}`,
+      );
+      if (model.buildTool !== undefined) {
+        assert.match(model.buildTool, /^(gradle|maven)$/);
+      }
+    }
     assert.ok(
-      betaModel.classpath?.some((cpEntry) => cpEntry.replace(/\\/g, '/').includes('/alpha/')),
-      `Beta classpath must include alpha module output: ${JSON.stringify(betaModel.classpath)}`,
+      alphaModel.moduleContentPaths?.some((root) => root.replace(/\\/g, '/').includes('/alpha')),
+      `Alpha content roots must belong to the alpha module: ${JSON.stringify(alphaModel.moduleContentPaths)}`,
     );
     assert.ok(
-      alphaModel.buildCommand?.includes(':alpha:classes'),
-      `Alpha build command must target :alpha:classes: ${JSON.stringify(alphaModel.buildCommand)}`,
-    );
-    assert.ok(
-      betaModel.buildCommand?.includes(':beta:classes'),
-      `Beta build command must target :beta:classes: ${JSON.stringify(betaModel.buildCommand)}`,
-    );
-    assert.ok(
-      betaIntModel.buildCommand?.includes(':beta:integrationTestClasses'),
-      `Beta integrationTest build command must target :beta:integrationTestClasses: ${JSON.stringify(betaIntModel.buildCommand)}`,
+      betaIntModel.moduleContentPaths?.some((root) => root.replace(/\\/g, '/').includes('/beta')),
+      `Beta integrationTest content roots must belong to the beta module: ${JSON.stringify(betaIntModel.moduleContentPaths)}`,
     );
 
     const dapAlpha = createDapClientDriver(rootDir, sandbox);
@@ -396,28 +408,25 @@ application {
     const mvnAlphaModel = mvnAlphaModelRes.details?.model;
     const mvnBetaModel = mvnBetaModelRes.details?.model;
     assert.ok(mvnAlphaModel && mvnBetaModel);
+    assert.match(mvnAlphaModel.moduleName ?? '', /alpha/);
+    assert.match(mvnBetaModel.moduleName ?? '', /beta/);
+    for (const model of [mvnAlphaModel, mvnBetaModel]) {
+      assert.equal('classpath' in model, false);
+      assert.equal('workingDirectory' in model, false);
+      assert.ok(
+        model.moduleSourceRoots?.some((root) =>
+          root.path.replace(/\\/g, '/').endsWith('/src/main/java'),
+        ),
+        `Exported source roots must cover src/main/java: ${JSON.stringify(model.moduleSourceRoots)}`,
+      );
+    }
     assert.ok(
-      mvnAlphaModel.classpath?.some((cpEntry) =>
-        cpEntry.replace(/\\/g, '/').endsWith('alpha/target/classes'),
-      ),
+      mvnAlphaModel.moduleContentPaths?.some((root) => root.replace(/\\/g, '/').includes('/alpha')),
+      `Alpha content roots must belong to the alpha module: ${JSON.stringify(mvnAlphaModel.moduleContentPaths)}`,
     );
     assert.ok(
-      mvnBetaModel.classpath?.some((cpEntry) =>
-        cpEntry.replace(/\\/g, '/').endsWith('beta/target/classes'),
-      ),
-    );
-    assert.ok(
-      mvnBetaModel.classpath?.some((cpEntry) =>
-        cpEntry.replace(/\\/g, '/').endsWith('alpha/target/classes'),
-      ),
-    );
-    assert.equal(
-      canonicalizeProject(mvnAlphaModel.workingDirectory ?? '').canonicalPath,
-      canonicalizeProject(join(mavenRoot, 'alpha')).canonicalPath,
-    );
-    assert.equal(
-      canonicalizeProject(mvnBetaModel.workingDirectory ?? '').canonicalPath,
-      canonicalizeProject(join(mavenRoot, 'beta')).canonicalPath,
+      mvnBetaModel.moduleContentPaths?.some((root) => root.replace(/\\/g, '/').includes('/beta')),
+      `Beta content roots must belong to the beta module: ${JSON.stringify(mvnBetaModel.moduleContentPaths)}`,
     );
 
     const dapMvnBeta = createDapClientDriver(mavenRoot, sandbox);
@@ -470,10 +479,30 @@ test('workspace reload: adding dependency jar and switching project JDK updates 
       { systemPath: sandbox.systemPath, configDir: sandbox.configDir },
     );
     assert.equal(initialModel.isError, false);
-    assert.equal(
-      initialModel.details?.model?.classpath?.some((entry) => entry.includes('ext-reload-lib.jar')),
-      false,
+    const initialModelReport = initialModel.details?.model;
+    assert.ok(initialModelReport);
+    assert.equal(typeof initialModelReport.libraryCount, 'number');
+    assert.ok(
+      initialModelReport.moduleContentPaths?.some((root) => {
+        const content = canonicalizeProject(root).canonicalPath;
+        const project = canonicalizeProject(projectDir).canonicalPath;
+        const source = canonicalizeProject(appSource).canonicalPath;
+        return (
+          (content === project || content.startsWith(`${project}/`)) &&
+          source.startsWith(`${content}/`)
+        );
+      }),
+      `Initial model must report a content root owning the source within the project: ${JSON.stringify(initialModelReport.moduleContentPaths)}`,
     );
+    assert.ok(
+      initialModelReport.moduleSourceRoots?.some((root) =>
+        root.path.replace(/\\/g, '/').endsWith('src/main/java'),
+      ),
+      `Initial model must report the imported main source root: ${JSON.stringify(initialModelReport.moduleSourceRoots)}`,
+    );
+    for (const runtimeOnly of ['javaExec', 'classpath', 'modulePath', 'workingDirectory']) {
+      assert.equal(runtimeOnly in initialModelReport, false);
+    }
 
     const extSrcDir = join(sandbox.sandboxDir, 'ext-src', 'com', 'example', 'ext');
     const extClassesDir = join(sandbox.sandboxDir, 'ext-classes');
@@ -592,19 +621,21 @@ public class App {
       { systemPath: sandbox.systemPath, configDir: join(sandbox.configDir, 'workspaces') },
     );
     assert.equal(reloadedModel.isError, false, reloadedModel.content[0]?.text);
-    assert.ok(
-      reloadedModel.details?.model?.classpath?.some((entry) =>
-        entry.replace(/\\/g, '/').endsWith('libs/ext-reload-lib.jar'),
-      ),
-      `Reloaded classpath must contain ext-reload-lib.jar: ${JSON.stringify(reloadedModel.details?.model?.classpath)}`,
-    );
+    const reloadedModelReport = reloadedModel.details?.model;
+    assert.ok(reloadedModelReport);
+    assert.equal('classpath' in reloadedModelReport, false);
+    assert.equal('javaExec' in reloadedModelReport, false);
     assert.equal(
-      canonicalizeProject(reloadedModel.details?.model?.javaExec ?? '').canonicalPath.startsWith(
-        canonicalizeProject(prerequisites.jdk17Path).canonicalPath,
+      (reloadedModelReport.sdks ?? []).some((sdk) =>
+        canonicalizeProject(sdk.homePath ?? '').canonicalPath.startsWith(
+          canonicalizeProject(prerequisites.jdk17Path).canonicalPath,
+        ),
       ),
       true,
-      `Expected JDK 17 javaExec, got ${reloadedModel.details?.model?.javaExec}`,
+      `Reloaded imported SDK must be JDK 17: ${JSON.stringify(reloadedModelReport.sdks)}`,
     );
+    assert.equal(reloadedModelReport.buildTool, 'gradle');
+    assert.equal(reloadedModelReport.supported, true);
 
     const dap = createDapClientDriver(projectDir, sandbox);
     await dap.request('initialize', { clientID: 'test-reload-run', adapterID: 'intellij' });
@@ -870,5 +901,124 @@ public class ExcludedDebugTest {
     await bridge.close();
   } finally {
     await sandbox.cleanup();
+  }
+});
+
+test('native Android DAP arguments: launch and attach traverse the official serializer before side effects', async () => {
+  const sandbox = await createIntegrationSandbox(prerequisites);
+  let native: NativeAndroidClient | undefined;
+  try {
+    const projectDirectory = await copyWorkspaceFixture('jdk21', sandbox);
+    native = await createNativeAndroidClient({
+      serverExecutable: prerequisites.serverExecutable,
+      acceptedEulaHash: prerequisites.acceptedEulaHash,
+      projectDirectory,
+      jdk: prerequisites.jdk21Path,
+      sandboxDirectory: sandbox.sandboxDir,
+      extensionDirectory: resolve('resources/ils/271.2085.0/android.lsp'),
+      env: sandbox.env,
+      trackProcess: sandbox.trackProcess,
+      trackSocket: sandbox.trackSocket,
+    });
+    for (const bootstrap of [{ nativePort: 1234 }, { host: '127.0.0.1' }, { unknown: true }]) {
+      await assert.rejects(native.connectDap(bootstrap));
+    }
+    for (const command of ['launch', 'attach']) {
+      for (const fields of [{}, { android: null }, { android: [] }, { android: {} }]) {
+        const dap = await native.connectDap();
+        try {
+          const initialized = await dap.request('initialize', {
+            clientID: 'generic-integration-client',
+            adapterID: 'android',
+            linesStartAt1: true,
+            columnsStartAt1: true,
+            pathFormat: 'path',
+            supportsProgressReporting: true,
+          });
+          assert.equal(initialized.success, true, JSON.stringify(initialized));
+          const response = await dap.request(command, fields);
+          assert.equal(response.success, false, JSON.stringify(response));
+          assert.match(response.message ?? '', /^\[invalid_params\] configuring: /);
+          if ('android' in fields && fields.android !== null && !Array.isArray(fields.android)) {
+            assert.equal(response.message, '[invalid_params] configuring: android.deviceId is required');
+          }
+          assert.equal(dap.messages.some((message) =>
+            message.event === 'progressUpdate' &&
+            /building|installing|starting|attaching/.test(String(message.body?.message)),
+          ), false, 'Invalid arguments must fail before deployment');
+          const disconnected = await dap.request('disconnect', { terminateDebuggee: false });
+          assert.equal(disconnected.success, true, JSON.stringify(disconnected));
+        } finally {
+          dap.close();
+        }
+      }
+    }
+  } finally {
+    try {
+      await native?.close();
+    } finally {
+      await sandbox.cleanup();
+    }
+  }
+});
+
+test('OMP host JVM lifecycle: initial capabilities select disconnect and external attach preserves its target', async () => {
+  const sandbox = await createIntegrationSandbox(prerequisites);
+  let host: OmpHostDriver | undefined;
+  let target: ChildProcess | undefined;
+  try {
+    const project = await copyWorkspaceFixture('jdk21', sandbox);
+    const source = join(project, 'src/main/java/com/example/App.java');
+    host = createOmpHostDriver({
+      mode: 'launch',
+      cwd: project,
+      program: source,
+      launchDefaults: { stopOnEntry: true },
+    }, sandbox);
+    const launched = await host.ready;
+    assert.equal((launched.capabilities as Record<string, unknown>).supportsTerminateRequest, false);
+    await host.close();
+    assert.deepEqual((await host.closed).sessions, []);
+    const classpath = join(project, 'build/classes/java/main');
+    assert.ok(existsSync(join(classpath, 'com/example/App.class')));
+    const port = await getFreePort();
+    target = spawn(join(prerequisites.jdk21Path, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'), [
+      `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:${port}`,
+      '-cp', classpath, 'com.example.App',
+    ], { cwd: project, env: sandbox.env, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
+    sandbox.trackProcess(target);
+    const ready = Promise.withResolvers<void>();
+    let targetOutput = '';
+    target.stdout!.on('data', (chunk: Buffer) => {
+      targetOutput = (targetOutput + chunk.toString()).slice(-4096);
+      if (targetOutput.includes('HEARTBEAT_21=')) ready.resolve();
+    });
+    target.once('error', ready.reject);
+    target.once('exit', (code) => ready.reject(new Error(`Fixture JVM exited before heartbeat: ${code}`)));
+    // The external JVM heartbeat is outside the test clock.
+    const timer = setTimeout(() => ready.reject(new Error('Fixture JVM did not report heartbeat')), 10000);
+    try {
+      await ready.promise;
+    } finally {
+      clearTimeout(timer);
+    }
+    host = createOmpHostDriver({ mode: 'attach', cwd: project, host: '127.0.0.1', port }, sandbox);
+    await host.ready;
+    await host.close();
+    assert.ok(target.pid && isProcessAlive(target.pid), 'Real OMP host disconnect must preserve external JVM');
+  } finally {
+    try {
+      await host?.close();
+    } finally {
+      try {
+        if (target && target.exitCode === null && target.signalCode === null) {
+          const exited = once(target, 'exit');
+          target.kill();
+          await exited;
+        }
+      } finally {
+        await sandbox.cleanup();
+      }
+    }
   }
 });
