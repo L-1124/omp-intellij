@@ -19,9 +19,11 @@
 | `resource`   | 资源解析、源集目录、布局与源码读取            |
 | `compose`    | Compose 命名检查抑制                          |
 | `lint`       | 官方源码级 Lint、模块模型、依赖规则与诊断缓存 |
-| `debug`      | JDWP 附加、调试命令、监听器与字段过滤         |
+| `debug`      | 核心 JDWP 资源、监听器与字段过滤；可选模块中的 DAP 会话 |
+| `dap`        | 可选 Run/DAP SPI 入口 |
+| `run`        | 参数、AGP 模型、产物、安装与应用所有权 |
 
-类和成员按调用边界使用 `public`、`internal` 或 `private`，不依赖 Java 的包级可见性。SPI 名称仍为 `org.jetbrains.android.AndroidExtension`。`plugin.xml` 使用迁移后的入口路径。
+类和成员按调用边界使用 `public`、`internal` 或 `private`，不依赖 Java 的包级可见性。核心 SPI 为 `org.jetbrains.android.AndroidExtension`，可选 Run/DAP SPI 为 `org.jetbrains.android.dap.AndroidDapExtension`，各自发布自己的服务声明。
 
 内容模块仅声明宿主允许跨插件使用的依赖。ILS 271 中的 `language-server.analyzer.xml` 与 `language-server.api.features.impl.common` 为私有模块；跨插件依赖会使实现模块被拒绝加载，进而阻止声明式调试监听器运行。`AndroidDocumentSymbols` 直接实现公开的 `LSDocumentSymbolProvider`，通过 `supportedLanguages` 声明语言，复用公开的 `mapDeclaration` 映射。验收同时覆盖 SPI 功能与声明式扩展的实际加载。
 
@@ -100,7 +102,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
   org.jetbrains.android.AndroidExtension
   ```
 - **接口定义与返回值**：
-  `AndroidExtension` 实现 `LanguageServerExtension`，通过 `getConfiguration()` 返回 XML 符号、引用、定义、资源命令、Compose 抑制、Lint 与 Android 调试命令的提供者。实现类由内容模块加载，类加载器返回 `ContentModuleDescriptor`；使用其 `parent` 向 `LSConfigurationPiece` 提供主插件的 `PluginMainDescriptor`。
+  `AndroidExtension` 返回 XML 符号、引用、定义、资源命令、Compose 抑制与 Lint 提供者。`AndroidDapExtension` 独立注册运行调试命令与 `DapPluginsProvider(listOf(module.parent))`。实现类由各自内容模块加载；同插件模块通过显式依赖共享核心 JDWP 单例，禁止 `makePlugin` 构造虚拟插件或依赖跨加载器静态副本。
 - **运行时环境调优契约**：
   在 `getConfiguration()` 加载入口处，针对 Android 调试与运行时特征注入关键注册表项，防止调试挂死：
   1. `Registry.get("debugger.batch.evaluation").setValue(false)` 与 `debugger.batch.evaluation.force` 置为 `false`：防止 Android ART 虚拟机尝试加载宿主 JVM 特有的 `BatchEvaluatorServer.class` 导致类加载异常。
@@ -109,8 +111,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 2. 插件元数据与互斥原则（`plugin.xml`）
 
-- **主描述符**：`src/main/resources/META-INF/plugin.xml` 定义插件 ID、版本与宿主插件依赖，并通过 `<content>` 声明实现模块 `language-server.api.features.impl.android`。发布到描述符 JAR。
-- **模块描述符**：`src/main/resources/language-server.api.features.impl.android.xml` 声明实现模块的依赖、服务、监听器与扩展点。与实现类、SPI 声明一起发布到模块 JAR，使注册项使用模块类加载器。
+- **主描述符**：`src/main/resources/META-INF/plugin.xml` 在 `<content namespace="jetbrains">` 中声明必选 `language-server.api.features.impl.android`（`loading="required"`）和可选 `language-server.api.features.impl.android.dap`（省略 loading）。根依赖不绑定 DAP 或 Kotlin 导入插件，精简分析集合仍可加载核心模块。
+- **模块描述符**：核心 `src/main/resources/language-server.api.features.impl.android.xml` 拥有 LSP/Lint/XML、JDWP 资源及监听器。`src/dap/resources/language-server.api.features.impl.android.dap.xml` 使用 `visibility="internal"`，依赖核心模块、`org.jetbrains.ls.dap.jvm`、`org.jetbrains.ls.feature.kotlin` 和明确的 DAP/IO/Tooling 宿主模块；SPI 随各自 JAR 发布。固定版原生工厂虽为 public，带有 `VisibleForTesting`，升级 SDK 必须通过真实单端点兼容性门禁。
 - **版本区间契约**：仅声明 `since-build="271"`，**绝对不设** `until-build`。因为 ILS 运行时的内部构建号固定为 `999.SNAPSHOT`（`idea.plugins.compatible.build=999.SNAPSHOT`），设置 `until-build` 会直接导致插件被平台标记为不兼容而被静默忽略。版本锁定统一交由外部启动层（`detectServerVersion`）精确校验 `271.2085.0`。
 - **插件 ID 互斥原则**：声明 `<id>org.jetbrains.android</id>`。IntelliJ 平台对插件 ID 保证全局唯一单例加载。当前 ILS 纯净无官方 Android 插件，使用该 ID 占位；若环境混入官方 Android 插件，平台会直接触发单插件实例互斥抛出加载异常，杜绝双重注入导致的扩展点与 ClassLoader 混乱。
 
@@ -170,12 +172,14 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 ### 6. 构建资产清单与安全替换契约
 
-发布目录为 `resources/ils/271.2085.0/android.lsp/`，共 14 个 JAR，每个 JAR 都有同目录的 `.sha256`。描述符与第三方依赖位于 `lib/`，实现模块位于 `lib/modules/`：
+发布目录为 `resources/ils/271.2085.0/android.lsp/`，共 16 个 JAR，每个 JAR 都有同目录的 `.sha256`。描述符与第三方依赖位于 `lib/`，两个实现模块位于 `lib/modules/`：
 
 | 依赖              | 固定文件名                                                               |
 | ----------------- | ------------------------------------------------------------------------ |
 | 插件描述符        | `lib/language-server-plugins-android-lsp.jar`                            |
 | 实现模块          | `lib/modules/language-server.api.features.impl.android.jar`              |
+| 可选 Run/DAP 模块 | `lib/modules/language-server.api.features.impl.android.dap.jar` |
+| AGP 模型 | `builder-model-9.4.1.jar` |
 | ADB               | `adblib-9.4.1.jar`、`adblib-tools-9.4.1.jar`                             |
 | Lint              | `lint-api-32.4.1.jar`、`lint-checks-32.4.1.jar`、`lint-model-32.4.1.jar` |
 | Manifest 来源映射 | `manifest-merger-32.4.1.jar`                                             |
@@ -265,9 +269,9 @@ cd jvm/intellij-android
 2. 自动绑定 `jbr/bin/java` 与 Java 25 toolchain；
 3. 分别生成 STORED（零压缩）的插件描述符 JAR、实现模块 JAR，以及全部资产的 `.sha256` 旁挂文件。
 
-生产实现与 JVM 测试均使用 Kotlin，源码分别位于 `src/main/kotlin` 和 `src/test/kotlin`。Kotlin JVM 2.4.20 编译为 Java 25 字节码，直接使用宿主 Kotlin 扩展函数、context 参数及协程 API。关闭自动添加标准库，编译与运行使用 ILS 自带的 Kotlin、协程及序列化库，不将它们加入发布资产。编译器依赖单独锁定并校验，插件标记 POM 使用 Gradle Plugin Portal 的发布内容；其余 Kotlin 构建资产已与 Maven Central 的原始文件核对 SHA-256。JVM 目标配置参见 [Kotlin compiler options](https://kotlinlang.org/docs/gradle-compiler-options.html)。
+生产 Kotlin 源码分别位于 `src/main/kotlin`（核心）和 `src/dap/kotlin`（可选 Run/DAP），主体编译为 Java25；纯 Gradle Action 与 DTO 位于 `src/gradleAction/kotlin`，单独编译为 Java17 字节码并并入同一 DAP JAR，供项目 Gradle daemon 的 JDK 加载。测试位于 `src/test/kotlin`。编译复用宿主 Kotlin 库，不重复分发运行时。
 
-SDK 编译可见性采用目录级限制：平台 `lib/*.jar` 保留，插件仅加入 `java/`、`kotlin/`、`xml/`、`dap-jvm/` 下的 JAR，供 `compileOnly` 与 `testCompileOnly` 共用；`testRuntimeOnly` 仍保留完整 ILS SDK，以满足平台测试的运行时依赖。新增插件 API 依赖须显式扩展该范围并验证构建。此限制用于防止意外引用无关插件，不保证所用内部 API 稳定，也不改变 `plugin.xml` 依赖或发布包；兼容性仍由锁定 ILS 版本与真实集成验收保证。配置职责参见 [Gradle Java Plugin](https://docs.gradle.org/current/userguide/java_plugin.html)。
+编译 classpath 按 sourceSet 隔离：核心不加入 DAP、kotlinx.io 或 Gradle Tooling；可选 dap 加入明确的宿主 DAP、IO、`kotlin.lsp` Tooling 模块与核心输出。`builder-model:9.4.1` 单独锁定并分发，Gradle 运行时复用宿主 `intellij.libraries.gradle.tooling`，不重复打包。JVM 测试运行时保留完整固定 ILS SDK，但 classpath 可见不能代替真实插件加载门禁。运行协议见 [Android 运行调试契约](android-jdwp-debugging.md)。
 
 ### 2. 构建产物验证
 

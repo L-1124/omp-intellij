@@ -27,7 +27,7 @@
 
 7. **同进程 Android Lint**：
    - `AndroidLintProvider` 已接入标准 `textDocument/diagnostic`，与 ILS 原生 Java/Kotlin 编译诊断合并；工程依赖 AAR 的规则通过官方 `JarFileIssueRegistry` 装载。
-   - 当前发布清单含 14 个 JAR，采用描述符 JAR 与内容模块分离的 `android.lsp` 布局，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
+   - 当前发布清单含 16 个 JAR，采用描述符、必选核心内容模块与可选 Run/DAP 内容模块分离的 `android.lsp` 布局，详见 [Android JVM 扩展指南](android-jvm-extension.md#6-构建资产清单与安全替换契约)。下方 6 JAR 依赖子集和耗时属于历史探针，不能替代当前完整内置规则集与发布资产的验收。
    - 阶段 H 的 Java/Kotlin 与[阶段 I 的 XML/Manifest 诊断](android-jvm-extension.md#8-xmlmanifest-lint阶段-i)均已验收。真实独立 ILS 271 完整运行包含无扩展原生对照、实际 AGP 合并来源及缓存切换；既有 Java/Kotlin/Compose 和导航回归通过。
 
 ---
@@ -461,11 +461,11 @@ MyHook 实测：`MainActivity.kt` 的 `ComponentActivity` 定义指向 Gradle �
 
 读取后继续执行 `workspace/symbol("ComponentActivity")` 返回 7 个真实符号，包含相应依赖 URI；直接在该 class URI 上的 documentSymbol、hover、references 本次返回空结果。虚拟源码读取不承诺所有文件级 LSP 方法均支持反编译文档，继续追踪可使用工作区符号及原业务调用位置的语义查询。
 
-运行模型通过 JVM 扩展提供的 `omp.jvm.resolveLaunch` 和 `omp.jvm.resolveBuildCommand` 查询。前者沿用 IntelliJ 官方 `JavaParameters` 的 SDK 选择和 `OrderEnumerator` 运行时依赖过滤规则，读取导入模块的实际 JDK、classpath 和工作目录；后者根据导入的 Gradle/Maven 模块确定实际构建目标。TypeScript 只适配协议、执行构建并管理取消与进程所有权。未安装扩展或服务端未广告这些命令时，模型检查可通过 `exportWorkspace` 返回模块、源集和 SDK，但不伪造运行 classpath 或构建命令。
+运行和调试复用固定 ILS 的原生 DAP：通过 `start_debug_server` 建立连接，传入 `file`、`mainClass` 和 `tool`。普通 JVM 启动使用 `tool: "java"`，由宿主 `ModuleRuntime`、`JavaCommandBuildTool` 和 `JavaRunCommandsKt` 解析模块输出、依赖、JDK、工作目录、preview 与 JPMS 参数。客户端不再拼接 Gradle/Maven 构建命令，也不发送覆盖宿主解析结果的完整 classpath。Android JVM 扩展不再注册通用 JVM 启动或构建解析命令。
 
-与完整 IDE 不同，ILS 导入的 SDK 可能尚无 home VFS 节点，且未启用 `CompilerModuleExtension` 或注册 `NativeLibraryOrderRootType`。适配器使用显式 SDK 重载并验证其 Java 可执行文件，通过公开 `getEnumeratedEntries()` 保留原生依赖顺序、作用域与 production/test 标志，再从工作区 `JavaModuleSettingsEntity` 读取实际编译输出 URL。这样可保留尚未生成或 VFS 尚未物化的输出路径，不替换为宿主 JBR、PATH Java 或猜测的输出目录。规则来源见 [JavaParameters.java](https://github.com/JetBrains/intellij-community/blob/master/java/execution/openapi/src/com/intellij/execution/configurations/JavaParameters.java) 与 [OrderRootComputer.java](https://github.com/JetBrains/intellij-community/blob/master/platform/projectModel-impl/src/com/intellij/openapi/roots/impl/OrderRootComputer.java)，宿主签名以固定 ILS SDK 为准。
+原生 JVM DAP 在存在所属构建工具时先构建再运行，包括 `tool: "java"` 路径。默认启动不额外调用 `intellij.build`，避免重复构建；构建与运行输出均由 DAP `output` 事件传递。当前宿主启动参数没有跳过构建开关，插件明确拒绝 `build:false`，不把它伪装成真正跳过构建。独立构建接口 `intellij.build` 使用 `intellij/buildOutput` 通知关联 `buildId`，LSP 请求取消使用 `$/cancelRequest`；取消是否完成必须由实际进程退出证明，不能从参数表推断。
 
-原生 JVM 启动参数中的 `moduleName` 表示 JPMS 模块名，不能传入导入工程的模块标识。适配器以 `file` 消歧所属模块，并将该模块的实际编译输出置于依赖输出之前，避免依赖中同名主类抢占目标。直接 JVM 启动显式指定 `tool: "java"`；Gradle 启动指定 `tool: "gradle"`，并使用原生顶层 `projectPath`、`sourceSet`、`toolArgs`，不发送旧的嵌套 `buildToolTarget`。
+模型检查只使用只读的 `intellij.java.buildTool` 和 `exportWorkspace`，报告注册构建工具、导入模块、源根、SDK 和库信息；注册工具不代表构建已验证成功。模型不会执行构建，也不猜测未由协议返回的运行时 argv、classpath 或实际 Java 可执行文件。原生 `moduleName` 表示 JPMS 模块名，不能传入导入工程的模块标识；模块身份通过 `file` 消歧。Gradle 启动使用 `tool: "gradle"` 及原生顶层 `projectPath`、`sourceSet`、`toolArgs`。
 
 ### 6. 构建配置刷新
 

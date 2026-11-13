@@ -14,7 +14,7 @@
    - **初始化参数与位置转换**：代理保存客户端的 `pathFormat`、行列基数和客户端能力，原生连接统一使用本地路径与 1-based 行列。客户端断点、断点位置查询和跳转目标请求进入时转换；原生响应、事件和代理生成的断点在输出时按客户端约定转换。URI 客户端收到文件 URI，默认客户端收到本地路径；`adapterData` 和输出 `data` 等不透明数据保持原样。变量类型仅向声明支持的客户端返回。
    - **求值错误重映射**：IntelliJ DAP 在栈帧不可用或无挂起上下文时，`evaluate` 请求返回 HTTP/RPC 级别的 `success: true`，但将错误信息置于 `body.result`（如 `"Evaluation is supported for stack frames only"` 或 `"No active suspend context"`）。代理内置 `EVAL_ERROR_SENTINELS` 拦截器，重映射为 `success: false` 与结构化 `message`，防止前端误判为有效变量。
    - **反向请求拦截**：IntelliJ DAP 服务端可能向客户端主动下发 `type: "request"` 反向请求，代理统一拦截并即时回应 `success: false`（`"Reverse request not supported by proxy"`），防止反向握手悬挂超时。
-   - **能力协商**：初始响应只声明代理自身支持的配置完成和终止请求。后端能力通过标准 `capabilities` 事件更新，并在后续变更时继续筛选；取消、任意终止目标和挂起目标选项保持关闭。`cancel` 请求明确失败，不向原生发送错误编号。条件、命中条件和日志断点只在后端支持时执行，缓冲重放和直通路径均会明确报告不支持的特性。
+   - **能力协商与取消**：`PROXY_INITIAL_CAPABILITIES` 保守关闭 terminate、cancel 和 terminateDebuggee；后端能力按 `{...initial,...native,supportsConfigurationDoneRequest:true,supportSuspendDebuggee:false}` 合并，并通过标准 `capabilities` 事件继续更新。OMP 宿主只保存初始能力，因此退出走 disconnect(true)，不额外发送 terminate。`cancel.requestId` 经连接局部 client→native 映射转换，包含 startup 请求；progressId 原样转发。未知/已完成 requestId 且无 progressId 时成功 no-op，bootstrap 尚无后端 ID 时只取消对应 startup。
 
 4. **握手生命周期阻塞与双模 Entry Breakpoint 拦截**：
    - **Attach 时序对齐**：OMP 默认在收到 `attach` 响应后再发送 `configurationDone`，而底层 JDWP 握手需要先完成配置就绪才能确认连接。代理在 Attach 流程内部主动将 `clientConfigurationDone` 置为 `true`；仅当后端广告支持且完成 `initialized`、缓冲重放和启动发送后，才下发原生 `configurationDone`，打破握手死锁。
@@ -23,8 +23,8 @@
 
 5. **多阶段 Shutdown 状态机与 JVM 进程树收敛**：
    - 会话退出具备确定性状态机跃迁：`connecting-lsp` ➔ `connecting-dap` ➔ `connecting-jvm` ➔ `running` / `stopped` ➔ `cleaning` ➔ `closed` / `failed`。
-   - 在 `launch` 模式下，代理注入唯一 JVM 启动标记 `-Domp.intellij.run.id=<UUID>`；会话终止时，优先通过原生 DAP `terminate` 与 `disconnect` 通知服务端释放，随后通过 `terminateMarkedProcess` 遍历操作系统进程树强制回收该标记进程，防止残留孤儿 JVM 占用构建输出锁与端口。
-   - Attach 模式下严格执行 `terminateDebuggee: false`，断开连接绝不波及外部目标进程。
+   - 普通 JVM `launch` 注入唯一标记 `-Domp.intellij.run.id=<UUID>`，shutdown 保留原有原生终止与标记进程回收语义。`terminate` 请求单独转发，失败时保留会话；普通 JVM attach 的 disconnect 保留原有外部进程保护。
+   - Android 请求直接选择 JVM Android 端点，代理只转发一次 disconnect 并保留原参数；EOF/shutdown 不追加 terminate 或第二次 disconnect。应用所有权、JDWP 与安装资源均由 JVM 连接清理，见 [Android 契约](android-jdwp-debugging.md#attach-与应用所有权)。
 
 6. **轻量 DAP 仿真与真实工程集成测试准则**：
    - **轻量仿真**：构建基于 Node.js 原生 TCP 的伪 LSP 与伪 DAP 双服务器（`createDapTestHarness`），实现毫秒级端到端握手、断点命中、堆栈遍历与时序竞争验证，摆脱外部商业版许可证依赖，全套测试秒级跑通。
@@ -40,8 +40,9 @@ OMP 原生 `debug` 的 `launch` 接收 `program`、`args`、`adapter`、`cwd` �
 
 - agent 按意图显式选择 `adapter`。自动发现依据文件扩展名和工程标记，无法判断同一源码路径的运行模式；`languages` 是描述元数据。
 - Gradle 参数 `gradleArgs`、`projectPath`、`sourceSet` 由项目 `.omp/dap.json` 中对应适配器的 `launchDefaults` 配置。`args` 始终保留所选模式的目标参数语义，不承担代理选项或 Gradle 命令行选项的传输。
-- `testMode`、`build`、`stopOnEntry`、`noDebug` 必须是布尔值；`args`、`vmArgs`、`gradleArgs` 必须是字符串数组。`buildTool` 仅接受 `"gradle"` 或省略；省略时沿用普通 JVM 构建解析，不代表工程必须使用某个构建工具。
+- `testMode`、`build`、`stopOnEntry`、`noDebug` 必须是布尔值；`args`、`vmArgs`、`gradleArgs` 必须是字符串数组。`buildTool` 仅接受 `"gradle"` 或省略；省略时使用原生 JVM 构建与启动链路，具体构建工具由 ILS 根据所属模块选择。
 - `testMode: true` 与 `buildTool: "gradle"` 互斥。`gradleArgs`、`projectPath`、`sourceSet` 仅适用于 Gradle 启动，后两者必须是非空字符串。非法组合在连接 LSP、构建或启动调试器之前返回 DAP 失败响应。
+- 当前固定版本 ILS 的原生 JVM 启动会自动构建，未提供跳过构建参数。代理对 `build:false` 明确报不支持，不再只跳过客户端步骤却让原生端继续构建。
 - 工程配置可以覆盖全局或插件提供的适配器配置，`launchDefaults` 和 `attachDefaults` 按字段合并，仅需声明差异项；显式调用的通用 `program`、`cwd`、`args` 由 OMP 组装到最终请求。覆盖预设时保留对应模式字段的含义，不能用字符串 `"true"` 代替布尔值。
 
 例如将 Gradle 工程属性作为构建工具参数传递，同时保留原有代理命令和模式：
@@ -66,9 +67,9 @@ OMP 原生 debug manager 同时维护一棵根调试会话树；多个适配器�
 
 `terminated` 只表示会话结束。部分原生 Gradle 会话不报告 `exited`/`exitCode`；agent 应保留未知退出码，结合构建日志和测试报告判断结果，不能将缺失值当作 `0`。普通 JVM 和测试运行同样应核对实际退出码、失败输出或断言结果。
 
-JVM 或 Android JDWP 附加应显式指定 `adapter: "intellij"` 并提供 `host` 和 `port`。OMP 自动选择远程端口适配器时优先考虑 `debugpy`；本代理需要 JDWP 端口，不支持仅凭 PID 附加。Android 应先执行 prepare，再使用返回的回环代理地址；普通 JVM attach 无需 Android prepare。
+普通 JVM JDWP 附加应显式指定 `adapter: "intellij"` 并提供 `host` 和 `port`。Android wire 请求以 `arguments.android` 选择单 TCP 端点，不需要先准备 JDWP 端口；参数与独立客户端入口见 [Android 运行调试契约](android-jdwp-debugging.md)。OMP 项目默认参数沿用 `.omp/dap.json`，不新增工具 action。
 
-工具调用的 `timeout` 单位是秒，由 OMP 限制在 5 到 300 秒并受工具超时配置约束；适配器 `attachDefaults.timeout` 是 DAP 连接预算，两者分别生效。结束外部 JVM/Android 调试会话时保留目标进程，代理只释放自己拥有的连接和资源。
+工具调用的 `timeout` 单位是秒，由 OMP 限制在 5 到 300 秒并受工具超时配置约束；普通 JVM `attachDefaults.timeout` 为 DAP 连接预算，Android `timeoutMs` 为 JVM 启动预算。外部 attach 仅拥有调试连接；Android 显式 disconnect(true) 在 detach 后报拒绝停止，保留应用，OMP 宿主捕获该错误后完成本地会话销毁。
 
 注册声明来自 `.omp-plugin/marketplace.json`；插件加载时根据声明重新物化 `.dap.json` 并展开运行缓存路径。项目定制放在 `.omp/dap.json`，避免编辑会被重新生成的插件根配置。宿主契约参见 [OMP debug 文档](omp://tools/debug.md) 和 [marketplace 安装契约](omp://skills/authoring-marketplaces.md)。
 
@@ -239,7 +240,7 @@ fork-1-event-thread
   ```bash
   cmd.exe /c mvn.cmd -B -ntp clean test
   ```
-- 插件自身的 `prepareBuildCommand` 在生成构建指令时，统一对 Windows 脚本增加 `cmd.exe /d /s /c` 包装。
+- 插件的 JVM 启动已改为原生 ILS 构建与启动链路，不再在 TypeScript 中包装 Maven/Gradle 脚本；上面的包装规则只适用于手动执行批处理命令。
 
 ---
 
@@ -347,13 +348,14 @@ graph TD
 2. **JDK 与环境参数合成**（`applyWorkspaceOptions`）：
    - 在客户端发起 `initialize` 请求时，Bridge 拦截该请求，自 `<hash>.json` 读取该工程绑定的 `javaHome` 与 `env`；
    - 动态合成进入 `initializationOptions.projects[i]`，为该工程注入隔离的 SDK 路径，不同工程并发编译绝不串扰。
+   - 重导入回执的 `importedJavaHome` 校验原生构建工具返回的 `JAVA_HOME`，只证明导入配置已应用；实际运行 JDK 仍由原生启动解析，需要通过运行结果单独验证。
 3. **租约控制**（`LeaseRecord`）：
    - 每次连接在 `systemPath/plugin-metadata/leases/<uuid>.json` 注册租约；
    - 服务端停止操作（`/intellij stop`）必须核查租约与调试会话活跃列表，若存在未释放租约则拒绝停止，保障并发客户端安全。
 
 4. **构建根与模块上下文**：
    - 导入和连接以构建聚合根为身份；Gradle 根据 settings 的模块声明，Maven 根据父 POM 的模块声明提升根。
-   - 源文件所属模块、源集、SDK 和工作目录来自服务端模型，保持模块执行上下文；独立嵌套工程不被无条件提升。
+   - 源文件所属模块、源集和 SDK 来自服务端只读模型：`exportWorkspace` 提供模块内容根、源根与导入 SDK，`intellij.java.buildTool` 提供该模块注册的构建工具及其 `JAVA_HOME` 环境。模型检查不返回运行 classpath、JVM 可执行文件、工作目录或构建命令行；这些值由调试启动与 `intellij.build` 在执行期解析。独立嵌套工程不被无条件提升。
    - `workspace/configuration` 选择包含 scope 的最具体工程，同根时默认工程优先，其余按 ID 稳定仲裁。
 5. **连接记录生命周期**：
    - 同工程优先选择存活 Bridge，再选择其他存活连接，最后才读取保留的历史诊断。
@@ -432,9 +434,11 @@ graph TD
 | `setBreakpoints`           | 缓冲/直通  | 缓冲请求按路径或 `sourceReference` 区分，兼容旧式 `lines`；立即返回带代理 ID 的未验证断点。重放后沿用该 ID，并映射后续原生断点事件与 `stopped.hitBreakpointIds`；重放期间早到的断点事件在关联建立后再发送。 |
 | `configurationDone`        | 时序阻塞   | 记录客户端配置完成；仅当后端支持且满足 `backendInitialized && nativeInitializedEvent && startupSent && clientConfigurationDone` 时，才向原生转发一次。 |
 | `evaluate`                 | 哨兵转换   | 检查 `body.result`，若命中 `EVAL_ERROR_SENTINELS`，强转为 `success: false` 并赋予错误文本。                                                                                                                             |
-| `launch`                   | 构建与执行 | 1. 触发 `textDocument/didOpen` 注册源码；<br>2. 识别主类与模块构建规约（Gradle 或 JPS）；<br>3. 建立标记 `-Domp.intellij.run.id=<UUID>`；<br>4. 挂载入口断点；<br>5. 触发原生 `launch`。                                |
-| `attach`                   | JDWP 挂载  | 1. 校验端口 `1–65535` 与主机名；<br>2. 预置 `clientConfigurationDone = true`；<br>3. 触发原生 `attach`；<br>4. 循环调用 `intellij/threadDump` 验证 JVM 真正进入会话上下文。                                             |
-| `disconnect` / `terminate` | 有序清理   | 1. 挂起定时器注销；<br>2. 释放原生调试器连接；<br>3. 回收 JVM 进程树（Launch 模式）；<br>4. 释放 Android Claim（若存在）；<br>5. 关闭底层 LSP 会话并删除控制元数据。                                                    |
+| `launch` | 按目标路由 | 普通 JVM 保留源码/主类解析、构建、启动标记与入口断点；含 android 时不走 mainClass/test-mode 解析，原样转发到 Android startServer 端点。 |
+| `attach` | 按目标路由 | 普通 JVM 校验 host/port 并走官方原生端点；Android 转发 device/package/process 选择，由 JVM 内部准备 JDWP 并 attach。代理在初始化与缓存重放就绪后完成配置握手。 |
+| `cancel` | ID 适配 | 双向维护请求映射；后端响应、发送失败、关闭与 shutdown 删除映射。requestId 改写为后端 ID，progressId 不变。 |
+| `terminate` | 独立转发 | 后端不支持时返回失败并保持会话；Android 明确不支持。 |
+| `disconnect` | 有序清理 | Android 完整保留客户端参数且只转发一次；普通 JVM 保留原有标记进程清理。随后关闭本连接与控制元数据。 |
 
 ---
 

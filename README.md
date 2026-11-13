@@ -95,7 +95,7 @@ omp plugin install --force omp-intellij@omp-intellij
 ```
 
 - `wait`：阻塞等待后台服务端索引完成。
-- `model`：查询源文件所属模块、SDK、Classpath 与构建链路。
+- `model`：只读查询源文件所属模块、源根、SDK 与注册构建工具；不会构建或推测运行时 Classpath、启动命令。
 - `reload`：重新导入并同步当前工程配置。
 
 嵌套工程的配置查询按文件 scope 选择最具体的已注册工程根；默认工程不会覆盖子工程配置。
@@ -152,40 +152,30 @@ omp plugin install --force omp-intellij@omp-intellij
 
 ---
 
-### 3. Android JDWP Attach 附加调试
+### 3. Android 应用运行与调试
 
-针对运行在 Android 模拟器或真实设备上的应用，插件提供进程发现、端口代理与 JDWP Attach 编排：
+在项目 `.omp/dap.json` 中设置现有 `intellij` adapter 的 Android 默认参数：
 
-1. **准备附加并建立本地回环代理**：
+```json
+{
+  "adapters": {
+    "intellij": {
+      "launchDefaults": {
+        "android": {
+          "deviceId": "emulator-5580",
+          "target": { "kind": "gradle", "module": ":app", "variant": "debug" }
+        }
+      }
+    }
+  }
+}
+```
 
-   ```sh
-   node dist/android/debug-attach-cli.js prepare --package com.example.app --device emulator-5554
-   ```
+随后使用原生 `debug` 的 `launch` 与 `adapter: "intellij"`。JVM 扩展负责模型查询、构建、安装、启动与 JDWP attach；`noDebug: true` 只运行应用。目标还支持显式 APK 安装集和已安装应用，APK-only，不支持 AAB。
 
-   _也支持 `--pid <PID>` 精确指定进程。成功时输出包含目标 `host`、`port` 与 `cleanupKey` 的 JSON。_
+普通 LSP/DAP 客户端可直接调用 `org.intellij.android.debug.startServer`，连接返回端口并发送带 `android` 的标准 `launch`/`attach`，无需 OMP 或 Node。`org.intellij.android.run.targets` 提供只读设备与 variant 枚举。
 
-2. **附加调试器**：
-   将返回的连接参数传入原生 `debug` 工具：
-
-   ```json
-   {
-     "action": "attach",
-     "adapter": "intellij",
-     "host": "127.0.0.1",
-     "port": 58637,
-     "timeout": 180
-   }
-   ```
-
-3. **结束调试并清理资源**：
-   调试器分离时默认保持 `terminateDebuggee: false`，避免终止目标应用进程。如需提前手动释放代理端口：
-
-   ```sh
-   node dist/android/debug-attach-cli.js cleanup --key <cleanupKey>
-   ```
-
-> [!NOTE]
-> 在 Android 附加调试期间，系统会自动启用同步 JDI 并在会话级静默富渲染器（MuteRenderer），避免 ART 运行时在复合对象展示时超时，同时完整保留字段反射展开与显式求值。
+Launch 默认在 disconnect 时停止本次拥有的应用；`disconnect(false)` 保留应用。外部 attach 只拥有 JDWP 资源，显式停止请求会在完成 detach 后返回错误并保留进程。完整参数、用户/进程选择、取消与固定 SDK 错误边界见 [Android 运行调试契约](docs/android-jdwp-debugging.md)。
 
 ---
 
@@ -237,4 +227,6 @@ npm run build:jvm
 
 - **测试执行环境**：调试适配器的直接 JVM 启动方式与 Maven Surefire 或 Gradle `test` 运行环境有差异。如需完全对齐构建工具环境，建议通过构建工具启动目标 JVM 并以 JDWP attach 方式接入。
 - **构建优先原则**：Android 工程的编译、资源打包与自动化测试优先使用工程原生的 Gradle 任务执行，调试通过 JDWP attach 接入。
+- **原生 JVM 启动**：构建与启动由 ILS DAP 统一执行；当前版本无法保证跳过构建，`build:false` 会明确报不支持。
+- **同名类断点**：Android 原生 attach 不保证跨模块同名类隔离；仅配置当前部署产物对应源码的断点，具体边界见 [调试契约](docs/android-jdwp-debugging.md#路径与固定-sdk-错误边界)。
 - **代码调用层次**：调用层次（Call Hierarchy）查询受上游代码索引范围限制；测试用例中的调用分析建议使用 `references`。
