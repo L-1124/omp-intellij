@@ -3,15 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import {
-  ANDROID_DEBUG_COMMANDS,
-  claimAndroidDebug,
-  releaseAndroidDebug,
-  supportsAndroidDebugCommand,
-} from '../android/debug-attach.js';
 import { settings } from '../server/service.js';
 import { encode, frameParser } from '../shared/protocol.js';
 import {
@@ -19,18 +13,13 @@ import {
   type DebugControlHandle,
   type DebugPhase,
   type DebugSnapshot,
-  isLoopbackHost,
   isLoopbackIPv6,
 } from './control.js';
 import {
   createLspSession,
   detectProjectRoot,
-  executeBuild,
   findMainMethodLine,
-  type LaunchPaths,
   type LspSession,
-  resolveBuildCommand,
-  resolveLaunch,
   resolveMainFromLsp,
   runMain,
   startDebugServer,
@@ -161,9 +150,9 @@ function convertPositions(value: unknown, lineDelta: number, columnDelta: number
   }
 }
 
-const PROXY_CAPABILITIES = {
+const PROXY_INITIAL_CAPABILITIES = {
   supportsConfigurationDoneRequest: true,
-  supportsTerminateRequest: true,
+  supportsTerminateRequest: false,
   supportTerminateDebuggee: false,
   supportSuspendDebuggee: false,
   supportsCancelRequest: false,
@@ -273,8 +262,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
   const openLspSession = options.createLspSession ?? createLspSession;
   const sessionAbortController = new AbortController();
   const lspInitializationController = new AbortController();
-  let androidClaim: Promise<void> | null = null;
-  let androidCleanupKey: string | null = null;
+  let isAndroidSession = false;
   let lspSession: LspSession | null = null;
   let dapSocket: net.Socket | null = null;
   let backendClosed: Promise<boolean> | null = null;
@@ -295,7 +283,6 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
   let proxySeq = 1;
   let nextNativeSeq = 1;
   let activeRunMarker: string | null = null;
-  let activeJavaExec: string | null = null;
   let hasClientBreakpoints = false;
   let isTestLaunch = false;
   let supportsFunctionBreakpoints = false;
@@ -323,9 +310,11 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       command: string;
       reject: (reason: Error) => void;
       timer: NodeJS.Timeout;
+      clientSeq?: number;
     }
   >();
   const nativeSeqToClientSeq = new Map<number, DapRequestMessage>();
+  const clientSeqToNativeSeq = new Map<number, number>();
   const bufferedBreakpoints = new Map<string, { args: Record<string, unknown>; ids: number[] }>();
   const nativeBreakpointIds = new Map<number, number>();
   const deferredBreakpointEvents: Record<string, unknown>[] = [];
@@ -375,9 +364,13 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     supportsFunctionBreakpoints = nativeCapabilities.supportsFunctionBreakpoints === true;
     supportsThreadDump = nativeCapabilities.supportsThreadDumpRequest === true;
     supportsConfigurationDone = nativeCapabilities.supportsConfigurationDoneRequest === true;
-    return { ...nativeCapabilities, ...PROXY_CAPABILITIES };
+    return {
+      ...PROXY_INITIAL_CAPABILITIES,
+      ...nativeCapabilities,
+      supportsConfigurationDoneRequest: true,
+      supportSuspendDebuggee: false,
+    };
   }
-
   function respond(
     request: DapRequestMessage,
     success: boolean,
@@ -426,6 +419,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     command: string,
     args: Record<string, unknown> = {},
     timeoutMs = 15000,
+    clientSeq?: number,
   ): Promise<DapResponseMessage> {
     if (!dapSocket || dapSocket.destroyed) {
       return Promise.reject(new Error(`Cannot send ${command}: debug server socket closed`));
@@ -434,20 +428,46 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     const { promise, resolve, reject } = Promise.withResolvers<DapResponseMessage>();
     const timer = setTimeout(() => {
       nativePending.delete(seq);
+      if (clientSeq !== undefined) clientSeqToNativeSeq.delete(clientSeq);
       reject(new Error(`Native DAP request ${command} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-    nativePending.set(seq, { command, resolve, reject, timer });
+    nativePending.set(seq, { command, resolve, reject, timer, clientSeq });
+    if (clientSeq !== undefined) clientSeqToNativeSeq.set(clientSeq, seq);
     try {
       sendToDebugServer({ seq, type: 'request', command, arguments: args });
     } catch (error: unknown) {
       nativePending.delete(seq);
+      if (clientSeq !== undefined) clientSeqToNativeSeq.delete(clientSeq);
       clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
     return promise;
   }
 
-  function shutdown(exitCode = 0, closingRequest?: DapRequestMessage): Promise<void> {
+  function forwardClientRequest(
+    req: DapRequestMessage,
+    forwardedArgs?: Record<string, unknown>,
+  ): void {
+    const nativeSeq = nextNativeSeq++;
+    nativeSeqToClientSeq.set(nativeSeq, req);
+    clientSeqToNativeSeq.set(req.seq, nativeSeq);
+    try {
+      sendToDebugServer({
+        ...req,
+        seq: nativeSeq,
+        ...(forwardedArgs !== undefined ? { arguments: forwardedArgs } : {}),
+      });
+    } catch (error: unknown) {
+      nativeSeqToClientSeq.delete(nativeSeq);
+      clientSeqToNativeSeq.delete(req.seq);
+      throw error;
+    }
+  }
+  function shutdown(
+    exitCode = 0,
+    closingRequest?: DapRequestMessage,
+    disconnectArgs?: Record<string, unknown>,
+  ): Promise<void> {
     if (shutdownPromise) return shutdownPromise;
     isShuttingDown = true;
     phase = 'cleaning';
@@ -455,62 +475,80 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       clearTimeout(shutdownTimer);
       sessionAbortController.abort(new Error('Session shutdown'));
       if (!lspSession) lspInitializationController.abort(new Error('Session shutdown'));
-      // A claim owns resources even when shutdown wins the response race.
-      await androidClaim?.catch(() => {});
       connectingSocket?.destroy();
       for (const pending of nativePending.values()) {
         clearTimeout(pending.timer);
+        if (pending.clientSeq !== undefined) clientSeqToNativeSeq.delete(pending.clientSeq);
         pending.reject(new Error('Session shutdown'));
       }
       nativePending.clear();
       for (const request of nativeSeqToClientSeq.values()) {
+        clientSeqToNativeSeq.delete(request.seq);
         respond(request, false, undefined, 'Debug session closed');
       }
       nativeSeqToClientSeq.clear();
+      clientSeqToNativeSeq.clear();
 
       if (dapSocket && !dapSocket.destroyed && backendInitialized) {
-        if (sessionMode === 'launch' && !backendTerminated) {
-          try {
-            await sendNativeRequest('terminate', {}, 3000);
-          } catch {
-            // The target may have already exited.
+        if (isAndroidSession) {
+          if (closingRequest?.command === 'disconnect') {
+            try {
+              // AndroidDapSession completes cleanup before responding and keeps the socket open until client EOF.
+              await sendNativeRequest('disconnect', disconnectArgs ?? {}, 15000);
+            } catch (error: unknown) {
+              if (!(error instanceof NativeDisconnectCompleted)) {
+                cleanupError = error instanceof Error ? error.message : String(error);
+                output(`Android debugger cleanup failed: ${cleanupError}\n`);
+                exitCode = 1;
+              }
+            }
           }
-        }
-        try {
-          const cleanupDeadline = Date.now() + 15000;
-          if (!dapSocket.destroyed) {
-            await sendNativeRequest(
-              'disconnect',
-              {
-                terminateDebuggee: sessionMode === 'launch',
-                suspendDebuggee: false,
-              },
-              15000,
+        } else {
+          if (sessionMode === 'launch' && !backendTerminated) {
+            try {
+              await sendNativeRequest('terminate', {}, 3000);
+            } catch {
+              // The target may have already exited.
+            }
+          }
+          try {
+            const cleanupDeadline = Date.now() + 15000;
+            if (!dapSocket.destroyed) {
+              await sendNativeRequest(
+                'disconnect',
+                {
+                  terminateDebuggee: sessionMode === 'launch',
+                  suspendDebuggee: false,
+                },
+                15000,
+              );
+            }
+            const deadline = Promise.withResolvers<never>();
+            const timer = setTimeout(
+              () => deadline.reject(new Error('IntelliJ debugger teardown timed out')),
+              Math.max(1, cleanupDeadline - Date.now()),
             );
-          }
-          const deadline = Promise.withResolvers<never>();
-          const timer = setTimeout(
-            () => deadline.reject(new Error('IntelliJ debugger teardown timed out')),
-            Math.max(1, cleanupDeadline - Date.now()),
-          );
-          try {
-            const transportClosed = await Promise.race([backendClosed, deadline.promise]);
-            if (!transportClosed) throw new Error('IntelliJ debugger transport closed abnormally');
-          } finally {
-            clearTimeout(timer);
-          }
-        } catch (error: unknown) {
-          // IntelliJ may close its DAP transport after teardown before flushing the response.
-          if (!(error instanceof NativeDisconnectCompleted)) {
-            cleanupError = `IntelliJ debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
-            output(`${cleanupError}\n`);
-            exitCode = 1;
+            try {
+              const transportClosed = await Promise.race([backendClosed, deadline.promise]);
+              if (!transportClosed) {
+                throw new Error('IntelliJ debugger transport closed abnormally');
+              }
+            } finally {
+              clearTimeout(timer);
+            }
+          } catch (error: unknown) {
+            // IntelliJ may close its DAP transport after teardown before flushing the response.
+            if (!(error instanceof NativeDisconnectCompleted)) {
+              cleanupError = `IntelliJ debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+              output(`${cleanupError}\n`);
+              exitCode = 1;
+            }
           }
         }
       }
       if (sessionMode === 'launch' && activeRunMarker) {
         try {
-          await terminateMarkedProcess(activeRunMarker, activeJavaExec ?? undefined, 3000);
+          await terminateMarkedProcess(activeRunMarker, undefined, 3000);
         } catch (error: unknown) {
           cleanupError = error instanceof Error ? error.message : String(error);
           console.error(
@@ -522,17 +560,6 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       dapSocket?.destroy();
       entryFunctionBreakpointOwned = false;
       backendInitialized = false;
-      if (lspSession && androidCleanupKey) {
-        const key = androidCleanupKey;
-        androidCleanupKey = null;
-        try {
-          await releaseAndroidDebug(lspSession, key, 10000);
-        } catch (error: unknown) {
-          cleanupError = `Android debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
-          output(`${cleanupError}\n`);
-          exitCode = 1;
-        }
-      }
       if (lspSession) {
         const session = lspSession;
         lspSession = null;
@@ -599,6 +626,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       const pending = nativePending.get(requestSeq);
       if (pending) {
         nativePending.delete(requestSeq);
+        if (pending.clientSeq !== undefined) clientSeqToNativeSeq.delete(pending.clientSeq);
         clearTimeout(pending.timer);
         if (msg.success === true) {
           pending.resolve({
@@ -623,6 +651,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       const request = nativeSeqToClientSeq.get(requestSeq);
       if (request) {
         nativeSeqToClientSeq.delete(requestSeq);
+        clientSeqToNativeSeq.delete(request.seq);
         if (
           request.command === 'evaluate' &&
           msg.success === true &&
@@ -720,19 +749,46 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     return session;
   }
 
-  async function connectBackend(): Promise<void> {
+  async function startAndroidDebugServer(session: LspSession, signal: AbortSignal): Promise<number> {
+    const result = await session.request(
+      'workspace/executeCommand',
+      {
+        command: 'org.intellij.android.debug.startServer',
+        arguments: [{}],
+      },
+      undefined,
+      signal,
+    );
+    const rawPort =
+      result && typeof result === 'object' && !Array.isArray(result) && 'port' in result
+        ? result.port
+        : undefined;
+    if (
+      typeof rawPort !== 'number' ||
+      !Number.isSafeInteger(rawPort) ||
+      rawPort < 1 ||
+      rawPort > 65535
+    ) {
+      throw new Error(`Invalid Android debug server port returned: ${JSON.stringify(result)}`);
+    }
+    return rawPort;
+  }
+
+  async function connectBackend(isAndroid = false): Promise<void> {
     if (!lspSession) throw new Error('LSP session not active');
+    const startCommand = isAndroid ? 'org.intellij.android.debug.startServer' : 'start_debug_server';
     const provider = lspSession.serverCapabilities?.executeCommandProvider;
     const commands =
       provider && typeof provider === 'object' && !Array.isArray(provider) && 'commands' in provider
         ? provider.commands
         : undefined;
-    if (Array.isArray(commands) && !commands.includes('start_debug_server')) {
-      throw new Error('IntelliJ server does not support start_debug_server');
+    if (Array.isArray(commands) && !commands.includes(startCommand)) {
+      throw new Error(`IntelliJ server does not support ${startCommand}`);
     }
     phase = 'connecting-dap';
-    const port = await startDebugServer(lspSession, lspSession.rootUri);
-    backendPort = port;
+    const port = isAndroid
+      ? await startAndroidDebugServer(lspSession, sessionAbortController.signal)
+      : await startDebugServer(lspSession, lspSession.rootUri);
     const signal = sessionAbortController.signal;
     signal.throwIfAborted();
     const socket = net.createConnection({ host: '127.0.0.1', port });
@@ -788,6 +844,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       closure.resolve(backendEndedCleanly && !hadError);
       for (const pending of nativePending.values()) {
         clearTimeout(pending.timer);
+        if (pending.clientSeq !== undefined) clientSeqToNativeSeq.delete(pending.clientSeq);
         pending.reject(
           isShuttingDown && backendEndedCleanly && !hadError && pending.command === 'disconnect'
             ? new NativeDisconnectCompleted(
@@ -978,10 +1035,10 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     phase = 'connecting-jvm';
     startupSent = true;
     const deadline = Date.now() + timeoutMs;
-    const response = sendNativeRequest(command, args, timeoutMs);
+    const response = sendNativeRequest(command, args, timeoutMs, startupRequest?.seq);
     flushConfigurationDone();
     const result = await response;
-    if (command === 'attach') await waitForJvm(deadline);
+    if (command === 'attach' && !isAndroidSession) await waitForJvm(deadline);
     if (!isShuttingDown) markRunning();
     if (!isShuttingDown) finishStartup(true, result.body);
   }
@@ -1027,11 +1084,55 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       clientLineDelta = args.linesStartAt1 === false ? 1 : 0;
       clientColumnDelta = args.columnsStartAt1 === false ? 1 : 0;
       clientVariableType = args.supportsVariableType === true;
-      respond(request, true, PROXY_CAPABILITIES);
+      respond(request, true, PROXY_INITIAL_CAPABILITIES);
       return;
     }
     if (command === 'cancel') {
-      respond(request, false, undefined, 'Cancellation is not supported by this proxy');
+      const rawRequestId = args.requestId;
+      const hasRequestId = typeof rawRequestId === 'number' && Number.isInteger(rawRequestId);
+      const hasProgressId = typeof args.progressId === 'string' && args.progressId.length > 0;
+      if (
+        isStarting &&
+        startupRequest &&
+        hasRequestId &&
+        rawRequestId === startupRequest.seq &&
+        !clientSeqToNativeSeq.has(startupRequest.seq)
+      ) {
+        respond(request, true);
+        debugError = 'Startup cancelled';
+        sessionAbortController.abort(new Error(debugError));
+        if (!lspSession) lspInitializationController.abort(new Error(debugError));
+        void shutdown(1);
+        return;
+      }
+      if (hasRequestId) {
+        const nativeRequestId = clientSeqToNativeSeq.get(rawRequestId);
+        if (nativeRequestId !== undefined && backendInitialized && dapSocket && !dapSocket.destroyed) {
+          forwardClientRequest(request, { ...args, requestId: nativeRequestId });
+          return;
+        }
+        if (!hasProgressId) {
+          respond(request, true);
+          return;
+        }
+        if (backendInitialized && dapSocket && !dapSocket.destroyed) {
+          const { requestId: _ignored, ...forwardedArgs } = args;
+          forwardClientRequest(request, forwardedArgs);
+          return;
+        }
+        respond(request, true);
+        return;
+      }
+      if (hasProgressId && backendInitialized && dapSocket && !dapSocket.destroyed) {
+        if (rawRequestId !== undefined) {
+          const { requestId: _ignored, ...forwardedArgs } = args;
+          forwardClientRequest(request, forwardedArgs);
+        } else {
+          forwardClientRequest(request, args);
+        }
+        return;
+      }
+      respond(request, true);
       return;
     }
     if (
@@ -1101,8 +1202,8 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       return;
     }
     if (command === 'setFunctionBreakpoints') entryFunctionBreakpointOwned = false;
-    if (command === 'terminate' || command === 'disconnect') {
-      void shutdown(0, request);
+    if (command === 'disconnect') {
+      void shutdown(0, request, args);
       return;
     }
     if (command === 'launch' || command === 'attach') {
@@ -1112,10 +1213,12 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       }
       const explicitCwd = typeof args.cwd === 'string' && args.cwd ? resolve(args.cwd) : undefined;
       const targetCwd = explicitCwd ?? process.cwd();
+      const isAndroid = Object.hasOwn(args, 'android') && args.android !== undefined;
       let resolvedFile: string | null = null;
       let hostName = '127.0.0.1';
       let attachTimeout = 30000;
-      if (command === 'attach') {
+      if (!isAndroid) {
+        if (command === 'attach') {
         if (
           !Number.isSafeInteger(args.port) ||
           Number(args.port) < 1 ||
@@ -1165,6 +1268,15 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             respond(request, false, undefined, `${field} must be a boolean`);
             return;
           }
+        }
+        if (args.build === false) {
+          respond(
+            request,
+            false,
+            undefined,
+            'build: false is not supported: the IntelliJ debug adapter always builds before launching a JVM program',
+          );
+          return;
         }
         for (const field of ['args', 'vmArgs', 'gradleArgs']) {
           const value = args[field];
@@ -1216,10 +1328,12 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           return;
         }
       }
+      }
       isStarting = true;
+      isAndroidSession = isAndroid;
       sessionMode = command;
       startupRequest = request;
-      isTestLaunch = command === 'launch' && args.testMode === true;
+      isTestLaunch = !isAndroid && command === 'launch' && args.testMode === true;
       try {
         const explicitProject = typeof args.project === 'string' ? args.project : undefined;
         projectRoot = detectProjectRoot(resolvedFile ?? targetCwd, explicitProject);
@@ -1242,27 +1356,28 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           await debugControl.close();
           return;
         }
-        if (command === 'attach') {
-          const session = await openProject(projectRoot);
-          if (
-            isLoopbackHost(hostName) &&
-            supportsAndroidDebugCommand(session, ANDROID_DEBUG_COMMANDS.claim)
-          ) {
-            androidClaim = claimAndroidDebug(session, {
-              host: hostName,
-              port: Number(args.port),
-            }).then((result) => {
-              if (result.claimed) androidCleanupKey = result.cleanupKey;
-            });
-            await androidClaim;
-          }
+        if (isAndroid) {
+          await openProject(projectRoot);
           sessionAbortController.signal.throwIfAborted();
-          await connectBackend();
+          await connectBackend(true);
+          await replayBreakpoints();
+          const androidTimeout =
+            typeof args.timeout === 'number' && Number.isFinite(args.timeout) && args.timeout > 0
+              ? args.timeout <= 300
+                ? Math.round(args.timeout * 1000)
+                : Math.round(args.timeout)
+              : (settings.requestWaitTimeoutMs ?? 300000);
+          await startNative(command, args, androidTimeout);
+          return;
+        }
+        if (command === 'attach') {
+          await openProject(projectRoot);
+          sessionAbortController.signal.throwIfAborted();
+          await connectBackend(false);
           if (!supportsThreadDump) {
             throw new Error('IntelliJ backend does not support threadDump readiness checks');
           }
           await replayBreakpoints();
-          // OMP sends configurationDone after attach replies; JDWP needs it before confirming.
           clientConfigurationDone = true;
           await startNative(
             'attach',
@@ -1308,35 +1423,16 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         }
         const isGradleLaunch = args.buildTool === 'gradle';
         const gradleArgs = args.gradleArgs ?? [];
-        if (args.build !== false && !isGradleLaunch) {
-          output(`--- IntelliJ: resolving build for ${basename(resolvedFile)} ---\n`, 'console');
-          const build = await resolveBuildCommand(session, fileUri);
-          if (!build || build.supported === false) {
-            throw new Error(
-              `Build unsupported for ${resolvedFile}: ${build?.reason || 'Server reports build unsupported for this module'}`,
-            );
-          }
-          if (!Array.isArray(build.command) || build.command.length === 0) {
-            throw new Error(`Build command empty for ${resolvedFile}`);
-          }
-          await executeBuild(build, {
-            signal: sessionAbortController.signal,
-            onOutput: (event) => output(event.output, event.category),
-          });
-        }
         sessionAbortController.signal.throwIfAborted();
-        let paths: LaunchPaths;
         let applicationArgs = (args.args ?? []) as string[];
+        let additionalClassPaths: string[] = [];
+        let additionalModulePaths: string[] = [];
         if (isTestLaunch) {
           const target = await resolveTestTarget(session, fileUri, applicationArgs);
           mainClass = target.mainClass;
           applicationArgs = target.args;
-          paths = target.paths;
-        } else {
-          paths = await resolveLaunch(session, fileUri);
-        }
-        if (!paths?.javaExec) {
-          throw new Error(`Launch resolution returned no java executable for ${resolvedFile}`);
+          additionalClassPaths = target.additionalClassPaths;
+          additionalModulePaths = target.additionalModulePaths;
         }
         await connectBackend();
         await replayBreakpoints();
@@ -1368,7 +1464,6 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           }
         }
         activeRunMarker = randomUUID();
-        activeJavaExec = paths.javaExec;
         const extraVmArgs = (args.vmArgs ?? []) as string[];
         if (args.noDebug === true) clientConfigurationDone = true;
         await startNative(
@@ -1387,19 +1482,13 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
                   toolArgs: gradleArgs,
                 }
               : {}),
-            classPaths: paths.classpath || [],
-            modulePaths: paths.modulePath || [],
-            moduleContentPaths: paths.moduleContentPaths || [],
-            javaExec: paths.javaExec,
-            vmArgs: [
-              ...(paths.vmArgs || []),
-              ...extraVmArgs,
-              `-Domp.intellij.run.id=${activeRunMarker}`,
-            ],
+            additionalClassPaths,
+            additionalModulePaths,
+            vmArgs: [...extraVmArgs, `-Domp.intellij.run.id=${activeRunMarker}`],
             args: applicationArgs,
             env:
               args.env && typeof args.env === 'object' && !Array.isArray(args.env) ? args.env : {},
-            cwd: explicitCwd ?? paths.workingDirectory ?? projectRoot,
+            cwd: explicitCwd,
             console: 'internalConsole',
             noDebug: args.noDebug === true,
             stopOnEntry,
@@ -1423,9 +1512,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       return;
     }
     if (backendInitialized && dapSocket && !dapSocket.destroyed) {
-      const nativeSeq = nextNativeSeq++;
-      nativeSeqToClientSeq.set(nativeSeq, request);
-      sendToDebugServer({ ...request, seq: nativeSeq });
+      forwardClientRequest(request);
     } else {
       respond(request, false, undefined, 'Debug session not active');
     }

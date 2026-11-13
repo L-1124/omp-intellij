@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { LaunchPaths, LspSession } from '../src/debug/run-core.js';
+import type { LspSession } from '../src/debug/run-core.js';
 import {
   discoverTestsInFile,
   resolveTestLaunch,
@@ -15,6 +15,7 @@ function createMockLspSession(
     nativePath: '/workspace',
     request: handler,
     notify: () => {},
+    onNotification: () => () => {},
     isReady: () => true,
     reloadWorkspace: async () => ({ ready: true }),
     close: async () => {},
@@ -32,6 +33,7 @@ test('resolveTestLaunch deduplicates testIds preserving first occurrence', async
         mainClass: 'com.example.Runner',
         args: [],
         runtimeClasspath: [],
+        runtimeModulePath: [],
       },
     ];
   });
@@ -64,9 +66,9 @@ test('malformed discovery responses block execution with command context', async
     null,
     { not: 'array' },
     ['string-not-object'],
-    [{ id: '', kind: 'CLASS', runnable: true }],
-    [{ id: 'com.example.Test', kind: 123, runnable: true }],
-    [{ id: 'com.example.Test', kind: 'CLASS', runnable: 'not-bool' }],
+    [{ id: '', kind: 'SUITE' }],
+    [{ id: 'com.example.Test', kind: 123 }],
+    [{ id: 'com.example.Test', kind: 'CLASS' }],
   ];
 
   for (const badResponse of malformedCases) {
@@ -92,9 +94,10 @@ test('malformed launch specifications block launch resolution with command conte
   const malformedCases: unknown[] = [
     null,
     'not-an-array',
-    [{ mainClass: '', args: [], runtimeClasspath: [] }],
-    [{ mainClass: 'Runner', args: ['ok', 123], runtimeClasspath: [] }],
-    [{ mainClass: 'Runner', args: [], runtimeClasspath: 'not-an-array' }],
+    [{ mainClass: '', args: [], runtimeClasspath: [], runtimeModulePath: [] }],
+    [{ mainClass: 'Runner', args: ['ok', 123], runtimeClasspath: [], runtimeModulePath: [] }],
+    [{ mainClass: 'Runner', args: [], runtimeClasspath: 'not-an-array', runtimeModulePath: [] }],
+    [{ mainClass: 'Runner', args: [], runtimeClasspath: [] }],
   ];
 
   for (const badResponse of malformedCases) {
@@ -116,15 +119,15 @@ test('resolveTestLaunch propagates server error without returning empty array', 
   );
 });
 
-test('resolveTestTarget with empty testIds selects CLASS over METHOD to prevent duplicate execution', async () => {
+test('resolveTestTarget with empty testIds selects SUITE over TEST to prevent duplicate execution', async () => {
   let resolvedTestIds: string[] | undefined;
   const session = createMockLspSession(async (_method, params) => {
     const cmd = params as { command: string; arguments: unknown[] };
     if (cmd.command === 'intellij.jvm.discoverTestsInFile') {
       return [
-        { id: 'com.example.JavaGreeterTest', kind: 'CLASS', runnable: true },
-        { id: 'com.example.JavaGreeterTest#testGreeting', kind: 'METHOD', runnable: true },
-        { id: 'com.example.JavaGreeterTest#testDefaultGreeting', kind: 'METHOD', runnable: true },
+        { id: 'com.example.JavaGreeterTest', kind: 'SUITE', displayName: 'JavaGreeterTest' },
+        { id: 'com.example.JavaGreeterTest#testGreeting', kind: 'TEST' },
+        { id: 'com.example.JavaGreeterTest#testDefaultGreeting', kind: 'TEST' },
       ];
     }
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
@@ -135,19 +138,10 @@ test('resolveTestTarget with empty testIds selects CLASS over METHOD to prevent 
           mainClass: 'com.intellij.rt.junit.JUnitStarter',
           args: ['-ideVersion5', 'com.example.JavaGreeterTest'],
           runtimeClasspath: ['/m2/junit-starter.jar'],
+          runtimeModulePath: ['/m2/junit-jupiter-api.jar'],
+          file: 'file:///app/src/test/java/JavaGreeterTest.java',
         },
       ];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return {
-        javaExec: '/jdk-21/bin/java.exe',
-        classpath: ['/app/target/classes', '/m2/junit-jupiter-api.jar'],
-        modulePath: ['/mods'],
-        moduleName: 'com.example.app',
-        moduleContentPaths: ['/app/src/main/java'],
-        workingDirectory: '/app',
-        vmArgs: ['-ea'],
-      } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
@@ -161,30 +155,18 @@ test('resolveTestTarget with empty testIds selects CLASS over METHOD to prevent 
   assert.deepEqual(resolvedTestIds, ['com.example.JavaGreeterTest']);
   assert.equal(target.mainClass, 'com.intellij.rt.junit.JUnitStarter');
   assert.deepEqual(target.args, ['-ideVersion5', 'com.example.JavaGreeterTest']);
-
-  assert.deepEqual(target.paths.classpath, [
-    '/app/target/classes',
-    '/m2/junit-jupiter-api.jar',
-    '/m2/junit-starter.jar',
-  ]);
-
-  assert.equal(target.paths.javaExec, '/jdk-21/bin/java.exe');
-  assert.deepEqual(target.paths.modulePath, ['/mods']);
-  assert.equal(target.paths.moduleName, 'com.example.app');
-  assert.deepEqual(target.paths.moduleContentPaths, ['/app/src/main/java']);
-  assert.equal(target.paths.workingDirectory, '/app');
-  assert.deepEqual(target.paths.vmArgs, ['-ea']);
+  assert.deepEqual(target.additionalClassPaths, ['/m2/junit-starter.jar']);
+  assert.deepEqual(target.additionalModulePaths, ['/m2/junit-jupiter-api.jar']);
 });
 
-test('resolveTestTarget with empty testIds selects runnable METHODs when no runnable CLASS is present', async () => {
+test('resolveTestTarget with empty testIds selects TESTs when no SUITE is present', async () => {
   let resolvedTestIds: string[] | undefined;
   const session = createMockLspSession(async (_method, params) => {
     const cmd = params as { command: string; arguments: unknown[] };
     if (cmd.command === 'intellij.jvm.discoverTestsInFile') {
       return [
-        { id: 'com.example.AbstractBaseTest', kind: 'CLASS', runnable: false },
-        { id: 'com.example.ConcreteTest#method1', kind: 'METHOD', runnable: true },
-        { id: 'com.example.ConcreteTest#method2', kind: 'METHOD', runnable: true },
+        { id: 'com.example.ConcreteTest#method1', kind: 'TEST' },
+        { id: 'com.example.ConcreteTest#method2', kind: 'TEST' },
       ];
     }
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
@@ -195,11 +177,9 @@ test('resolveTestTarget with empty testIds selects runnable METHODs when no runn
           mainClass: 'com.intellij.rt.junit.JUnitStarter',
           args: ['-ideVersion5', 'com.example.ConcreteTest,method1,method2'],
           runtimeClasspath: [],
+          runtimeModulePath: [],
         },
       ];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
@@ -210,6 +190,8 @@ test('resolveTestTarget with empty testIds selects runnable METHODs when no runn
     'com.example.ConcreteTest#method2',
   ]);
   assert.equal(target.mainClass, 'com.intellij.rt.junit.JUnitStarter');
+  assert.deepEqual(target.additionalClassPaths, []);
+  assert.deepEqual(target.additionalModulePaths, []);
 });
 
 test('resolveTestTarget with explicit testIds bypasses file discovery', async () => {
@@ -230,11 +212,9 @@ test('resolveTestTarget with explicit testIds bypasses file discovery', async ()
           mainClass: 'com.intellij.rt.junit.JUnitStarter',
           args: ['-ideVersion5', 'com.example.KotlinAppTest,testKotlinCompute'],
           runtimeClasspath: ['/path/to/runner.jar'],
+          runtimeModulePath: [],
         },
       ];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
@@ -252,10 +232,7 @@ test('resolveTestTarget throws explicit error when file discovery yields no runn
   const session = createMockLspSession(async (_method, params) => {
     const cmd = params as { command: string };
     if (cmd.command === 'intellij.jvm.discoverTestsInFile') {
-      return [
-        { id: 'com.example.EmptyTest', kind: 'CLASS', runnable: false },
-        { id: 'com.example.EmptyTest#helper', kind: 'METHOD', runnable: false },
-      ];
+      return [];
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
@@ -278,9 +255,6 @@ test('resolveTestTarget throws exact error when zero test launch specifications 
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
       return [];
     }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return { javaExec: '/bin/java' } satisfies LaunchPaths;
-    }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
 
@@ -298,12 +272,9 @@ test('resolveTestTarget throws exact error when multiple launch specifications a
     const cmd = params as { command: string };
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
       return [
-        { mainClass: 'RunnerA', args: [], runtimeClasspath: [] },
-        { mainClass: 'RunnerB', args: [], runtimeClasspath: [] },
+        { mainClass: 'RunnerA', args: [], runtimeClasspath: [], runtimeModulePath: [] },
+        { mainClass: 'RunnerB', args: [], runtimeClasspath: [], runtimeModulePath: [] },
       ];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return { javaExec: '/bin/java' } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
@@ -320,7 +291,7 @@ test('resolveTestTarget throws exact error when multiple launch specifications a
   );
 });
 
-test('resolveTestTarget merges classpath in order keeping first occurrence and preserving empty string cwd', async () => {
+test('resolveTestTarget forwards runner paths as additions instead of replacing the module runtime', async () => {
   const session = createMockLspSession(async (_method, params) => {
     const cmd = params as { command: string };
     if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
@@ -328,63 +299,23 @@ test('resolveTestTarget merges classpath in order keeping first occurrence and p
         {
           mainClass: 'com.example.Runner',
           args: ['run'],
-          runtimeClasspath: ['/shared/common.jar', '', '/unique/runner.jar', '/shared/common.jar'],
+          runtimeClasspath: ['/shared/common.jar', '/unique/runner.jar', '/shared/common.jar'],
+          runtimeModulePath: ['/mods/test'],
         },
       ];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return {
-        javaExec: '/bin/java',
-        classpath: ['', '/app/classes', '/shared/common.jar', '/app/classes'],
-      } satisfies LaunchPaths;
     }
     throw new Error(`Unexpected command: ${cmd.command}`);
   });
 
   const target = await resolveTestTarget(session, 'file:///Test.java', ['com.example.Test']);
-  assert.deepEqual(target.paths.classpath, [
-    '',
-    '/app/classes',
+  assert.deepEqual(target.additionalClassPaths, [
     '/shared/common.jar',
     '/unique/runner.jar',
+    '/shared/common.jar',
   ]);
-});
-
-test('resolveTestTarget throws when project classpath contains non-string entry', async () => {
-  const session = createMockLspSession(async (_method, params) => {
-    const cmd = params as { command: string };
-    if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
-      return [{ mainClass: 'com.example.Runner', args: [], runtimeClasspath: [] }];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return {
-        javaExec: '/bin/java',
-        classpath: ['/valid', 123 as unknown as string],
-      } satisfies LaunchPaths;
-    }
-    throw new Error(`Unexpected command: ${cmd.command}`);
-  });
-
-  await assert.rejects(
-    () => resolveTestTarget(session, 'file:///Test.java', ['com.example.Test']),
-    /Project launch paths classpath at index 1 must be a string/,
-  );
-});
-
-test('resolveTestTarget throws when project launch paths do not contain a valid javaExec', async () => {
-  const session = createMockLspSession(async (_method, params) => {
-    const cmd = params as { command: string };
-    if (cmd.command === 'intellij.jvm.resolveTestLaunch') {
-      return [{ mainClass: 'com.example.Runner', args: [], runtimeClasspath: [] }];
-    }
-    if (cmd.command === 'omp.jvm.resolveLaunch') {
-      return { javaExec: '   ' } as unknown as LaunchPaths;
-    }
-    throw new Error(`Unexpected command: ${cmd.command}`);
-  });
-
-  await assert.rejects(
-    () => resolveTestTarget(session, 'file:///Test.java', ['com.example.Test']),
-    /Project launch paths do not contain a valid javaExec/,
+  assert.deepEqual(target.additionalModulePaths, ['/mods/test']);
+  assert.equal(
+    Object.keys(target).some((key) => key === 'javaExec' || key === 'classpath'),
+    false,
   );
 });

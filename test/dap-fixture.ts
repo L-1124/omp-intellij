@@ -48,7 +48,6 @@ export interface DapHarnessOptions {
   onLspClose?: () => void;
   capabilities?: Record<string, unknown>;
   defaultMainClass?: string;
-  fakeJavaExec?: string;
   keepBackendAfterDisconnect?: boolean;
 }
 
@@ -357,36 +356,8 @@ export async function createDapTestHarness(
             sendLsp({ id: msg.id, result: dapPort }, socket);
             return;
           }
-          if (cmd === 'omp.jvm.resolveBuildCommand') {
-            sendLsp(
-              {
-                id: msg.id,
-                result: {
-                  supported: true,
-                  command: [process.execPath, '-e', 'process.exit(0)'],
-                  cwd: process.cwd(),
-                  tool: 'fake',
-                },
-              },
-              socket,
-            );
-            return;
-          }
-          if (cmd === 'omp.jvm.resolveLaunch') {
-            sendLsp(
-              {
-                id: msg.id,
-                result: {
-                  javaExec:
-                    options.fakeJavaExec ??
-                    (process.platform === 'win32' ? 'C:\\fake\\java.exe' : '/fake/java'),
-                  classpath: ['target/classes'],
-                  modulePath: [],
-                  vmArgs: [],
-                },
-              },
-              socket,
-            );
+          if (cmd === 'org.intellij.android.debug.startServer') {
+            sendLsp({ id: msg.id, result: { port: dapPort } }, socket);
             return;
           }
           if (cmd === 'intellij.jvm.discoverTestsInFile') {
@@ -394,11 +365,10 @@ export async function createDapTestHarness(
               {
                 id: msg.id,
                 result: [
-                  { id: 'com.example.JavaGreeterTest', kind: 'CLASS', runnable: true },
+                  { id: 'com.example.JavaGreeterTest', kind: 'SUITE' },
                   {
                     id: 'com.example.JavaGreeterTest#testGreeting',
-                    kind: 'METHOD',
-                    runnable: true,
+                    kind: 'TEST',
                   },
                 ],
               },
@@ -422,6 +392,7 @@ export async function createDapTestHarness(
                     mainClass: 'com.intellij.rt.junit.JUnitStarter',
                     args: ['-junit5', ...testIds],
                     runtimeClasspath: ['target/test-classes'],
+                    runtimeModulePath: [],
                   },
                 ],
               },

@@ -23,6 +23,7 @@ async function createFakeLspServer(
   t: TestContext,
   options: {
     onRequest?: (method: string, params: unknown, id: number, socket: net.Socket) => void;
+    onNotification?: (method: string, params: unknown, socket: net.Socket) => void;
     autoReady?: boolean;
   } = {},
 ) {
@@ -60,6 +61,8 @@ async function createFakeLspServer(
           } else {
             socket.write(encode({ jsonrpc: '2.0', id: msg.id, result: {} }));
           }
+        } else if (msg.method) {
+          options.onNotification?.(msg.method, msg.params, socket);
         }
       }),
     );
@@ -584,4 +587,102 @@ test('runner authorization denial rejects a wait without disconnecting; recovery
   assert.deepEqual(await reloaded, { ready: true });
   assert.equal(session.isReady(), true);
   await session.close();
+});
+
+test('runner delivers native build output notifications and stops delivery after unsubscribe', async (t) => {
+  const fake = await createFakeLspServer(t, {
+    onRequest(method, params, id, socket) {
+      if (method === 'initialize') {
+        socket.write(encode({ jsonrpc: '2.0', id, result: { capabilities: {} } }));
+        socket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
+        return;
+      }
+      if (method === 'workspace/executeCommand') {
+        const command = params as { arguments: Array<{ buildId: string }> };
+        socket.write(
+          encode({
+            jsonrpc: '2.0',
+            method: 'intellij/buildOutput',
+            params: {
+              buildId: command.arguments[0].buildId,
+              category: 'stderr',
+              line: 'missing symbol',
+            },
+          }),
+        );
+      }
+      socket.write(encode({ jsonrpc: '2.0', id, result: { exitCode: 1, unsupported: [] } }));
+    },
+  });
+  const session = await createLspSession(process.cwd(), {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+  });
+  t.after(() => session.close());
+  const events: unknown[] = [];
+  const unsubscribe = session.onNotification('intellij/buildOutput', (event) => events.push(event));
+  await session.request('workspace/executeCommand', {
+    command: 'intellij.build',
+    arguments: [{ buildId: 'build-under-test', uri: 'file:///Main.java' }],
+  });
+  unsubscribe();
+  fake.sendNotification('intellij/buildOutput', {
+    buildId: 'build-under-test',
+    category: 'stderr',
+    line: 'late event',
+  });
+  await session.request('custom/fence', {});
+  assert.deepEqual(events, [
+    { buildId: 'build-under-test', category: 'stderr', line: 'missing symbol' },
+  ]);
+});
+
+test('native build abort sends cancellation for its request and keeps the session usable', async (t) => {
+  const started = Promise.withResolvers<number>();
+  const cancelled = Promise.withResolvers<number>();
+  const fake = await createFakeLspServer(t, {
+    onRequest(method, _params, id, socket) {
+      if (method === 'initialize') {
+        socket.write(encode({ jsonrpc: '2.0', id, result: { capabilities: {} } }));
+        socket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
+      } else if (method === 'workspace/executeCommand') {
+        started.resolve(id);
+      } else {
+        socket.write(encode({ jsonrpc: '2.0', id, result: 'still connected' }));
+      }
+    },
+    onNotification(method, params, socket) {
+      if (method !== '$/cancelRequest') return;
+      const { id } = params as { id: number };
+      cancelled.resolve(id);
+      socket.write(
+        encode({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32800, message: 'Request cancelled' },
+        }),
+      );
+    },
+  });
+  const session = await createLspSession(process.cwd(), {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+  });
+  t.after(() => session.close());
+  const abort = new AbortController();
+  const build = session.request(
+    'workspace/executeCommand',
+    {
+      command: 'intellij.build',
+      arguments: [{ uri: 'file:///Main.java', buildId: 'cancelled-build' }],
+    },
+    30000,
+    abort.signal,
+  );
+  const rejected = assert.rejects(build, /stop build/);
+  const requestId = await started.promise;
+  abort.abort(new Error('stop build'));
+  await rejected;
+  assert.equal(await cancelled.promise, requestId);
+  assert.equal(await session.request('custom/fence', {}), 'still connected');
 });

@@ -1,8 +1,8 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   getHostInitializationOptions,
@@ -23,7 +23,7 @@ import {
   recordReadiness,
 } from '../project/metadata.js';
 import { findProjectRoot } from '../project/readiness.js';
-import { applyWorkspaceOptions, getWorkspaceInfo } from '../project/workspace.js';
+import { applyWorkspaceOptions } from '../project/workspace.js';
 import { connectWithLease, settings } from '../server/service.js';
 import { encode, frameParser } from '../shared/protocol.js';
 import {
@@ -90,45 +90,18 @@ export function toggleDriveCase(uri: unknown): string {
   return uri.replace(/^file:\/\/\/[a-zA-Z]:/, `file:///${toggled}:`);
 }
 
-export function prepareBuildCommand(executable: string, args: string[]) {
-  if (process.platform !== 'win32') {
-    return { cmd: executable, argv: args, shell: false, windowsVerbatimArguments: false };
-  }
-
-  const isBatch = /\.(cmd|bat)$/i.test(executable) || !/\.[a-zA-Z0-9]+$/i.test(executable);
-  if (!isBatch) {
-    return { cmd: executable, argv: args, shell: false, windowsVerbatimArguments: false };
-  }
-
-  const dangerousRegex = /[&|<>^%]/;
-  for (const arg of args) {
-    if (dangerousRegex.test(arg)) {
-      throw new Error(`Unsafe character in build argument: ${arg}`);
-    }
-  }
-
-  const quotedArgs = args.map((arg) => {
-    if (/[\s"]/.test(arg)) {
-      return `"${arg.replace(/"/g, '""')}"`;
-    }
-    return arg;
-  });
-
-  const comspec = process.env.COMSPEC || 'cmd.exe';
-  return {
-    cmd: comspec,
-    argv: ['/d', '/s', '/c', `"${[executable, ...quotedArgs].join(' ')}"`],
-    shell: false,
-    windowsVerbatimArguments: true,
-  };
-}
-
 export interface LspSession {
   rootUri: string;
   nativePath: string;
   serverCapabilities?: Record<string, unknown>;
-  request: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
+  request: (
+    method: string,
+    params: unknown,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
   notify: (method: string, params: unknown) => void;
+  onNotification: (method: string, listener: (params: unknown) => void) => () => void;
   isReady: () => boolean;
   reloadWorkspace: (options?: {
     initializationOptions?: unknown;
@@ -331,8 +304,14 @@ export async function createLspSession(
   let nextId = 1;
   const pending = new Map<
     number,
-    { resolve: (val: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+    {
+      resolve: (val: unknown) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+      dispose: () => void;
+    }
   >();
+  const notificationListeners = new Map<string, Set<(params: unknown) => void>>();
   let isClosed = false;
   let serverReady = false;
 
@@ -454,11 +433,26 @@ export async function createLspSession(
     send({ method, params });
   }
 
+  function onNotification(method: string, listener: (params: unknown) => void): () => void {
+    let listeners = notificationListeners.get(method);
+    if (!listeners) {
+      listeners = new Set();
+      notificationListeners.set(method, listeners);
+    }
+    listeners.add(listener);
+    const registered = listeners;
+    return () => {
+      registered.delete(listener);
+      if (registered.size === 0) notificationListeners.delete(method);
+    };
+  }
+
   function cleanup(
     error?: Error,
     closeOpts?: { kind?: FailureDetail['kind']; stage?: FailureDetail['stage'] },
   ): Promise<void> {
     if (closePromise) return closePromise;
+    for (const reqId of pending.keys()) notify('$/cancelRequest', { id: reqId });
     isClosed = true;
     const lease = leaseHandle;
     leaseHandle = null;
@@ -466,16 +460,18 @@ export async function createLspSession(
     fatalError = err;
     for (const handler of pending.values()) {
       clearTimeout(handler.timer);
+      handler.dispose();
       handler.reject(err);
     }
     pending.clear();
+    notificationListeners.clear();
     for (const waiter of readinessWaiters) waiter.reject(err);
     readinessWaiters.clear();
     closePromise = Promise.all([
       connState.close(connectionCloseState(error, { ...closeOpts, systemPath })),
       lease?.release(),
     ]).then(() => {});
-    socket.destroy();
+    socket.end(() => socket.destroy());
     return closePromise;
   }
 
@@ -496,6 +492,7 @@ export async function createLspSession(
       if (handler) {
         pending.delete(message.id);
         clearTimeout(handler.timer);
+        handler.dispose();
         if (message.error) {
           const error = new RpcResponseError(
             message.error as { code?: number | string; message?: string; data?: unknown },
@@ -571,6 +568,11 @@ export async function createLspSession(
         });
       }
       return;
+    }
+    if (message.method) {
+      for (const listener of notificationListeners.get(message.method) ?? []) {
+        listener(message.params);
+      }
     }
   }
 
@@ -701,17 +703,40 @@ export async function createLspSession(
       method: string,
       params: unknown,
       timeoutMs: number = requestTimeout,
+      requestSignal?: AbortSignal,
     ): Promise<unknown> {
       if (isClosed) return Promise.reject(new Error('LSP session is closed'));
+      if (requestSignal?.aborted) {
+        return Promise.reject(
+          requestSignal.reason instanceof Error
+            ? requestSignal.reason
+            : new Error('LSP request cancelled'),
+        );
+      }
       const reqId = nextId++;
       const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+      const onRequestAbort = () => {
+        if (!pending.delete(reqId)) return;
+        clearTimeout(timer);
+        dispose();
+        notify('$/cancelRequest', { id: reqId });
+        reject(
+          requestSignal?.reason instanceof Error
+            ? requestSignal.reason
+            : new Error('LSP request cancelled'),
+        );
+      };
+      const dispose = () => requestSignal?.removeEventListener('abort', onRequestAbort);
       const timer = setTimeout(() => {
         pending.delete(reqId);
+        dispose();
+        notify('$/cancelRequest', { id: reqId });
         const err = new Error(`LSP request ${method} timed out after ${timeoutMs}ms`);
         (err as Error & { code?: string }).code = 'ETIMEDOUT';
         reject(err);
       }, timeoutMs);
-      pending.set(reqId, { resolve, reject, timer });
+      pending.set(reqId, { resolve, reject, timer, dispose });
+      requestSignal?.addEventListener('abort', onRequestAbort, { once: true });
       send({ id: reqId, method, params });
       return promise;
     }
@@ -775,6 +800,7 @@ export async function createLspSession(
       serverCapabilities,
       request,
       notify,
+      onNotification,
       isReady: () => serverReady,
       reloadWorkspace,
       close: async () => {
@@ -793,65 +819,6 @@ export async function createLspSession(
   }
 }
 
-export async function resolveBuildCommand(
-  lspSession: LspSession,
-  fileUri: string,
-): Promise<{ supported: boolean; command: string[]; cwd: string; tool: string; reason?: string }> {
-  try {
-    return (await lspSession.request('workspace/executeCommand', {
-      command: 'omp.jvm.resolveBuildCommand',
-      arguments: [{ uri: fileUri }],
-    })) as { supported: boolean; command: string[]; cwd: string; tool: string; reason?: string };
-  } catch (err: unknown) {
-    const altUri = toggleDriveCase(fileUri);
-    if (altUri && altUri !== fileUri) {
-      try {
-        return (await lspSession.request('workspace/executeCommand', {
-          command: 'omp.jvm.resolveBuildCommand',
-          arguments: [{ uri: altUri }],
-        })) as {
-          supported: boolean;
-          command: string[];
-          cwd: string;
-          tool: string;
-          reason?: string;
-        };
-      } catch {}
-    }
-    throw err;
-  }
-}
-
-export interface LaunchPaths {
-  javaExec: string;
-  classpath?: string[];
-  modulePath?: string[];
-  moduleName?: string;
-  moduleContentPaths?: string[];
-  workingDirectory?: string;
-  vmArgs?: string[];
-}
-
-export async function resolveLaunch(lspSession: LspSession, fileUri: string): Promise<LaunchPaths> {
-  try {
-    return (await lspSession.request('workspace/executeCommand', {
-      command: 'omp.jvm.resolveLaunch',
-      arguments: [{ uri: fileUri }],
-    })) as LaunchPaths;
-  } catch (err: unknown) {
-    const altUri = toggleDriveCase(fileUri);
-    if (altUri && altUri !== fileUri) {
-      try {
-        return (await lspSession.request('workspace/executeCommand', {
-          command: 'omp.jvm.resolveLaunch',
-          arguments: [{ uri: altUri }],
-        })) as LaunchPaths;
-      } catch {}
-    }
-    throw err;
-  }
-}
-
 export async function startDebugServer(lspSession: LspSession, rootUri: string): Promise<number> {
   const result = await lspSession.request('workspace/executeCommand', {
     command: 'start_debug_server',
@@ -862,131 +829,6 @@ export async function startDebugServer(lspSession: LspSession, rootUri: string):
     throw new Error(`Invalid debug server port returned: ${JSON.stringify(result)}`);
   }
   return port;
-}
-
-export async function executeBuild(
-  buildCommand: { command: string[]; cwd?: string; tool?: string; env?: Record<string, string> },
-  options: {
-    signal?: AbortSignal;
-    onOutput?: (e: { output: string; category: string }) => void;
-    projectRoot?: string;
-    configDir?: string;
-  } = {},
-): Promise<{ exitCode: number; buildOutput: string }> {
-  const { command, cwd, tool } = buildCommand;
-  if (!Array.isArray(command) || command.length === 0) {
-    throw new Error('Empty build command');
-  }
-
-  const label = tool || 'build tool';
-  const startMsg = `--- ${label}: building: ${command.join(' ')} ---\n`;
-  if (options.onOutput) options.onOutput({ output: startMsg, category: 'console' });
-
-  const executable = command[0];
-  const args = command.slice(1);
-  const prep = prepareBuildCommand(executable, args);
-
-  const targetRoot = options.projectRoot || cwd || process.cwd();
-  let managedJdk: string | null = null;
-  const info = await getWorkspaceInfo(targetRoot, { configDir: options.configDir });
-  if (info?.savedJdk) {
-    managedJdk = info.savedJdk;
-  }
-
-  function findPathKey(env: NodeJS.ProcessEnv): string {
-    for (const key of Object.keys(env)) {
-      if (key.toLowerCase() === 'path') return key;
-    }
-    return process.platform === 'win32' ? 'Path' : 'PATH';
-  }
-
-  const baseEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...(buildCommand.env || {}),
-  };
-
-  const effectiveJavaHome = buildCommand.env?.JAVA_HOME || managedJdk;
-  if (effectiveJavaHome) {
-    baseEnv.JAVA_HOME = effectiveJavaHome;
-    const pathKey = findPathKey(baseEnv);
-    const currentPath = baseEnv[pathKey] || '';
-    const binDir = join(effectiveJavaHome, 'bin');
-    baseEnv[pathKey] = currentPath ? `${binDir}${delimiter}${currentPath}` : binDir;
-  }
-  baseEnv.JAVA_TOOL_OPTIONS = `${baseEnv.JAVA_TOOL_OPTIONS ? `${baseEnv.JAVA_TOOL_OPTIONS} ` : ''}-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8`;
-
-  const {
-    promise,
-    resolve: resolvePromise,
-    reject: rejectPromise,
-  } = Promise.withResolvers<{ exitCode: number; buildOutput: string }>();
-  let captured = '';
-  let killed = false;
-
-  const proc = spawn(prep.cmd, prep.argv, {
-    cwd: cwd || process.cwd(),
-    shell: prep.shell,
-    windowsVerbatimArguments: prep.windowsVerbatimArguments,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: baseEnv,
-  });
-
-  const handleAbort = () => {
-    killed = true;
-    try {
-      if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true });
-      } else {
-        proc.kill('SIGTERM');
-      }
-    } catch {}
-    const stopMsg = `--- ${label}: build stopped ---\n`;
-    if (options.onOutput) options.onOutput({ output: stopMsg, category: 'console' });
-    rejectPromise(new Error(`Build cancelled: ${label}`));
-  };
-
-  if (options.signal?.aborted) {
-    handleAbort();
-    return promise;
-  }
-  options.signal?.addEventListener('abort', handleAbort, { once: true });
-
-  proc.stdout.setEncoding('utf8');
-  proc.stderr.setEncoding('utf8');
-  proc.stdout.on('data', (text: string) => {
-    captured += text;
-    if (options.onOutput) options.onOutput({ output: text, category: 'stdout' });
-  });
-
-  proc.stderr.on('data', (text: string) => {
-    captured += text;
-    if (options.onOutput) options.onOutput({ output: text, category: 'stderr' });
-  });
-
-  proc.on('error', (err: Error) => {
-    options.signal?.removeEventListener('abort', handleAbort);
-    const errMsg = `--- ${label}: build failed to start: ${err.message} ---\n`;
-    if (options.onOutput) options.onOutput({ output: errMsg, category: 'console' });
-    rejectPromise(new Error(`Failed to start build tool (${label}): ${err.message}`));
-  });
-
-  proc.on('close', (code: number | null) => {
-    options.signal?.removeEventListener('abort', handleAbort);
-    if (killed) return;
-    if (code === 0) {
-      const succMsg = `--- ${label}: build succeeded ---\n`;
-      if (options.onOutput) options.onOutput({ output: succMsg, category: 'console' });
-      resolvePromise({ exitCode: 0, buildOutput: captured });
-    } else {
-      const failMsg = `--- ${label}: build failed, exit ${code} ---\n`;
-      if (options.onOutput) options.onOutput({ output: failMsg, category: 'console' });
-      const tail = captured.length > 4000 ? captured.slice(-4000) : captured;
-      rejectPromise(new Error(`Build failed with exit code ${code} (${label}):\n${tail.trim()}`));
-    }
-  });
-
-  return promise;
 }
 
 export async function runViaDap(options: {
@@ -1014,6 +856,7 @@ export async function runViaDap(options: {
   let ownedTargetPid: number | null = null;
   let timeoutTimer: NodeJS.Timeout | null = null;
   let terminationReason: Error | null = null;
+  const nativeDisconnected = Promise.withResolvers<void>();
 
   function sendDap(msg: Record<string, unknown>) {
     if (socket.destroyed) return;
@@ -1030,8 +873,13 @@ export async function runViaDap(options: {
     } catch {}
 
     const finalError = terminationReason || err;
-    if (finalError) rejectPromise(finalError);
-    else if (result) resolvePromise(result);
+    if (finalError) {
+      rejectPromise(
+        programOutput
+          ? new Error(`${finalError.message}\n${programOutput.slice(-4000)}`, { cause: finalError })
+          : finalError,
+      );
+    } else if (result) resolvePromise(result);
   }
 
   async function performTermination(reasonError: Error) {
@@ -1060,9 +908,23 @@ export async function runViaDap(options: {
         arguments: { terminateDebuggee: true },
       });
     } catch {}
+    const cleanupDeadline = Promise.withResolvers<void>();
+    const cleanupTimer = setTimeout(cleanupDeadline.resolve, 3000);
+    try {
+      await Promise.race([nativeDisconnected.promise, cleanupDeadline.promise]);
+    } finally {
+      clearTimeout(cleanupTimer);
+    }
 
     if (runMarker) {
-      await terminateMarkedProcess(runMarker, javaExec, 3000);
+      try {
+        await terminateMarkedProcess(runMarker, javaExec, 3000);
+      } catch (error) {
+        terminationReason = new AggregateError(
+          [terminationReason, error],
+          'Native JVM cancellation cleanup failed',
+        );
+      }
     } else if (ownedTargetPid) {
       let alive = false;
       try {
@@ -1129,6 +991,10 @@ export async function runViaDap(options: {
     if (!message) return;
 
     if (message.type === 'response') {
+      if (isTerminating) {
+        if (message.command === 'disconnect' && message.success) nativeDisconnected.resolve();
+        return;
+      }
       if (message.command === 'initialize') {
         if (!message.success) {
           finish(new Error(`DAP initialize failed: ${message.message || 'unknown error'}`));
@@ -1219,7 +1085,8 @@ export async function runViaDap(options: {
     }
   });
 
-  socket.once('close', () => {
+  socket.once('close', (hadError) => {
+    if (isTerminating && !hadError) nativeDisconnected.resolve();
     if (!finished && !isTerminating && !terminationReason) {
       if (exitCode !== null) {
         finish(null, { exitCode, output: programOutput });
@@ -1250,9 +1117,7 @@ export interface RunMainOptions {
 export interface RunMainResult {
   exitCode: number;
   mainClass: string;
-  cwd: string;
-  javaExec: string;
-  buildOutput: string;
+  cwd?: string;
   output: string;
 }
 
@@ -1263,6 +1128,11 @@ export async function runMain(
     onOutput?: (e: { output: string; category: string }) => void;
   } = {},
 ): Promise<RunMainResult> {
+  if (options.build === false) {
+    throw new Error(
+      'build:false is unsupported by the native ILS JVM launcher: it cannot guarantee skipping the build',
+    );
+  }
   let resolvedFile = options.file;
   if (typeof resolvedFile === 'string' && resolvedFile.startsWith('file://')) {
     resolvedFile = fileURLToPath(resolvedFile);
@@ -1287,9 +1157,7 @@ export async function runMain(
     : timeoutSignal;
 
   const lspSession = await createLspSession(projectRoot, { signal: combinedSignal });
-  let buildOutput = '';
   let runMarker: string | null = null;
-  let paths: LaunchPaths | null = null;
 
   try {
     const fileUri = toLspFileUri(resolvedFile, lspSession.rootUri);
@@ -1318,62 +1186,11 @@ export async function runMain(
       );
     }
 
-    if (options.build !== false) {
-      let resolvedBuild: {
-        supported: boolean;
-        command: string[];
-        cwd: string;
-        tool: string;
-        reason?: string;
-      };
-      try {
-        resolvedBuild = await resolveBuildCommand(lspSession, fileUri);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`Build resolution failed for ${resolvedFile}: ${msg}`);
-      }
-
-      if (!resolvedBuild || resolvedBuild.supported === false) {
-        throw new Error(
-          `Build unsupported for ${resolvedFile}: ${resolvedBuild?.reason || 'Server reports build unsupported for this module'}`,
-        );
-      }
-      if (!Array.isArray(resolvedBuild.command) || resolvedBuild.command.length === 0) {
-        throw new Error(
-          `Build command empty for ${resolvedFile}: ${resolvedBuild?.reason || 'No compile command returned by server'}`,
-        );
-      }
-
-      const buildRes = await executeBuild(resolvedBuild, {
-        signal: combinedSignal,
-        onOutput: events.onOutput,
-        projectRoot,
-      });
-      buildOutput = buildRes.buildOutput;
-    }
-
-    try {
-      paths = await resolveLaunch(lspSession, fileUri);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Launch resolution failed for ${resolvedFile}: ${msg}`);
-    }
-
-    if (!paths?.javaExec) {
-      throw new Error(
-        `Launch resolution returned no java executable for ${resolvedFile} (no project JDK configured?): ${JSON.stringify(paths)}`,
-      );
-    }
-
     const port = await startDebugServer(lspSession, lspSession.rootUri);
 
     runMarker = randomUUID();
-    const effectiveCwd = options.cwd ? resolve(options.cwd) : paths.workingDirectory || projectRoot;
-    const vmArgs = [
-      ...(paths.vmArgs || []),
-      ...(options.vmArgs || []),
-      `-Domp.intellij.run.id=${runMarker}`,
-    ];
+    const effectiveCwd = options.cwd ? resolve(options.cwd) : undefined;
+    const vmArgs = [...(options.vmArgs || []), `-Domp.intellij.run.id=${runMarker}`];
 
     const launchConfig: Record<string, unknown> = {
       type: 'intellij_jvm',
@@ -1382,14 +1199,10 @@ export async function runMain(
       mainClass,
       file: fileUri,
       tool: 'java',
-      classPaths: paths.classpath || [],
-      modulePaths: paths.modulePath || [],
-      moduleContentPaths: paths.moduleContentPaths || [],
-      javaExec: paths.javaExec,
       vmArgs,
       args: options.args || [],
       env: options.env || {},
-      cwd: effectiveCwd,
+      ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
       console: 'internalConsole',
       noDebug: options.noDebug !== false,
       stopOnEntry: false,
@@ -1402,7 +1215,6 @@ export async function runMain(
       signal: combinedSignal,
       onOutput: events.onOutput,
       runMarker,
-      javaExec: paths.javaExec,
     });
 
     if (combinedSignal.aborted) {
@@ -1419,9 +1231,7 @@ export async function runMain(
     return {
       exitCode: dapRes.exitCode,
       mainClass,
-      cwd: effectiveCwd,
-      javaExec: paths.javaExec,
-      buildOutput,
+      ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
       output: dapRes.output,
     };
   } catch (err: unknown) {
@@ -1438,7 +1248,7 @@ export async function runMain(
     throw err;
   } finally {
     if (runMarker) {
-      await terminateMarkedProcess(runMarker, paths?.javaExec, 2000).catch(() => {});
+      await terminateMarkedProcess(runMarker, undefined, 2000).catch(() => {});
     }
     await lspSession.close().catch(() => {});
   }

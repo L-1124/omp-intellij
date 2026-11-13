@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { type ChildProcess, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -108,67 +108,45 @@ test('resolveSourceFile resolves existing paths and candidate extensions', () =>
   assert.ok(candidate);
 });
 
-for (const mode of ['module', 'explicit', 'project'] as const) {
-  test(`launch resolves relative resources from ${mode} working directory`, async (t) => {
-    const root = await mkdtemp(join(tmpdir(), 'omp-launch-cwd-'));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    const moduleDir = join(root, 'module');
-    const explicitDir = join(root, 'override');
-    await mkdir(moduleDir);
-    await mkdir(explicitDir);
-    await writeFile(join(root, 'pom.xml'), '<project/>');
-    const program = join(root, 'Main.java');
-    await writeFile(program, 'class Main { public static void main(String[] args) {} }');
-    for (const [dir, value] of [
-      [root, 'project-resource'],
-      [moduleDir, 'module-resource'],
-      [explicitDir, 'explicit-resource'],
-    ]) {
-      await writeFile(join(dir, 'launch-resource.txt'), value);
-    }
-    let resource: string | undefined;
-    let launched: SpawnSyncReturns<string> | undefined;
-    const harness = await createDapTestHarness(t, {
-      fakeJavaExec: process.execPath,
-      onLspRequest(method, params) {
-        if (
-          method === 'workspace/executeCommand' &&
-          params &&
-          typeof params === 'object' &&
-          'command' in params &&
-          params.command === 'omp.jvm.resolveLaunch'
-        ) {
-          return {
-            javaExec: process.execPath,
-            classpath: [],
-            ...(mode === 'project' ? {} : { workingDirectory: moduleDir }),
-          };
-        }
-        return undefined;
-      },
-      onDapRequest(request) {
-        if (request.command !== 'launch') return;
-        launched = spawnSync(
-          process.execPath,
-          ['-e', "process.stdout.write(require('node:fs').readFileSync('launch-resource.txt'))"],
-          { cwd: String(request.arguments?.cwd), encoding: 'utf8', windowsHide: true },
-        );
-        resource = String(launched.stdout);
-        return undefined;
-      },
-    });
-    await harness.request('initialize');
-    const result = await harness.request('launch', {
-      program,
-      build: false,
-      stopOnEntry: false,
-      ...(mode === 'explicit' ? { cwd: explicitDir } : {}),
-    });
-    assert.equal(result.success, true, result.message);
-    assert.equal(launched?.status, 0, String(launched?.stderr));
-    assert.equal(resource, `${mode}-resource`);
+test('launch forwards the explicit cwd and lets the native adapter resolve the module runtime', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-launch-cwd-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const explicitDir = join(root, 'override');
+  await mkdir(explicitDir);
+  await writeFile(join(root, 'pom.xml'), '<project/>');
+  const program = join(root, 'Main.java');
+  await writeFile(program, 'class Main { public static void main(String[] args) {} }');
+  let launchedArgs: Record<string, unknown> | undefined;
+  const harness = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command !== 'launch') return;
+      launchedArgs = request.arguments;
+      return undefined;
+    },
   });
-}
+  await harness.request('initialize');
+  const result = await harness.request('launch', {
+    program,
+    cwd: explicitDir,
+    stopOnEntry: false,
+  });
+  assert.equal(result.success, true, result.message);
+  assert.equal(launchedArgs?.cwd, explicitDir);
+  assert.equal('javaExec' in (launchedArgs ?? {}), false);
+  assert.equal('classPaths' in (launchedArgs ?? {}), false);
+  assert.equal(
+    harness.lspRequests.some(
+      (r) =>
+        r.method === 'workspace/executeCommand' &&
+        r.params &&
+        typeof r.params === 'object' &&
+        'command' in r.params &&
+        (r.params.command === 'omp.jvm.resolveLaunch' ||
+          r.params.command === 'omp.jvm.resolveBuildCommand'),
+    ),
+    false,
+  );
+});
 
 test('isDirectExecution matches the entry script by path, suffix, and empty entry', () => {
   const currentFile = fileURLToPath(import.meta.url);
@@ -456,7 +434,7 @@ const javaTestProgram = fileURLToPath(
 );
 
 function testLaunchArguments(): Record<string, unknown> {
-  return { program: javaTestProgram, testMode: true, build: false, stopOnEntry: true };
+  return { program: javaTestProgram, testMode: true, stopOnEntry: true };
 }
 
 test('attach rejects invalid ports and PID-only targets before opening a backend', async (t) => {
@@ -475,6 +453,10 @@ test('launch rejects malformed and conflicting preset arguments before opening a
   const cases: Array<{ args: Record<string, unknown>; error: RegExp }> = [
     { args: { testMode: 'true' }, error: /testMode must be a boolean/ },
     { args: { build: 0 }, error: /build must be a boolean/ },
+    {
+      args: { build: false },
+      error: /build: false is not supported: the IntelliJ debug adapter always builds/,
+    },
     { args: { stopOnEntry: 'false' }, error: /stopOnEntry must be a boolean/ },
     { args: { noDebug: null }, error: /noDebug must be a boolean/ },
     { args: { args: ['valid', 1] }, error: /args must be an array of strings/ },
@@ -509,7 +491,7 @@ test('launch rejects malformed and conflicting preset arguments before opening a
   assert.equal(h.backendRequests.length, 0);
 });
 
-for (const ending of ['disconnect', 'terminate', 'eof', 'backend-close'] as const) {
+for (const ending of ['disconnect', 'eof', 'backend-close'] as const) {
   test(`attach ${ending} releases the debugger without terminating its external JVM`, async (t) => {
     let externalTargetAlive = true;
     const h = await createDapTestHarness(t, {
@@ -541,6 +523,45 @@ for (const ending of ['disconnect', 'terminate', 'eof', 'backend-close'] as cons
     );
   });
 }
+
+test('terminate forwards independently and failure does not close an active session', async (t) => {
+  const h = await createDapTestHarness(t, {
+    capabilities: { supportsTerminateRequest: false },
+    onDapRequest(request) {
+      if (request.command === 'terminate') {
+        h.respond(request, undefined, false, 'Terminate is not supported');
+        return true;
+      }
+    },
+  });
+  await h.request('initialize');
+  assert.equal((await h.request('attach', { port: 5005 })).success, true);
+  const term = await h.request('terminate');
+  assert.equal(term.success, false);
+  assert.equal(term.message, 'Terminate is not supported');
+  const threads = await h.request('threads');
+  assert.equal(threads.success, true);
+  assert.equal((await h.request('disconnect')).success, true);
+  assert.equal(await h.closed, 0);
+});
+
+test('terminate forwards on launch and shuts down when backend emits terminated', async (t) => {
+  const h = await createDapTestHarness(t, {
+    capabilities: { supportsTerminateRequest: true },
+    onDapRequest(request) {
+      if (request.command === 'terminate') {
+        h.respond(request, {});
+        h.emit('terminated');
+        return true;
+      }
+    },
+  });
+  await h.request('initialize');
+  assert.equal((await h.request('launch', testLaunchArguments())).success, true);
+  const term = await h.request('terminate');
+  assert.equal(term.success, true);
+  assert.equal(await h.closed, 0);
+});
 
 test('EOF during backend initialize fails the pending attach exactly once', async (t) => {
   const initializing = Promise.withResolvers<void>();
@@ -775,31 +796,25 @@ for (const unsupported of ['capability', 'request'] as const) {
   });
 }
 
-test('failed test compilation blocks launching stale classes', async (t) => {
-  const h = await createDapTestHarness(t, {
-    onLspRequest(_method, params) {
-      if (
-        params &&
-        typeof params === 'object' &&
-        'command' in params &&
-        params.command === 'omp.jvm.resolveBuildCommand'
-      ) {
-        return {
-          supported: true,
-          command: [process.execPath, '-e', 'process.exit(17)'],
-          cwd: process.cwd(),
-          tool: 'node',
-        };
-      }
-    },
-  });
+test('native launch never runs a proxy-side build before the adapter launches', async (t) => {
+  const h = await createDapTestHarness(t);
   const result = await h.request('launch', { ...testLaunchArguments(), build: true });
-  assert.equal(result.success, false);
-  assert.match(result.message ?? '', /Build failed with exit code 17/);
-  await h.closed;
+  assert.equal(result.success, true, result.message);
+  assert.equal(
+    h.lspRequests.some(
+      (r) =>
+        r.method === 'workspace/executeCommand' &&
+        r.params &&
+        typeof r.params === 'object' &&
+        'command' in r.params &&
+        (r.params.command === 'omp.jvm.resolveBuildCommand' ||
+          r.params.command === 'omp.jvm.resolveLaunch'),
+    ),
+    false,
+  );
   assert.equal(
     h.backendRequests.some((r) => r.command === 'launch'),
-    false,
+    true,
   );
 });
 
@@ -1069,7 +1084,7 @@ test('capability probe: missing start_debug_server in executeCommandProvider fai
           capabilities: {
             codeLensProvider: { resolveProvider: false },
             executeCommandProvider: {
-              commands: ['exportWorkspace', 'omp.jvm.resolveLaunch'],
+              commands: ['exportWorkspace', 'intellij.jvm.resolveTestLaunch'],
             },
           },
         };
@@ -1244,7 +1259,6 @@ test('proxy-created entry breakpoints stay one-based for the backend and zero-ba
   await h.request('configurationDone');
   const launched = await h.request('launch', {
     program: javaTestProgram,
-    build: false,
     stopOnEntry: true,
   });
   assert.equal(launched.success, true, launched.message);
@@ -1256,18 +1270,25 @@ test('proxy-created entry breakpoints stay one-based for the backend and zero-ba
   assert.deepEqual(changed.body, { reason: 'new', breakpoint: { id: 1, verified: true, line: 7 } });
 });
 
-test('backend capabilities cannot enable unsupported cancellation or configuration forwarding', async (t) => {
+test('initial capabilities report false defaults while backend capabilities and cancel are preserved', async (t) => {
   const h = await createDapTestHarness(t, {
     capabilities: {
       supportsCancelRequest: true,
+      supportsTerminateRequest: false,
+      supportTerminateDebuggee: true,
       supportsConfigurationDoneRequest: false,
       supportsConditionalBreakpoints: false,
       exceptionBreakpointFilters: [{ filter: 'uncaught', label: 'Uncaught' }],
     },
   });
   const initial = await h.request('initialize');
-  assert.ok(initial.body && typeof initial.body === 'object');
-  assert.equal('supportsConditionalBreakpoints' in initial.body, false);
+  assert.deepEqual(initial.body, {
+    supportsConfigurationDoneRequest: true,
+    supportsTerminateRequest: false,
+    supportTerminateDebuggee: false,
+    supportSuspendDebuggee: false,
+    supportsCancelRequest: false,
+  });
   await h.request('configurationDone');
   assert.equal((await h.request('attach', { port: 5005 })).success, true);
   await h.request('threads');
@@ -1281,27 +1302,42 @@ test('backend capabilities cannot enable unsupported cancellation or configurati
   const body = event?.body;
   assert.ok(body && typeof body === 'object' && 'capabilities' in body);
   const capabilities = body.capabilities;
-  assert.ok(capabilities && typeof capabilities === 'object');
-  assert.ok('supportsCancelRequest' in capabilities);
-  assert.equal(capabilities.supportsCancelRequest, false);
-  assert.ok('exceptionBreakpointFilters' in capabilities);
-  assert.deepEqual(capabilities.exceptionBreakpointFilters, [
-    { filter: 'uncaught', label: 'Uncaught' },
-  ]);
+  assert.ok(capabilities && typeof capabilities === 'object' && !Array.isArray(capabilities));
+  assert.equal('supportsCancelRequest' in capabilities && capabilities.supportsCancelRequest, true);
+  assert.equal(
+    'supportsTerminateRequest' in capabilities && capabilities.supportsTerminateRequest,
+    false,
+  );
+  assert.equal(
+    'supportTerminateDebuggee' in capabilities && capabilities.supportTerminateDebuggee,
+    true,
+  );
+  assert.equal(
+    'supportsConfigurationDoneRequest' in capabilities &&
+      capabilities.supportsConfigurationDoneRequest,
+    true,
+  );
+  assert.equal('supportSuspendDebuggee' in capabilities && capabilities.supportSuspendDebuggee, false);
+  assert.deepEqual(
+    'exceptionBreakpointFilters' in capabilities ? capabilities.exceptionBreakpointFilters : undefined,
+    [{ filter: 'uncaught', label: 'Uncaught' }],
+  );
   h.emit('capabilities', {
-    capabilities: { supportsCancelRequest: true, supportsLogPoints: true },
+    capabilities: { supportsTerminateRequest: true, supportsLogPoints: true },
   });
   await h.request('threads');
   const latest = h.messages
     .filter((message) => message.type === 'event' && message.event === 'capabilities')
     .at(-1)?.body;
   assert.ok(latest && typeof latest === 'object' && 'capabilities' in latest);
-  assert.ok(latest.capabilities && typeof latest.capabilities === 'object');
-  assert.ok('supportsCancelRequest' in latest.capabilities);
-  assert.equal(latest.capabilities.supportsCancelRequest, false);
+  const merged = latest.capabilities;
+  assert.ok(merged && typeof merged === 'object' && !Array.isArray(merged));
+  assert.equal('supportsCancelRequest' in merged && merged.supportsCancelRequest, true);
+  assert.equal('supportsTerminateRequest' in merged && merged.supportsTerminateRequest, true);
+  assert.equal('supportsLogPoints' in merged && merged.supportsLogPoints, true);
+  assert.equal('supportSuspendDebuggee' in merged && merged.supportSuspendDebuggee, false);
   const cancelled = await h.request('cancel', { requestId: 999 });
-  assert.equal(cancelled.success, false);
-  assert.match(cancelled.message ?? '', /not supported/);
+  assert.equal(cancelled.success, true);
   assert.equal(
     h.backendRequests.some((request) => request.command === 'cancel'),
     false,
@@ -1438,4 +1474,114 @@ test('buffered reference-only sources retain breakpoint identity through early e
     threadId: 1,
     hitBreakpointIds: [firstId, secondId],
   });
+});
+
+test('cancel maps in-flight client requestId to backend seq, preserves progressId, and drops completed mappings', async (t) => {
+  const heldThreads = Promise.withResolvers<DapRequest>();
+  let cancelReq: DapRequest | undefined;
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'threads') {
+        heldThreads.resolve(request);
+        return true;
+      }
+      if (request.command === 'cancel') {
+        cancelReq = request;
+      }
+    },
+  });
+  await h.request('initialize');
+  await h.request('attach', { port: 5005 });
+  const threadsSeq = h.send('threads');
+  const backendThreads = await heldThreads.promise;
+  assert.notEqual(threadsSeq, backendThreads.seq);
+  const cancelRes = await h.request('cancel', { requestId: threadsSeq, progressId: 'p-1' });
+  assert.equal(cancelRes.success, true);
+  assert.equal(cancelReq?.arguments?.requestId, backendThreads.seq);
+  assert.equal(cancelReq?.arguments?.progressId, 'p-1');
+
+  h.respond(backendThreads, { threads: [{ id: 1, name: 'main' }] });
+  const threadsRes = await h.waitFor(
+    (m) => m.type === 'response' && m.request_seq === threadsSeq,
+  );
+  assert.equal(threadsRes.type === 'response' && threadsRes.success, true);
+
+  const cancelCountBefore = h.backendRequests.filter((r) => r.command === 'cancel').length;
+  const completedCancel = await h.request('cancel', { requestId: threadsSeq });
+  assert.equal(completedCancel.success, true);
+  assert.equal(h.backendRequests.filter((r) => r.command === 'cancel').length, cancelCountBefore);
+
+  const progressOnly = await h.request('cancel', { requestId: 9999, progressId: 'p-2' });
+  assert.equal(progressOnly.success, true);
+  assert.equal(cancelReq?.arguments?.progressId, 'p-2');
+  assert.equal('requestId' in (cancelReq?.arguments ?? {}), false);
+});
+
+test('cancel matching startup seq before backend mapping aborts startup while mismatched cancel is ignored', async (t) => {
+  const entered = Promise.withResolvers<void>();
+  const releaseStartServer = Promise.withResolvers<number>();
+  const h = await createDapTestHarness(t, {
+    onLspRequest(method, params) {
+      if (
+        method === 'workspace/executeCommand' &&
+        params &&
+        typeof params === 'object' &&
+        'command' in params &&
+        params.command === 'start_debug_server'
+      ) {
+        entered.resolve();
+        return releaseStartServer.promise;
+      }
+    },
+  });
+  await h.request('initialize');
+  const launchSeq = h.send('launch', testLaunchArguments());
+  await entered.promise;
+  assert.equal((await h.request('cancel', { requestId: launchSeq + 50 })).success, true);
+  const cancelRes = await h.request('cancel', { requestId: launchSeq });
+  assert.equal(cancelRes.success, true);
+  const launchRes = await h.waitFor(
+    (m) => m.type === 'response' && m.request_seq === launchSeq,
+  );
+  assert.equal(launchRes.type === 'response' && launchRes.success, false);
+  assert.equal(
+    h.backendRequests.some((r) => r.command === 'cancel'),
+    false,
+  );
+  releaseStartServer.resolve(h.dapPort);
+  assert.equal(await h.closed, 1);
+});
+
+test('cancel matching startup seq after backend mapping forwards mapped seq and progressId', async (t) => {
+  const heldLaunch = Promise.withResolvers<DapRequest>();
+  const cancelForwarded = Promise.withResolvers<DapRequest>();
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'launch') {
+        heldLaunch.resolve(request);
+        return true;
+      }
+      if (request.command === 'cancel') {
+        cancelForwarded.resolve(request);
+      }
+    },
+  });
+  await h.request('initialize');
+  const launchSeq = h.send('launch', testLaunchArguments());
+  const backendLaunch = await heldLaunch.promise;
+  const cancelSeq = h.send('cancel', { requestId: launchSeq, progressId: 'p-launch' });
+  const backendCancel = await cancelForwarded.promise;
+  assert.equal(backendCancel.arguments?.requestId, backendLaunch.seq);
+  assert.equal(backendCancel.arguments?.progressId, 'p-launch');
+  const cancelRes = await h.waitFor(
+    (m) => m.type === 'response' && m.request_seq === cancelSeq,
+  );
+  assert.equal(cancelRes.type === 'response' && cancelRes.success, true);
+  h.respond(backendLaunch, undefined, false, 'Cancelled');
+  const launchRes = await h.waitFor(
+    (m) => m.type === 'response' && m.request_seq === launchSeq,
+  );
+  assert.equal(launchRes.type === 'response' && launchRes.success, false);
+  assert.match(launchRes.type === 'response' ? (launchRes.message ?? '') : '', /Cancelled/);
+  assert.equal(await h.closed, 1);
 });

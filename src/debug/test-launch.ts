@@ -1,21 +1,30 @@
-import { type LaunchPaths, type LspSession, resolveLaunch } from './run-core.js';
+import type { LspSession } from './run-core.js';
+
+export type TestKind = 'SUITE' | 'TEST';
 
 export interface TestDescriptor {
   id: string;
-  kind: string;
-  runnable: boolean;
+  kind: TestKind;
+  displayName?: string;
 }
 
 export interface ResolvedTestLaunchSpec {
   mainClass: string;
   args: string[];
   runtimeClasspath: string[];
+  runtimeModulePath: string[];
+  file?: string;
 }
 
 export interface ResolvedTestTarget {
   mainClass: string;
   args: string[];
-  paths: LaunchPaths;
+  additionalClassPaths: string[];
+  additionalModulePaths: string[];
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
 export async function discoverTestsInFile(
@@ -45,21 +54,14 @@ export async function discoverTestsInFile(
         `intellij.jvm.discoverTestsInFile: element at index ${i} has invalid or empty id`,
       );
     }
-    if (typeof record.kind !== 'string') {
+    if (record.kind !== 'SUITE' && record.kind !== 'TEST') {
       throw new Error(
-        `intellij.jvm.discoverTestsInFile: element at index ${i} has non-string kind`,
+        `intellij.jvm.discoverTestsInFile: element at index ${i} has unsupported kind`,
       );
     }
-    if (typeof record.runnable !== 'boolean') {
-      throw new Error(
-        `intellij.jvm.discoverTestsInFile: element at index ${i} has non-boolean runnable`,
-      );
-    }
-    descriptors.push({
-      id: record.id,
-      kind: record.kind,
-      runnable: record.runnable,
-    });
+    const descriptor: TestDescriptor = { id: record.id, kind: record.kind };
+    if (typeof record.displayName === 'string') descriptor.displayName = record.displayName;
+    descriptors.push(descriptor);
   }
 
   return descriptors;
@@ -77,7 +79,7 @@ export async function resolveTestLaunch(
   const seenIds = new Set<string>();
   for (let i = 0; i < testIds.length; i++) {
     const id = testIds[i];
-    if (typeof id !== 'string' || id.length === 0) {
+    if (typeof id !== 'string' || id.trim().length === 0) {
       throw new Error(`resolveTestLaunch: testId at index ${i} must be a non-empty string`);
     }
     if (!seenIds.has(id)) {
@@ -107,32 +109,40 @@ export async function resolveTestLaunch(
         `intellij.jvm.resolveTestLaunch: element at index ${i} has invalid or empty mainClass`,
       );
     }
-    if (
-      !Array.isArray(record.args) ||
-      !record.args.every((a): a is string => typeof a === 'string')
-    ) {
+    if (!isStringArray(record.args)) {
       throw new Error(
         `intellij.jvm.resolveTestLaunch: element at index ${i} args must be an array of strings`,
       );
     }
-    if (
-      !Array.isArray(record.runtimeClasspath) ||
-      !record.runtimeClasspath.every((cp): cp is string => typeof cp === 'string')
-    ) {
+    if (!isStringArray(record.runtimeClasspath)) {
       throw new Error(
         `intellij.jvm.resolveTestLaunch: element at index ${i} runtimeClasspath must be an array of strings`,
       );
     }
-    specs.push({
+    if (!isStringArray(record.runtimeModulePath)) {
+      throw new Error(
+        `intellij.jvm.resolveTestLaunch: element at index ${i} runtimeModulePath must be an array of strings`,
+      );
+    }
+    const spec: ResolvedTestLaunchSpec = {
       mainClass: record.mainClass,
       args: record.args,
       runtimeClasspath: record.runtimeClasspath,
-    });
+      runtimeModulePath: record.runtimeModulePath,
+    };
+    if (typeof record.file === 'string' && record.file.length > 0) spec.file = record.file;
+    specs.push(spec);
   }
 
   return specs;
 }
 
+/**
+ * Resolves a runnable test target using the native IntelliJ test launch provider.
+ *
+ * The returned class paths and module paths are additional to the native module runtime the
+ * debug adapter derives for the launch file; they never replace it.
+ */
 export async function resolveTestTarget(
   session: LspSession,
   fileUri: string,
@@ -147,13 +157,13 @@ export async function resolveTestTarget(
     targetIds = testIds;
   } else {
     const discovered = await discoverTestsInFile(session, fileUri);
-    const runnableClasses = discovered.filter((d) => d.runnable && d.kind === 'CLASS');
-    if (runnableClasses.length > 0) {
-      targetIds = runnableClasses.map((d) => d.id);
+    const suites = discovered.filter((d) => d.kind === 'SUITE');
+    if (suites.length > 0) {
+      targetIds = suites.map((d) => d.id);
     } else {
-      const runnableMethods = discovered.filter((d) => d.runnable && d.kind === 'METHOD');
-      if (runnableMethods.length > 0) {
-        targetIds = runnableMethods.map((d) => d.id);
+      const tests = discovered.filter((d) => d.kind === 'TEST');
+      if (tests.length > 0) {
+        targetIds = tests.map((d) => d.id);
       } else {
         throw new Error(
           'No runnable tests discovered; provide explicit test IDs if discovery is unavailable',
@@ -162,14 +172,7 @@ export async function resolveTestTarget(
     }
   }
 
-  const [specs, paths] = await Promise.all([
-    resolveTestLaunch(session, targetIds),
-    resolveLaunch(session, fileUri),
-  ]);
-
-  if (!paths || typeof paths.javaExec !== 'string' || paths.javaExec.trim().length === 0) {
-    throw new Error('Project launch paths do not contain a valid javaExec');
-  }
+  const specs = await resolveTestLaunch(session, targetIds);
 
   if (specs.length === 0) {
     throw new Error('No test launch specification returned');
@@ -181,41 +184,10 @@ export async function resolveTestTarget(
   }
 
   const spec = specs[0];
-
-  const mergedClasspath: string[] = [];
-  const seenClasspath = new Set<string>();
-
-  if (paths.classpath !== undefined) {
-    if (!Array.isArray(paths.classpath)) {
-      throw new Error('Project launch paths classpath must be an array of strings');
-    }
-    for (let i = 0; i < paths.classpath.length; i++) {
-      const entry = paths.classpath[i];
-      if (typeof entry !== 'string') {
-        throw new Error(`Project launch paths classpath at index ${i} must be a string`);
-      }
-      if (!seenClasspath.has(entry)) {
-        seenClasspath.add(entry);
-        mergedClasspath.push(entry);
-      }
-    }
-  }
-
-  for (const entry of spec.runtimeClasspath) {
-    if (!seenClasspath.has(entry)) {
-      seenClasspath.add(entry);
-      mergedClasspath.push(entry);
-    }
-  }
-
-  const mergedPaths: LaunchPaths = {
-    ...paths,
-    classpath: mergedClasspath,
-  };
-
   return {
     mainClass: spec.mainClass,
     args: spec.args,
-    paths: mergedPaths,
+    additionalClassPaths: spec.runtimeClasspath,
+    additionalModulePaths: spec.runtimeModulePath,
   };
 }
