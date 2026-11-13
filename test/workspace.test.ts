@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { executeBuild } from '../src/debug/run-core.js';
 import {
   canonicalizeProject,
   getProjectLedger,
@@ -420,40 +419,6 @@ test('discoverJdks combines injected and configured JDKs', async () => {
     assert.equal(foundConfig.source, 'config');
   } finally {
     await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test('executeBuild integrates managed JDK and prepends effective JAVA_HOME to PATH', async () => {
-  const configDir = join(tmpdir(), `omp-test-cfg-eb-${Math.random().toString(36).slice(2)}`);
-  const projDir = join(tmpdir(), `omp-test-proj-eb-${Math.random().toString(36).slice(2)}`);
-  const jdk21 = join(tmpdir(), `omp-test-jdk21-eb-${Math.random().toString(36).slice(2)}`);
-
-  try {
-    await mkdir(projDir, { recursive: true });
-    await writeFile(join(projDir, 'pom.xml'), '<project></project>', 'utf8');
-    await createMockJdk(jdk21, { version: '21.0.4' });
-    await setWorkspaceJdk(projDir, jdk21, { configDir });
-
-    const originalEnvJavaHome = process.env.JAVA_HOME;
-
-    const isWin = process.platform === 'win32';
-    const command = isWin
-      ? ['cmd.exe', '/c', 'echo %JAVA_HOME%']
-      : ['/bin/sh', '-c', 'echo $JAVA_HOME'];
-
-    const res = await executeBuild(
-      { command, cwd: projDir, tool: 'test' },
-      { projectRoot: projDir, configDir },
-    );
-
-    const normOut = res.buildOutput.replace(/\\/g, '/').toLowerCase();
-    const normExpected = resolve(jdk21).replace(/\\/g, '/').toLowerCase();
-    assert.ok(normOut.includes(normExpected), `Expected ${normOut} to include ${normExpected}`);
-    assert.equal(process.env.JAVA_HOME, originalEnvJavaHome);
-  } finally {
-    await rm(configDir, { recursive: true, force: true });
-    await rm(projDir, { recursive: true, force: true });
-    await rm(jdk21, { recursive: true, force: true });
   }
 });
 

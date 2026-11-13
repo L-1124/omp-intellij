@@ -1,15 +1,11 @@
 import { readFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import {
-  createLspSession,
-  type LspSession,
-  resolveLaunch,
-  toLspFileUri,
-} from '../debug/run-core.js';
+import { join } from 'node:path';
+import { createLspSession, type LspSession, toLspFileUri } from '../debug/run-core.js';
 import { settings } from '../server/service.js';
 import { sanitizeString } from '../shared/runtime-status.js';
 import { getHostInitializationOptions } from './configuration.js';
 import { canonicalizeProject, recordReadiness } from './metadata.js';
+import { queryNativeBuildTool } from './native-build-tool.js';
 import {
   applyWorkspaceOptions,
   cleanPath,
@@ -122,27 +118,29 @@ export async function reimportWorkspace(
       throw reloadErr;
     }
 
-    let javaExec: string | null = null;
+    let importedJavaHome: string | null = null;
     let verified = false;
 
     const sourceFile = await findFirstSourceFile(nativePath);
     if (sourceFile && appliedJdk) {
       try {
         const sourceFileUri = toLspFileUri(sourceFile, rootUri);
-        const launch = await resolveLaunch(session, sourceFileUri);
-        if (!launch?.javaExec) {
+        const buildTool = await queryNativeBuildTool(session, sourceFileUri, {
+          timeoutMs: waitTimeout,
+          signal: options.signal,
+        });
+        const home = buildTool.env.JAVA_HOME;
+        if (!home?.trim()) {
           throw new Error(
-            `Model verification failed: resolveLaunch returned no javaExec for ${sourceFileUri}`,
+            `Model verification failed: native build tool returned no imported JAVA_HOME for ${sourceFileUri}`,
           );
         }
-        javaExec = launch.javaExec;
-        const resolvedLaunchJdk = resolve(dirname(dirname(javaExec)))
-          .replace(/\\/g, '/')
-          .toLowerCase();
-        const expectedJdk = resolve(appliedJdk).replace(/\\/g, '/').toLowerCase();
-        if (resolvedLaunchJdk !== expectedJdk) {
+        importedJavaHome = home;
+        if (
+          canonicalizeProject(home).canonicalPath !== canonicalizeProject(appliedJdk).canonicalPath
+        ) {
           throw new Error(
-            `Model verification mismatch: expected JDK "${appliedJdk}" but IntelliJ resolved "${javaExec}"`,
+            `Model verification mismatch: expected import JDK "${appliedJdk}" but IntelliJ imported with "${home}"`,
           );
         }
         verified = true;
@@ -174,7 +172,7 @@ export async function reimportWorkspace(
         canonicalPath,
         pid: serverPid,
         javaHome: appliedJdk,
-        javaExec,
+        importedJavaHome,
         appliedAt: Date.now(),
         verified: true,
       };

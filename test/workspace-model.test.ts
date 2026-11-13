@@ -19,18 +19,19 @@ interface TestServerFixture {
   server: net.Server;
   connect: () => Promise<net.Socket>;
   receivedMethods: string[];
+  receivedCommands: string[];
 }
 
 async function createTestServer(
   t: TestContext,
   handlers: {
-    onLaunch?: (id: number) => unknown;
-    onBuild?: (id: number) => unknown;
+    onBuildTool?: (id: number, uri: string) => unknown;
     capabilities?: Record<string, unknown>;
     onExportWorkspace?: (id: number, exportDir: string) => Promise<unknown> | unknown;
   } = {},
 ): Promise<TestServerFixture> {
   const receivedMethods: string[] = [];
+  const receivedCommands: string[] = [];
   const sockets = new Set<net.Socket>();
 
   const server = net.createServer((socket) => {
@@ -61,31 +62,21 @@ async function createTestServer(
           });
         } else if (msg.method === 'workspace/executeCommand' && msg.id !== undefined) {
           const params = msg.params as { command?: string; arguments?: unknown[] };
-          if (params.command === 'omp.jvm.resolveLaunch') {
-            const resp = handlers.onLaunch
-              ? handlers.onLaunch(msg.id)
-              : {
-                  result: {
-                    javaExec: '/test/jdk/bin/java',
-                    moduleContentPaths: [],
-                    classpath: ['/test/project/target/classes'],
-                    workingDirectory: '/test/project',
-                  },
-                };
+          if (typeof params.command === 'string') receivedCommands.push(params.command);
+          if (params.command === 'intellij.java.buildTool') {
+            const firstArg = Array.isArray(params.arguments) ? params.arguments[0] : undefined;
+            const uri =
+              firstArg &&
+              typeof firstArg === 'object' &&
+              'uri' in firstArg &&
+              typeof firstArg.uri === 'string'
+                ? firstArg.uri
+                : '';
+            const resp = handlers.onBuildTool
+              ? handlers.onBuildTool(msg.id, uri)
+              : { result: { tool: 'gradle', env: { JAVA_HOME: '/test/jdk' } } };
             if (resp !== undefined)
               socket.write(encode({ jsonrpc: '2.0', id: msg.id, ...(resp as object) }));
-          } else if (params.command === 'omp.jvm.resolveBuildCommand') {
-            const resp = handlers.onBuild
-              ? handlers.onBuild(msg.id)
-              : {
-                  result: {
-                    supported: true,
-                    tool: 'maven',
-                    cwd: '/test/project',
-                    command: ['mvn.cmd', 'compile'],
-                  },
-                };
-            socket.write(encode({ jsonrpc: '2.0', id: msg.id, ...(resp as object) }));
           } else if (params.command === 'exportWorkspace') {
             const exportDir =
               Array.isArray(params.arguments) && typeof params.arguments[0] === 'string'
@@ -117,7 +108,7 @@ async function createTestServer(
     return sock;
   };
 
-  return { server, connect, receivedMethods };
+  return { server, connect, receivedMethods, receivedCommands };
 }
 
 test('validateSourceFile rejects missing, non-regular, non-JVM, and outside files before session', async (t: TestContext) => {
@@ -216,7 +207,7 @@ test('inspectWorkspaceModel validates timeoutMs', async () => {
   );
 });
 
-test('fixture: inspectWorkspaceModel returns launch and build model without executing build or debuggee', async (t: TestContext) => {
+test('fixture: inspectWorkspaceModel reports the registered build tool and module roots without executing a build', async (t: TestContext) => {
   const tmpRoot = await mkdtemp(join(tmpdir(), 'omp-model-fixture-test-'));
   t.after(() => rm(tmpRoot, { recursive: true, force: true }));
 
@@ -236,24 +227,37 @@ test('fixture: inspectWorkspaceModel returns launch and build model without exec
     'utf8',
   );
 
+  let queriedUri = '';
   const fixture = await createTestServer(t, {
-    onLaunch: () => ({
-      result: {
-        javaExec: '/test/jdk/bin/java',
-        moduleContentPaths: [],
-        classpath: ['/test/project/target/classes'],
-        workingDirectory: projectDir,
-        vmArgs: ['-Dsensitive.token=SECRET12345'],
-      },
-    }),
-    onBuild: () => ({
-      result: {
-        supported: true,
-        tool: 'maven',
-        cwd: projectDir,
-        command: ['mvn.cmd', 'compile', '--token=SECRET12345'],
-      },
-    }),
+    capabilities: {
+      executeCommandProvider: { commands: ['intellij.java.buildTool', 'exportWorkspace'] },
+    },
+    onBuildTool: (_id, uri) => {
+      queriedUri = uri;
+      return { result: { tool: 'gradle', env: { JAVA_HOME: '/test/jdk-21' } } };
+    },
+    onExportWorkspace: async (_id, exportDir) => {
+      await writeFile(
+        join(exportDir, 'workspace.json'),
+        JSON.stringify({
+          modules: [
+            {
+              name: 'demo.main',
+              contentRoots: [
+                {
+                  path: projectDir,
+                  sourceRoots: [{ path: srcDir, type: 'java-source' }],
+                },
+              ],
+            },
+          ],
+          libraries: [{ name: 'junit-4.13.2' }],
+          sdks: [{ name: 'JDK 21', type: 'JavaSDK', homePath: '/test/jdk-21' }],
+        }),
+        'utf8',
+      );
+      return { result: null };
+    },
   });
 
   const clientSocket = await fixture.connect();
@@ -262,15 +266,40 @@ test('fixture: inspectWorkspaceModel returns launch and build model without exec
     timeoutMs: 10000,
   });
 
-  assert.ok(report.buildCommand);
-  assert.equal(report.buildCommand?.includes('SECRET12345'), false);
-  assert.ok(report.buildCommand?.some((arg) => arg.includes('[REDACTED]')));
+  assert.equal(report.supported, true);
+  assert.equal(report.buildTool, 'gradle');
+  assert.deepEqual(report.buildEnv, { JAVA_HOME: '/test/jdk-21' });
+  assert.equal(report.reason, undefined);
+  assert.equal(report.moduleName, 'demo.main');
+  assert.deepEqual(report.moduleSourceRoots, [{ path: srcDir, type: 'java-source' }]);
+  assert.equal(report.libraryCount, 1);
+  assert.equal(report.sdks?.[0]?.name, 'JDK 21');
 
-  assert.equal('vmArgs' in report, false);
+  // Inspection must not claim runtime values it never resolved.
+  for (const obsolete of [
+    'javaExec',
+    'classpath',
+    'modulePath',
+    'workingDirectory',
+    'buildCwd',
+    'buildCommand',
+  ]) {
+    assert.equal(obsolete in report, false, `${obsolete} must not be reported by inspection`);
+  }
 
   assert.ok(fixture.receivedMethods.includes('initialize'));
   assert.ok(fixture.receivedMethods.includes('workspace/executeCommand'));
   assert.equal(fixture.receivedMethods.includes('start_debug_server'), false);
+  assert.deepEqual(fixture.receivedCommands, ['intellij.java.buildTool', 'exportWorkspace']);
+  assert.equal(fixture.receivedCommands.includes('intellij.build'), false);
+  assert.ok(
+    queriedUri.endsWith('/Hello.java'),
+    `Build tool query must carry the inspected file URI, got ${queriedUri}`,
+  );
+
+  const formatted = formatModelLines(report).join('\n');
+  assert.match(formatted, /Build tool: gradle \(registered; build execution not verified\)/);
+  assert.match(formatted, /Build tool environment: JAVA_HOME=\/test\/jdk-21/);
 
   if (!clientSocket.destroyed) {
     await once(clientSocket, 'close');
@@ -278,7 +307,7 @@ test('fixture: inspectWorkspaceModel returns launch and build model without exec
   assert.equal(clientSocket.destroyed, true);
 });
 
-test('fixture: partial build unsupported preserves unsupported state without throwing or faking success', async (t: TestContext) => {
+test('fixture: a server reporting no registered build tool stays unsupported without inventing one', async (t: TestContext) => {
   const tmpRoot = await mkdtemp(join(tmpdir(), 'omp-model-unsupported-test-'));
   t.after(() => rm(tmpRoot, { recursive: true, force: true }));
 
@@ -299,15 +328,8 @@ test('fixture: partial build unsupported preserves unsupported state without thr
   );
 
   const fixture = await createTestServer(t, {
-    onLaunch: () => ({
-      result: { javaExec: '/test/jdk/bin/java' },
-    }),
-    onBuild: () => ({
-      result: {
-        supported: false,
-        reason: 'Compilation not configured for this module',
-      },
-    }),
+    capabilities: { executeCommandProvider: { commands: ['intellij.java.buildTool'] } },
+    onBuildTool: () => ({ result: { tool: null, env: {} } }),
   });
 
   const clientSocket = await fixture.connect();
@@ -317,11 +339,13 @@ test('fixture: partial build unsupported preserves unsupported state without thr
   });
 
   assert.equal(report.supported, false);
-  assert.equal(report.reason, 'Compilation not configured for this module');
-  assert.equal(report.javaExec, '/test/jdk/bin/java');
+  assert.equal(report.buildTool, undefined);
+  assert.equal(report.buildEnv, undefined);
+  assert.equal(report.reason, 'No build tool registered for this module');
+  assert.match(formatModelLines(report).join('\n'), /Build tool: none registered by server/);
 });
 
-test('fixture: malformed RPC responses are rejected explicitly', async (t: TestContext) => {
+test('fixture: malformed build tool responses are rejected explicitly', async (t: TestContext) => {
   const tmpRoot = await mkdtemp(join(tmpdir(), 'omp-model-malformed-test-'));
   t.after(() => rm(tmpRoot, { recursive: true, force: true }));
 
@@ -337,36 +361,45 @@ test('fixture: malformed RPC responses are rejected explicitly', async (t: TestC
   const javaFile = join(srcDir, 'App.java');
   await writeFile(javaFile, 'public class App {}', 'utf8');
 
-  const fixtureMissingSupported = await createTestServer(t, {
-    onLaunch: () => ({ result: { javaExec: '/test/jdk/bin/java' } }),
-    onBuild: () => ({ result: { tool: 'maven' } }), // missing boolean supported
-  });
-  const missingSupportedSocket = await fixtureMissingSupported.connect();
-  await assert.rejects(
-    () =>
-      inspectWorkspaceModel(projectDir, javaFile, {
-        socket: missingSupportedSocket,
-        timeoutMs: 10000,
-      }),
-    /missing or invalid boolean "supported" field/,
-  );
-
-  const fixtureMissingJavaExec = await createTestServer(t, {
-    onLaunch: () => ({ result: { workingDirectory: projectDir } }), // missing javaExec
-    onBuild: () => ({ result: { supported: true } }),
-  });
-  const missingJavaExecSocket = await fixtureMissingJavaExec.connect();
-  await assert.rejects(
-    () =>
-      inspectWorkspaceModel(projectDir, javaFile, {
-        socket: missingJavaExecSocket,
-        timeoutMs: 10000,
-      }),
-    /Launch resolution returned no java executable/,
-  );
+  for (const scenario of [
+    {
+      name: 'missing tool field',
+      response: { result: { env: {} } },
+      expected: /returned an invalid tool/,
+    },
+    {
+      name: 'non-string tool',
+      response: { result: { tool: 42, env: {} } },
+      expected: /returned an invalid tool/,
+    },
+    {
+      name: 'non-object env',
+      response: { result: { tool: 'gradle', env: ['JAVA_HOME=/jdk'] } },
+      expected: /returned an invalid environment/,
+    },
+    {
+      name: 'non-string env value',
+      response: { result: { tool: 'gradle', env: { JAVA_HOME: 21 } } },
+      expected: /returned an invalid environment/,
+    },
+  ]) {
+    await t.test(scenario.name, async (subtest) => {
+      const fixture = await createTestServer(subtest, {
+        capabilities: { executeCommandProvider: { commands: ['intellij.java.buildTool'] } },
+        onBuildTool: () => scenario.response,
+      });
+      await assert.rejects(
+        inspectWorkspaceModel(projectDir, javaFile, {
+          socket: await fixture.connect(),
+          timeoutMs: 10000,
+        }),
+        scenario.expected,
+      );
+    });
+  }
 });
 
-test('fixture: RPC error in resolveBuildCommand is propagated and not swallowed into success', async (t: TestContext) => {
+test('fixture: RPC error in the build tool query is propagated and not swallowed into success', async (t: TestContext) => {
   const tmpRoot = await mkdtemp(join(tmpdir(), 'omp-model-rpc-err-test-'));
   t.after(() => rm(tmpRoot, { recursive: true, force: true }));
 
@@ -383,9 +416,9 @@ test('fixture: RPC error in resolveBuildCommand is propagated and not swallowed 
   await writeFile(javaFile, 'public class App {}', 'utf8');
 
   const fixture = await createTestServer(t, {
-    onLaunch: () => ({ result: { javaExec: '/test/jdk/bin/java' } }),
-    onBuild: () => ({
-      error: { code: -32603, message: 'Fatal server error: build descriptor parsing failed' },
+    capabilities: { executeCommandProvider: { commands: ['intellij.java.buildTool'] } },
+    onBuildTool: () => ({
+      error: { code: -32603, message: 'Fatal server error: module descriptor parsing failed' },
     }),
   });
 
@@ -396,7 +429,7 @@ test('fixture: RPC error in resolveBuildCommand is propagated and not swallowed 
         socket: clientSocket,
         timeoutMs: 10000,
       }),
-    /Fatal server error: build descriptor parsing failed/,
+    /Fatal server error: module descriptor parsing failed/,
   );
 
   if (!clientSocket.destroyed) {
@@ -424,7 +457,7 @@ test('fixture: cancellation with signal aborts and releases session', async (t: 
   for (const mode of ['cancel', 'deadline']) {
     const ac = new AbortController();
     const fixture = await createTestServer(t, {
-      onLaunch() {
+      onBuildTool() {
         if (mode === 'cancel') ac.abort();
         return undefined;
       },
@@ -480,21 +513,40 @@ test('maskConfiguredSecrets masks configured secrets across all report fields an
   );
 
   const fixture = await createTestServer(t, {
-    onLaunch: () => ({
+    capabilities: {
+      executeCommandProvider: { commands: ['intellij.java.buildTool', 'exportWorkspace'] },
+    },
+    onBuildTool: () => ({
       result: {
-        javaExec: '/test/jdk/bin/java',
-        workingDirectory: `${projectDir}/my-custom-super-secret-token-dir`,
-      },
-    }),
-    onBuild: () => ({
-      result: {
-        supported: true,
         tool: 'maven',
-        cwd: projectDir,
-        command: ['mvn', '-Dtoken=my-custom-super-secret-token'],
-        reason: 'Authorized with my-custom-super-secret-token',
+        env: { JAVA_HOME: `${projectDir}/my-custom-super-secret-token-jdk` },
       },
     }),
+    onExportWorkspace: async (_id, exportDir) => {
+      await writeFile(
+        join(exportDir, 'workspace.json'),
+        JSON.stringify({
+          modules: [
+            {
+              name: 'demo',
+              contentRoots: [
+                { path: projectDir, sourceRoots: [{ path: srcDir, type: 'java-source' }] },
+              ],
+            },
+          ],
+          sdks: [
+            {
+              name: 'JDK 21 (my-custom-super-secret-token)',
+              type: 'JavaSDK',
+              homePath: projectDir,
+            },
+          ],
+          libraries: [],
+        }),
+        'utf8',
+      );
+      return { result: null };
+    },
   });
 
   const clientSocket = await fixture.connect();
@@ -505,9 +557,8 @@ test('maskConfiguredSecrets masks configured secrets across all report fields an
   });
 
   assert.equal(JSON.stringify(report).includes('my-custom-super-secret-token'), false);
-  assert.ok(report.buildCommand?.some((arg) => arg.includes('[REDACTED]')));
-  assert.ok(report.workingDirectory?.includes('[REDACTED]'));
-  assert.ok(report.reason?.includes('[REDACTED]'));
+  assert.ok(report.buildEnv?.JAVA_HOME.includes('[REDACTED]'));
+  assert.ok(report.sdks?.[0]?.name.includes('[REDACTED]'));
 
   // Error serialization maintains in-memory code/data while masking message
   const rawError = Object.assign(new Error('Failed with my-custom-super-secret-token'), {
@@ -577,25 +628,10 @@ test('fixture: exportWorkspace enriches moduleSourceRoots, sdks, libraryCount, e
   const fixture = await createTestServer(t, {
     capabilities: {
       executeCommandProvider: {
-        commands: ['exportWorkspace', 'start_debug_server'],
+        commands: ['intellij.java.buildTool', 'exportWorkspace'],
       },
     },
-    onLaunch: () => ({
-      result: {
-        javaExec: '/test/jdk/bin/java',
-        moduleContentPaths: [],
-        classpath: [join(customRepo, 'org/junit/junit.jar')],
-        workingDirectory: join(projectDir, 'app'),
-      },
-    }),
-    onBuild: () => ({
-      result: {
-        supported: true,
-        tool: 'gradle',
-        cwd: projectDir,
-        command: ['gradlew', ':app:compileDebugSources'],
-      },
-    }),
+    onBuildTool: () => ({ result: { tool: 'gradle', env: { JAVA_HOME: '/opt/jdks/jdk-21' } } }),
     onExportWorkspace: async (_id, exportDir) => {
       observedExportDir = exportDir;
       await writeFile(
@@ -658,6 +694,8 @@ test('fixture: exportWorkspace enriches moduleSourceRoots, sdks, libraryCount, e
   });
 
   assert.equal(report.moduleName, 'myhook.app.debug');
+  assert.equal(report.buildTool, 'gradle');
+  assert.equal(report.buildEnv?.JAVA_HOME, '/opt/jdks/jdk-21');
   assert.equal(report.moduleContentPaths?.length, 2);
   assert.equal(report.moduleSourceRoots?.length, 2);
   assert.equal(report.moduleSourceRoots?.[0]?.path, join(projectDir, 'app', 'src', 'main', 'java'));
@@ -711,7 +749,7 @@ test('workspace export failures remain visible instead of returning a complete m
     });
   }
 });
-test('workspace model handles missing omp.jvm.resolveLaunch gracefully and enriches from exportWorkspace', async (t: TestContext) => {
+test('workspace model reports no build tool when the server does not advertise intellij.java.buildTool', async (t: TestContext) => {
   const projectDir = await mkdtemp(join(tmpdir(), 'omp-model-unknown-cmd-'));
   t.after(() => rm(projectDir, { recursive: true, force: true }));
   const sourceFile = join(projectDir, 'src', 'App.java');
@@ -724,9 +762,6 @@ test('workspace model handles missing omp.jvm.resolveLaunch gracefully and enric
         commands: ['exportWorkspace'],
       },
     },
-    onLaunch: () => ({
-      error: { code: -32600, message: 'Unknown command: omp.jvm.resolveLaunch' },
-    }),
     onExportWorkspace: async (_id, exportDir) => {
       await writeFile(
         join(exportDir, 'workspace.json'),
@@ -762,9 +797,32 @@ test('workspace model handles missing omp.jvm.resolveLaunch gracefully and enric
   });
 
   assert.equal(report.supported, false);
+  assert.equal(report.buildTool, undefined);
+  assert.equal(report.reason, 'Build tool not advertised by server');
   assert.equal(report.moduleName, 'my-app');
   assert.equal(report.libraryCount, 1);
   assert.equal(report.sdks?.length, 1);
-  assert.equal(report.classpath, undefined);
   assert.ok(report.moduleSourceRoots && report.moduleSourceRoots.length > 0);
+  assert.equal(fixture.receivedCommands.includes('intellij.java.buildTool'), false);
+});
+
+test('workspace model tolerates an unknown-command error from intellij.java.buildTool', async (t: TestContext) => {
+  const projectDir = await mkdtemp(join(tmpdir(), 'omp-model-unknown-error-'));
+  t.after(() => rm(projectDir, { recursive: true, force: true }));
+  const sourceFile = join(projectDir, 'App.java');
+  await writeFile(sourceFile, 'class App {}');
+
+  const fixture = await createTestServer(t, {
+    onBuildTool: () => ({
+      error: { code: -32601, message: 'Unknown command: intellij.java.buildTool' },
+    }),
+  });
+
+  const report = await inspectWorkspaceModel(projectDir, sourceFile, {
+    socket: await fixture.connect(),
+    timeoutMs: 10000,
+  });
+
+  assert.equal(report.supported, false);
+  assert.equal(report.buildTool, undefined);
 });

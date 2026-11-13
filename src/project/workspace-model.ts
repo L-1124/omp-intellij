@@ -6,14 +6,13 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   type CreateLspSessionOptions,
   createLspSession,
-  type LaunchPaths,
   type LspSession,
-  resolveBuildCommand,
-  resolveLaunch,
+  toggleDriveCase,
   toLspFileUri,
 } from '../debug/run-core.js';
 import { sanitizeStatus, sanitizeString } from '../shared/runtime-status.js';
 import { canonicalizeProject } from './metadata.js';
+import { type NativeBuildTool, queryNativeBuildTool } from './native-build-tool.js';
 import { findProjectRoot } from './readiness.js';
 import {
   getWorkspaceConfigDir,
@@ -23,21 +22,27 @@ import {
   type WorkspaceConfigFile,
 } from './workspace.js';
 
+/**
+ * Read-only workspace model facts reported by the language server.
+ *
+ * Every field is either an inspection result (module identity, content and source roots,
+ * imported SDKs, library count) or the registered build tool. No field claims a runtime
+ * classpath, JVM executable or build command line: those are resolved by the debugger and
+ * the native build command at execution time, never by inspection.
+ */
 export interface WorkspaceModelReport {
   project: string;
   file: string;
-  javaExec: string;
   moduleName?: string;
   moduleContentPaths?: string[];
   moduleSourceRoots?: Array<{ path: string; type?: string }>;
-  classpath?: string[];
-  modulePath?: string[];
-  workingDirectory?: string;
   sdks?: Array<{ name: string; type?: string; version?: string; homePath?: string }>;
   libraryCount?: number;
+  /** Registered build tool of the module; absent when the server registers none. */
   buildTool?: string;
-  buildCwd?: string;
-  buildCommand?: string[];
+  /** Environment reported alongside the registered build tool. */
+  buildEnv?: Record<string, string>;
+  /** True when the server has a build tool registered for this module. Build execution is not verified. */
   supported: boolean;
   reason?: string;
 }
@@ -189,6 +194,54 @@ export function sessionSupportsCommand(session: LspSession, command: string): bo
   return Array.isArray(commands) && commands.includes(command);
 }
 
+function isUnknownCommandError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = 'code' in err ? (err as { code?: unknown }).code : undefined;
+  if (code === -32600 || code === -32601) return true;
+  const message = 'message' in err ? (err as { message?: unknown }).message : undefined;
+  return typeof message === 'string' && /unknown command/i.test(message);
+}
+
+/**
+ * Read-only query of the build tool registered for the module owning `fileUri`.
+ *
+ * Validation of the response shape lives in the shared native helper. This wrapper adds the
+ * model-specific policy: a server that does not advertise the command reports no registered
+ * build tool, an unknown-command error is treated the same way instead of failing inspection,
+ * and a Windows drive-case mismatch retries once with the alternate URI. Validation failures
+ * carry no RPC error code and are never retried.
+ */
+async function queryBuildTool(
+  session: LspSession,
+  fileUri: string,
+  options: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<NativeBuildTool | null> {
+  if (
+    session.serverCapabilities?.executeCommandProvider &&
+    !sessionSupportsCommand(session, 'intellij.java.buildTool')
+  ) {
+    return null;
+  }
+  const altUri = toggleDriveCase(fileUri);
+  const candidates = altUri && altUri !== fileUri ? [fileUri, altUri] : [fileUri];
+  const deadline = Date.now() + (options.timeoutMs ?? 60000);
+  let failure: unknown;
+  for (const uri of candidates) {
+    try {
+      return await queryNativeBuildTool(session, uri, {
+        timeoutMs: Math.max(1, deadline - Date.now()),
+        signal: options.signal,
+      });
+    } catch (err: unknown) {
+      if (isUnknownCommandError(err)) return null;
+      if (options.signal?.aborted) throw err;
+      if (!err || typeof err !== 'object' || !('code' in err)) throw err;
+      failure = err;
+    }
+  }
+  throw failure;
+}
+
 function pathContainsOrEquals(rootPath: string, targetFile: string): boolean {
   try {
     const rootCanonical = canonicalizeProject(rootPath).canonicalPath;
@@ -200,16 +253,9 @@ function pathContainsOrEquals(rootPath: string, targetFile: string): boolean {
 }
 
 export function formatModelLines(model: WorkspaceModelReport): string[] {
-  const lines: string[] = [
-    `Project: ${model.project}`,
-    `File: ${model.file}`,
-    `Java executable: ${model.javaExec}`,
-  ];
+  const lines: string[] = [`Project: ${model.project}`, `File: ${model.file}`];
   if (model.moduleName) {
     lines.push(`Module: ${model.moduleName}`);
-  }
-  if (model.workingDirectory) {
-    lines.push(`Working directory: ${model.workingDirectory}`);
   }
   if (model.moduleContentPaths && model.moduleContentPaths.length > 0) {
     lines.push(`Module content roots: ${model.moduleContentPaths.join(', ')}`);
@@ -221,12 +267,6 @@ export function formatModelLines(model: WorkspaceModelReport): string[] {
         .join(', ')}`,
     );
   }
-  if (model.classpath && model.classpath.length > 0) {
-    lines.push(`Classpath entries: ${model.classpath.length}`);
-  }
-  if (model.modulePath && model.modulePath.length > 0) {
-    lines.push(`Module path entries: ${model.modulePath.length}`);
-  }
   if (model.sdks && model.sdks.length > 0) {
     lines.push(
       `SDKs: ${model.sdks
@@ -237,15 +277,18 @@ export function formatModelLines(model: WorkspaceModelReport): string[] {
   if (model.libraryCount !== undefined) {
     lines.push(`Workspace libraries: ${model.libraryCount}`);
   }
-  lines.push(`Build support: ${model.supported ? 'supported' : 'unsupported'}`);
   if (model.buildTool) {
-    lines.push(`Build tool: ${model.buildTool}`);
+    lines.push(`Build tool: ${model.buildTool} (registered; build execution not verified)`);
+  } else {
+    lines.push('Build tool: none registered by server');
   }
-  if (model.buildCwd) {
-    lines.push(`Build working directory: ${model.buildCwd}`);
-  }
-  if (model.buildCommand && model.buildCommand.length > 0) {
-    lines.push(`Build command: ${model.buildCommand.join(' ')}`);
+  if (model.buildEnv) {
+    const entries = Object.entries(model.buildEnv);
+    if (entries.length > 0) {
+      lines.push(
+        `Build tool environment: ${entries.map(([key, value]) => `${key}=${value}`).join(', ')}`,
+      );
+    }
   }
   if (model.reason) {
     lines.push(`Build reason: ${model.reason}`);
@@ -307,52 +350,10 @@ export async function inspectWorkspaceModel(
       throw err;
     }
 
-    let launchPaths: LaunchPaths | null = null;
-    const canAttemptLaunch =
-      !session.serverCapabilities?.executeCommandProvider ||
-      sessionSupportsCommand(session, 'omp.jvm.resolveLaunch');
-
-    if (canAttemptLaunch) {
-      try {
-        launchPaths = await resolveLaunch(session, fileUri);
-        if (
-          !launchPaths ||
-          typeof launchPaths.javaExec !== 'string' ||
-          !launchPaths.javaExec.trim()
-        ) {
-          throw new Error('Launch resolution returned no java executable');
-        }
-        if (launchPaths && typeof launchPaths === 'object') {
-          for (const field of ['moduleName', 'workingDirectory'] as const) {
-            if (launchPaths[field] !== undefined && typeof launchPaths[field] !== 'string') {
-              throw new Error(`Launch resolution returned invalid ${field}`);
-            }
-          }
-          for (const field of ['classpath', 'modulePath', 'moduleContentPaths'] as const) {
-            const paths = launchPaths[field];
-            if (
-              paths !== undefined &&
-              (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string'))
-            ) {
-              throw new Error(`Launch resolution returned invalid ${field}`);
-            }
-          }
-        }
-      } catch (err: unknown) {
-        const isUnknown =
-          !sessionSupportsCommand(session, 'omp.jvm.resolveLaunch') &&
-          err &&
-          typeof err === 'object' &&
-          (('code' in err && (err.code === -32600 || err.code === -32601)) ||
-            ('message' in err &&
-              typeof err.message === 'string' &&
-              /unknown command/i.test(err.message)));
-        if (!isUnknown) {
-          throw err;
-        }
-        launchPaths = null;
-      }
-    }
+    const buildTool = await queryBuildTool(session, fileUri, {
+      signal: combinedSignal,
+      timeoutMs: Math.max(1, deadline - Date.now()),
+    });
 
     if (combinedSignal.aborted) {
       const err = new Error('Workspace model inspection aborted');
@@ -360,120 +361,39 @@ export async function inspectWorkspaceModel(
       throw err;
     }
 
-    let buildResult: {
-      supported: boolean;
-      command?: string[];
-      cwd?: string;
-      tool?: string;
-      reason?: string;
-    } = {
-      supported: false,
-      command: [],
-      cwd: '',
-      tool: '',
-      reason: 'Build command not advertised by server',
-    };
-
-    const canAttemptBuild =
-      !session.serverCapabilities?.executeCommandProvider ||
-      sessionSupportsCommand(session, 'omp.jvm.resolveBuildCommand');
-
-    if (canAttemptBuild) {
-      try {
-        const res = await resolveBuildCommand(session, fileUri);
-        if (!res || typeof res !== 'object' || typeof res.supported !== 'boolean') {
-          throw new Error(
-            'Build command resolution response missing or invalid boolean "supported" field',
-          );
-        }
-        buildResult = res;
-      } catch (err: unknown) {
-        const isUnknown =
-          !sessionSupportsCommand(session, 'omp.jvm.resolveBuildCommand') &&
-          err &&
-          typeof err === 'object' &&
-          (('code' in err && (err.code === -32600 || err.code === -32601)) ||
-            ('message' in err &&
-              typeof err.message === 'string' &&
-              /unknown command/i.test(err.message)));
-        if (!isUnknown) {
-          throw err;
-        }
-        buildResult = {
-          supported: false,
-          command: [],
-          cwd: '',
-          tool: '',
-          reason: 'Build command not supported by server',
-        };
-      }
-    }
-
-    const defaultJavaExec =
-      typeof launchPaths?.javaExec === 'string' && launchPaths.javaExec.trim()
-        ? launchPaths.javaExec.trim()
-        : '(unsupported by server)';
+    const registeredTool =
+      typeof buildTool?.tool === 'string' && buildTool.tool.trim() ? buildTool.tool.trim() : null;
 
     const report: WorkspaceModelReport = {
       project: maskAndSanitize(canonicalProjectRoot, configuredEnv),
       file: maskAndSanitize(resolvedFile, configuredEnv),
-      javaExec: maskAndSanitize(defaultJavaExec, configuredEnv),
-      supported: buildResult.supported,
+      supported: registeredTool !== null,
     };
-
-    if (typeof launchPaths?.moduleName === 'string' && launchPaths.moduleName.trim()) {
-      report.moduleName = maskAndSanitize(launchPaths.moduleName, configuredEnv);
+    if (registeredTool !== null) {
+      report.buildTool = maskAndSanitize(registeredTool, configuredEnv);
     }
-    if (
-      Array.isArray(launchPaths?.moduleContentPaths) &&
-      launchPaths.moduleContentPaths.every((p: unknown) => typeof p === 'string')
-    ) {
-      report.moduleContentPaths = launchPaths.moduleContentPaths.map((p: string) =>
-        maskAndSanitize(p, configuredEnv),
-      );
+    if (buildTool && Object.keys(buildTool.env).length > 0) {
+      const buildEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(buildTool.env)) {
+        buildEnv[key] = maskAndSanitize(value, configuredEnv);
+      }
+      report.buildEnv = buildEnv;
     }
-    if (
-      Array.isArray(launchPaths?.classpath) &&
-      launchPaths.classpath.every((p: unknown) => typeof p === 'string')
-    ) {
-      report.classpath = launchPaths.classpath.map((p: string) =>
-        maskAndSanitize(p, configuredEnv),
-      );
-    }
-    if (
-      Array.isArray(launchPaths?.modulePath) &&
-      launchPaths.modulePath.every((p: unknown) => typeof p === 'string')
-    ) {
-      report.modulePath = launchPaths.modulePath.map((p: string) =>
-        maskAndSanitize(p, configuredEnv),
-      );
-    }
-    if (typeof launchPaths?.workingDirectory === 'string' && launchPaths.workingDirectory.trim()) {
-      report.workingDirectory = maskAndSanitize(launchPaths.workingDirectory, configuredEnv);
-    }
-    if (typeof buildResult.tool === 'string' && buildResult.tool.trim()) {
-      report.buildTool = maskAndSanitize(buildResult.tool, configuredEnv);
-    }
-    if (typeof buildResult.cwd === 'string' && buildResult.cwd.trim()) {
-      report.buildCwd = maskAndSanitize(buildResult.cwd, configuredEnv);
-    }
-    if (
-      Array.isArray(buildResult.command) &&
-      buildResult.command.every((arg) => typeof arg === 'string')
-    ) {
-      report.buildCommand = buildResult.command.map((arg) => maskAndSanitize(arg, configuredEnv));
-    }
-    if (typeof buildResult.reason === 'string' && buildResult.reason.trim()) {
-      report.reason = maskAndSanitize(buildResult.reason, configuredEnv);
+    if (buildTool === null) {
+      report.reason = 'Build tool not advertised by server';
+    } else if (registeredTool === null) {
+      report.reason = 'No build tool registered for this module';
     }
 
     if (sessionSupportsCommand(session, 'exportWorkspace')) {
       const exportDir = await mkdtemp(join(tmpdir(), 'omp-ws-export-'));
       try {
-        await session.request('workspace/executeCommand', {
-          command: 'exportWorkspace',
-          arguments: [exportDir],
-        });
+        await session.request(
+          'workspace/executeCommand',
+          { command: 'exportWorkspace', arguments: [exportDir] },
+          Math.max(1, deadline - Date.now()),
+          combinedSignal,
+        );
         if (combinedSignal.aborted) {
           const err = new Error('Workspace model inspection aborted');
           err.name = 'AbortError';
@@ -580,29 +500,18 @@ export async function inspectWorkspaceModel(
                 bestMatchLength,
               });
             }
-            const targetModuleName = launchPaths?.moduleName?.trim();
-            let matched =
-              typeof targetModuleName === 'string' && targetModuleName.length > 0
-                ? parsedModules.find((m) => m.name === targetModuleName)
-                : undefined;
-            if (!matched) {
-              for (const candidate of parsedModules) {
-                if (
-                  candidate.bestMatchLength >= 0 &&
-                  (!matched || candidate.bestMatchLength > matched.bestMatchLength)
-                ) {
-                  matched = candidate;
-                }
+            let matched: ParsedModule | undefined;
+            for (const candidate of parsedModules) {
+              if (
+                candidate.bestMatchLength >= 0 &&
+                (!matched || candidate.bestMatchLength > matched.bestMatchLength)
+              ) {
+                matched = candidate;
               }
             }
             if (matched) {
-              if (!report.moduleName) {
-                report.moduleName = maskAndSanitize(matched.name, configuredEnv);
-              }
-              if (
-                (!report.moduleContentPaths || report.moduleContentPaths.length === 0) &&
-                matched.contentPaths.length > 0
-              ) {
+              report.moduleName = maskAndSanitize(matched.name, configuredEnv);
+              if (matched.contentPaths.length > 0) {
                 report.moduleContentPaths = matched.contentPaths.map((p) =>
                   maskAndSanitize(p, configuredEnv),
                 );
