@@ -207,6 +207,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 - `AndroidRequests.diagnosticQuery` 在分析前记录打开文档版本，在挂起读操作内读取快照；发布前重新进入分析上下文，逐字符核对当前未保存内容，并复核版本与关联磁盘输入。缓存只在复核通过后写入。过期返回 `-32801`，取消传播为 `-32800`。
 - `AndroidLintModelResolver` 先读取当前变体的官方 LintModel XML，再回退到 Gradle 脚本字面量与主 Manifest：优先 `build.gradle.kts` 的 Kotlin PSI，不存在时读取 `build.gradle` 的 Groovy AST。动态 `minSdk`、flavor 或 buildType 覆盖保持前提缺失，不虚构 `minSdk=1`；此时只跳过 `ApiDetector`，其余规则继续运行。
+- 官方模型读取成功后一次性提交模块、变体和 SDK 字段；读取失败清空本次候选，再走 AST 回退。desugaring、`resValues` 和 ProGuard 输入优先取真实变体，模型不可用时才取脚本或空值；IDE 对跨 `try/catch` 赋值的恒空提示不能作为删除模型分支的依据。
+- 固定 ILS 271 的 Gradle 导入可能保留 `-jvm-target` 参数却遗漏 Kotlin facet 的 `targetPlatform`，使 FIR 的 `@JvmRecord` 检查回退到 JVM 1.8。此时以 Gradle 实际编译结果判断产物目标；该导入缺陷仍会产生 IDE 诊断。扩展不通过降目标、压制诊断或改写共享工程配置规避它，修复应由上游导入器按模块写入平台。
 - 模块根优先从内容根定位构建脚本；无内容根时从当前 `WorkspaceModel` 的模块实体读取 `exModuleOptions.linkedProjectPath`。该路径保留真实导入信息，核心查询不依赖可选的外部系统 IDE 工厂服务。
 - `AndroidLintIssueRegistry` 按官方 `Implementation.isAdequate` 选择单文件规则，并保留 `NewApi`。`AndroidLintClient` 将编辑器 PSI 转换为 UAST，使用真实模块解析作用域与语言级别；资源查询按当前变体和仓库范围解析，仍不等同于 Gradle 全项目 Lint。
 - AAR 规则跟随当前模块已导入依赖：发现同级 `jars/lint.jar`，按内容摘要复制到缓存后加载。不设 Maven 前缀白名单，不扫描全局规则目录，不联网获取规则。加载失败跳过单个 JAR；复合执行故障时按 Registry 隔离重试，每次使用独立的 Lint 项目状态，失败批次不进入结果。
@@ -219,6 +221,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 - Kotlin PSI 将脚本顶层表达式包装为 `KtScriptInitializer`，读取 `android {}` 前先解包。`minSdk`、`targetSdk`、`compileSdk` 的动态判定具有粘性，后续字面量不覆盖先前的歧义；`minSdk`、`targetSdk` 未声明时可检查主 Manifest，动态表达式或变体覆盖则禁止该回退。
 - ILS 271 未捆绑 Groovy PSI。扩展使用官方 Groovy 4.0.29，依次调用 `SourceUnit.parse()`、`completePhase()`、`convert()`，仅生成语法 AST，不进入语义分析或 AST 变换，不执行脚本和 `@Grab`。解析结果缓存在请求级 `AndroidSources.Scope`；资源目录、namespace 和 SDK 配置遵守相同的保存态边界。
+- Groovy Lint 每个调用只分发一次带 `parentParent` 的新 `checkMethodCall` 回调，由上游默认委托兼容旧检测器。参数和属性值从 AST 的源区间截取，保留引号和数字进制前缀，避免字符串与八进制规则漏报。DSL 属性使用包含 `propertyCookie`、`valueCookie`、`statementCookie` 的新回调；各 cookie 保留真实 AST 节点，供内置规则定位属性名、值与语句，不能改传同一占位节点。
 - `source.properties` 的 API 值可能是 `37.0`。规则使用整数 API 级别，平台目标保留完整标识，例如 `android-37.0`。正式版、预览版与 Add-on 目标通过官方 `AndroidTargetHash` 解析，不从目标字符串手动截取或猜测 API。
 - `AndroidSources.text` 保留磁盘读取语义，供关联资源、配置和产物来源校验使用；当前诊断文件使用请求的 PSI/Document 快照。缓存指纹与分析必须读取同一来源，避免关联编辑器内容掩盖磁盘更新。
 - ILS 271 的 `ProcessCanceledException` 继承 `CancellationException`。捕获、反射调用和规则隔离均须保留取消，不能把取消当成坏规则或成功空结果。
@@ -239,7 +242,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 用户确认的保存边界：当前拉取文件的未保存内容即时参与诊断；关联资源、配置和其他清单按磁盘读取，保存后刷新；新文件首次保存后检查。输出前在新分析上下文中复核当前文档内容，避免上下文外访问快照 Document。
 
-编辑期保留这一边界，不调用 `ManifestMerger2` 临时合并。完整合并由 AGP 提供；输入模型缺失或产物过期时，继续执行源文件检查，避免把不完整输入的合并结果当作有效产物。
+编辑期通过官方 `ManifestMerger2` 合并当前源集与已知依赖，使用模型的 namespace、package 和已知 `minSdk`/`targetSdk` 系统属性；`setNamespace` 只负责类名解析，缺少 `package` 的现代清单还需要 `Document.PACKAGE` 注入。合并不改写源文件，并保留未保存内容与来源范围。Built 态优先使用经输入校验的 AGP 产物；模型缺失或合并失败时回退到源文件检查。
 
 已修复的适配差异：
 - 自定义 Manifest 按同一 Gradle 模块中的实际源集归属选择生产模块，避免用聚合模块解析类及变体。
@@ -295,6 +298,8 @@ cd jvm/intellij-android
 生产 Kotlin 源码分别位于 `src/main/kotlin`（核心）和 `src/dap/kotlin`（可选 Run/DAP），主体编译为 Java25；纯 Gradle Action 与 DTO 位于 `src/gradleAction/kotlin`，单独编译为 Java17 字节码并并入同一 DAP JAR，供项目 Gradle daemon 的 JDK 加载。测试位于 `src/test/kotlin`。编译复用宿主 Kotlin 库，不重复分发运行时。
 
 编译 classpath 按 sourceSet 隔离：核心不加入 DAP、kotlinx.io 或 Gradle Tooling；可选 dap 加入明确的宿主 DAP、IO、`kotlin.lsp` Tooling 模块与核心输出。`builder-model:9.4.1` 单独锁定并分发，Gradle 运行时复用宿主 `intellij.libraries.gradle.tooling`，不重复打包。JVM 测试运行时保留完整固定 ILS SDK，但 classpath 可见不能代替真实插件加载门禁。运行协议见 [Android 运行调试契约](android-jdwp-debugging.md)。
+
+Android attach 验证按运行缓存一次真实 APK：缺少缓存时用 fixture 的 Gradle wrapper 执行 `:app:assembleDebug`，不为 APK 准备额外启动 ILS。native Gradle launch 的构建与进程所有权仍由独立真实集成用例覆盖；attach smoke 保留完整断点、变量、单步与 detach/重新 attach 检查。
 
 ### 2. 构建产物验证
 
