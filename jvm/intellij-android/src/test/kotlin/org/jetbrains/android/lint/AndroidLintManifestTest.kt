@@ -1,5 +1,8 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.lint
 
+import com.android.manifmerger.Actions
 import com.android.tools.lint.client.api.LintClient
 import com.android.utils.Pair
 import com.intellij.core.CoreApplicationEnvironment
@@ -329,11 +332,13 @@ class AndroidLintManifestTest {
 
             val model = debugModel(tempDir, "fingerprint", "lintXmlFingerprint")
 
-            // A client simulating open editor with unsaved content differing from disk
+            val unsavedContent =
+                "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"com.example.app\"><application/></manifest>"
+
             val client = object : TestLintClient() {
                 override fun readFile(file: File): CharSequence {
-                    if (file == srcManifest.toFile()) {
-                        return "<manifest package=\"com.example.app\"><application/></manifest>"
+                    if (file == srcManifest.toFile() || file.canonicalPath == srcManifest.toFile().canonicalPath) {
+                        return unsavedContent
                     }
                     return super.readFile(file)
                 }
@@ -347,12 +352,171 @@ class AndroidLintManifestTest {
             )
 
             val targetDom = client.xmlParser.parseXml(
-                "<manifest package=\"com.example.app\"><application/></manifest>",
+                unsavedContent,
                 srcManifest.toFile()
             )
             val result = helper.getMergedManifest(null, srcManifest.toFile(), targetDom)
-            assertSame(targetDom, result)
-            assertFalse(helper.isMergeManifestNode(result!!.documentElement))
+            assertNotNull("Live merge result must not be null", result)
+            assertTrue(
+                "MERGED_MANIFEST must hold live Actions",
+                result!!.getUserData(LintClient.MERGED_MANIFEST) is Actions
+            )
+            assertTrue(helper.isMergeManifestNode(result.documentElement))
+
+            val appElement = result.getElementsByTagName("application").item(0) as Element
+            assertNotNull(appElement)
+            assertTrue(helper.isMergeManifestNode(appElement))
+
+            val source = helper.findManifestSourceNode(appElement)
+            assertNotNull("Source mapping should succeed via BlameFile.parse(Actions)", source)
+            assertEquals(srcManifest.toFile().canonicalPath, source!!.first.canonicalPath)
+
+            val location = helper.findManifestSourceLocation(appElement)
+            assertNotNull("Source location mapping should succeed via BlameFile.parse(Actions)", location)
+            assertEquals(srcManifest.toFile().canonicalPath, location!!.file.canonicalPath)
+        } finally {
+            deleteRecursively(tempDir)
+        }
+    }
+
+    @Test
+    fun liveMergeMultiManifestWithUnsavedEditsAndBlameResolution() {
+        val tempDir = Files.createTempDirectory("lint_manifest_multi_live")
+        try {
+            val mainDir = tempDir.resolve("src/main")
+            Files.createDirectories(mainDir)
+            val mainManifest = mainDir.resolve("AndroidManifest.xml")
+            Files.writeString(
+                mainManifest,
+                """
+                <?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                    <application android:label="Disk Label" />
+                </manifest>
+                """.trimIndent()
+            )
+
+            val debugDir = tempDir.resolve("src/debug")
+            Files.createDirectories(debugDir)
+            val debugManifest = debugDir.resolve("AndroidManifest.xml")
+            Files.writeString(
+                debugManifest,
+                """
+                <?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                    <application android:debuggable="true">
+                        <activity android:name="com.example.app.MainActivity" />
+                    </application>
+                </manifest>
+                """.trimIndent()
+            )
+
+            val inputs = AndroidLintResources.Inputs(
+                manifests = listOf(mainManifest, debugManifest)
+            )
+            val model = AndroidLintModel(
+                module = null,
+                androidModule = null,
+                moduleRoot = tempDir,
+                projectRoot = tempDir,
+                variant = "debug",
+                sdkHome = null,
+                compileSdk = 34,
+                compileTarget = "android-34",
+                minSdk = 26,
+                targetSdk = 34,
+                namespace = "com.example.app",
+                isLibrary = false,
+                minSdkPremiseMissing = false,
+                lintModelModule = null,
+                lintModelVariant = null,
+                ruleJars = emptyList(),
+                ruleJarFingerprints = emptyList(),
+                fingerprint = "fp",
+                lintXmlFingerprint = "xmlFp",
+                xmlInputs = inputs,
+            )
+
+            val unsavedMainXml = """
+                <?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                    <application android:label="Unsaved Live Label" />
+                </manifest>
+            """.trimIndent()
+
+            val client = object : TestLintClient() {
+                override fun readFile(file: File): CharSequence {
+                    if (file == mainManifest.toFile() || file.canonicalPath == mainManifest.toFile().canonicalPath) {
+                        return unsavedMainXml
+                    }
+                    return super.readFile(file)
+                }
+            }
+
+            val helper = AndroidLintManifest(model, environment.project, client)
+
+            assertFalse(helper.isValidBuiltSnapshot())
+
+            val targetDom = client.xmlParser.parseXml(unsavedMainXml, mainManifest.toFile())
+            val mergedDoc = helper.getMergedManifest(null, mainManifest.toFile(), targetDom)
+            assertNotNull("Merged manifest must be produced via live ManifestMerger2", mergedDoc)
+            assertTrue(
+                "MERGED_MANIFEST must hold Actions",
+                mergedDoc!!.getUserData(LintClient.MERGED_MANIFEST) is Actions
+            )
+            assertTrue(helper.isMergeManifestNode(mergedDoc.documentElement))
+            assertEquals("com.example.app", mergedDoc.documentElement.getAttribute("package"))
+            val usesSdk = mergedDoc.getElementsByTagName("uses-sdk").item(0) as Element
+            assertEquals("26", usesSdk.getAttributeNS("http://schemas.android.com/apk/res/android", "minSdkVersion"))
+            assertEquals("34", usesSdk.getAttributeNS("http://schemas.android.com/apk/res/android", "targetSdkVersion"))
+
+            val appElement = mergedDoc.getElementsByTagName("application").item(0) as Element
+            assertNotNull(appElement)
+
+            val labelAttr = appElement.getAttributeNodeNS("http://schemas.android.com/apk/res/android", "label")
+            assertNotNull("Merged application must contain label attribute", labelAttr)
+            assertEquals("Unsaved Live Label", labelAttr!!.value)
+
+            val debugAttr = appElement.getAttributeNodeNS("http://schemas.android.com/apk/res/android", "debuggable")
+            assertNotNull("Merged application must contain overlay debuggable attribute", debugAttr)
+            assertEquals("true", debugAttr!!.value)
+
+            val activityList = appElement.getElementsByTagName("activity")
+            assertEquals(1, activityList.length)
+            val activityElement = activityList.item(0) as Element
+
+            val labelSource = helper.findManifestSourceNode(labelAttr)
+            assertNotNull("Label attribute source must resolve to main manifest", labelSource)
+            assertEquals(mainManifest.toFile().canonicalPath, labelSource!!.first.canonicalPath)
+            val labelLocation = helper.findManifestSourceLocation(labelAttr)
+            assertNotNull("Label attribute location range must resolve", labelLocation)
+            assertEquals(mainManifest.toFile().canonicalPath, labelLocation!!.file.canonicalPath)
+            assertTrue(
+                "Location must have positive length",
+                (labelLocation.end?.offset ?: 0) > (labelLocation.start?.offset ?: 0)
+            )
+
+            val debugSource = helper.findManifestSourceNode(debugAttr)
+            assertNotNull("Debug attribute source must resolve to overlay", debugSource)
+            assertEquals(debugManifest.toFile().canonicalPath, debugSource!!.first.canonicalPath)
+            val debugLocation = helper.findManifestSourceLocation(debugAttr)
+            assertNotNull("Debug attribute location range must resolve", debugLocation)
+            assertEquals(debugManifest.toFile().canonicalPath, debugLocation!!.file.canonicalPath)
+            assertTrue(
+                "Location must have positive length",
+                (debugLocation.end?.offset ?: 0) > (debugLocation.start?.offset ?: 0)
+            )
+
+            val actSource = helper.findManifestSourceNode(activityElement)
+            assertNotNull("Activity element source must resolve to overlay", actSource)
+            assertEquals(debugManifest.toFile().canonicalPath, actSource!!.first.canonicalPath)
+            val actLocation = helper.findManifestSourceLocation(activityElement)
+            assertNotNull("Activity element location range must resolve", actLocation)
+            assertEquals(debugManifest.toFile().canonicalPath, actLocation!!.file.canonicalPath)
+            assertTrue(
+                "Location must have positive length",
+                (actLocation.end?.offset ?: 0) > (actLocation.start?.offset ?: 0)
+            )
         } finally {
             deleteRecursively(tempDir)
         }

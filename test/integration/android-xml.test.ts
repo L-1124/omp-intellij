@@ -2595,9 +2595,16 @@ async function createCustomExternalAar(
       '    if (apps.getLength() == 0) return;',
       '    Attr label = ((Element) apps.item(0)).getAttributeNodeNS("http://schemas.android.com/apk/res/android", "label");',
       '    if (label == null) return;',
-      '    boolean built = merged.getUserData(LintClient.MERGED_MANIFEST) != null;',
+      '    Object report = merged.getUserData(LintClient.MERGED_MANIFEST);',
+      '    boolean isMerged = report != null;',
+      '    String mode = "none";',
+      '    if (report instanceof java.io.File || report instanceof java.nio.file.Path) {',
+      '      mode = "built";',
+      '    } else if (report != null) {',
+      '      mode = "live";',
+      '    }',
       '    Location location = context.getLocation(label);',
-      '    context.report(ISSUE, label, location, "ManifestSnapshot: merged=" + built + "; label=" + label.getValue());',
+      '    context.report(ISSUE, label, location, "ManifestSnapshot: merged=" + isMerged + "; mode=" + mode + "; label=" + label.getValue());',
       '  }',
       '}',
     ].join('\n'),
@@ -5848,7 +5855,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const cleanSnapshot = (clean.items ?? []).find(
             (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
           );
-          assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=false;/);
+          assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=true; mode=live;/);
           const build = spawnSync(
             java,
             [
@@ -5875,7 +5882,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
             snapshot,
             `Merged Manifest diagnostic must map to its source: ${JSON.stringify(built.items)}`,
           );
-          assert.match(snapshot.message ?? '', /ManifestSnapshot: merged=true;/);
+          assert.match(snapshot.message ?? '', /ManifestSnapshot: merged=true; mode=built;/);
           assert.deepEqual(
             snapshot.range,
             findRangeInText(text, 'android:label="@string/app_name"'),
@@ -5893,7 +5900,10 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const local = (unsaved.items ?? []).find(
             (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
           );
-          assert.match(local?.message ?? '', /ManifestSnapshot: merged=false; label=Unsaved Label/);
+          assert.match(
+            local?.message ?? '',
+            /ManifestSnapshot: merged=true; mode=live; label=Unsaved Label/,
+          );
           assert.deepEqual(local?.range, findRangeInText(edited, 'android:label="Unsaved Label"'));
           client.notify('textDocument/didClose', { textDocument: { uri } });
 
@@ -5907,7 +5917,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
           );
           assert.match(
             fallback?.message ?? '',
-            /ManifestSnapshot: merged=false; label=Unsaved Label/,
+            /ManifestSnapshot: merged=true; mode=live; label=Unsaved Label/,
             'A saved source newer than merger output must invalidate the built snapshot',
           );
         } finally {

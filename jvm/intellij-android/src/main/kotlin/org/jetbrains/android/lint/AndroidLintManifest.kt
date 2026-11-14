@@ -1,8 +1,15 @@
 package org.jetbrains.android.lint
 
+import com.android.manifmerger.Actions
+import com.android.manifmerger.ManifestMerger2
+import com.android.manifmerger.ManifestSystemProperty
+import com.android.manifmerger.MergingReport
 import com.android.tools.lint.client.api.BlameFile
 import com.android.tools.lint.client.api.LintClient
 import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.model.LintModelAndroidLibrary
+import com.android.tools.lint.model.LintModelLibrary
+import com.android.utils.ILogger
 import com.android.utils.Pair
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.progress.ProgressManager
@@ -10,6 +17,7 @@ import com.intellij.openapi.project.Project
 import org.jetbrains.android.resource.AndroidSources
 import org.w3c.dom.Document
 import org.w3c.dom.Node
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -76,7 +84,150 @@ class AndroidLintManifest(
             }
         }
 
-        // Clean / unbuilt / open changed sources: provide verified source-local target DOM without pretending merged
+        if (model != null) {
+            val sourceManifests = getSourceManifestFiles().toMutableList()
+            if (targetFile != null && sourceManifests.none { samePath(it, targetFile) }) {
+                if (sourceManifests.isEmpty()) {
+                    sourceManifests.add(targetFile)
+                } else {
+                    val isMainName = targetFile.name == "AndroidManifest.xml" && targetFile.parentFile?.name == "main"
+                    if (isMainName) {
+                        sourceManifests.add(0, targetFile)
+                    } else {
+                        sourceManifests.add(targetFile)
+                    }
+                }
+            }
+
+            if (sourceManifests.isNotEmpty()) {
+                val mainManifestFile = sourceManifests.first()
+                val overlayManifests = sourceManifests.subList(1, sourceManifests.size)
+                val mergeType = if (model.isLibrary) {
+                    ManifestMerger2.MergeType.LIBRARY
+                } else {
+                    ManifestMerger2.MergeType.APPLICATION
+                }
+
+                val invoker = ManifestMerger2.newMerger(mainManifestFile, MergerLogger(), mergeType)
+
+                for (overlay in overlayManifests) {
+                    invoker.addFlavorAndBuildTypeManifest(overlay)
+                }
+
+                if (!model.isLibrary) {
+                    val variant = model.lintModelVariant
+                    if (variant != null) {
+                        val libraryManifests = mutableListOf<File>()
+                        val deps: List<LintModelLibrary> = try {
+                            variant.artifact.dependencies.getAll()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
+                        for (lib in deps) {
+                            if (lib is LintModelAndroidLibrary) {
+                                val manifest = lib.manifest
+                                if (manifest.isFile) {
+                                    libraryManifests.add(manifest)
+                                }
+                            }
+                        }
+                        if (libraryManifests.isNotEmpty()) {
+                            invoker.addLibraryManifests(*libraryManifests.toTypedArray())
+                        }
+                    }
+                }
+
+                invoker.withFeatures(
+                    ManifestMerger2.Invoker.Feature.SKIP_BLAME,
+                    ManifestMerger2.Invoker.Feature.SKIP_XML_STRING,
+                    ManifestMerger2.Invoker.Feature.KEEP_INTERMEDIARY_STAGES,
+                )
+
+                invoker.withFileStreamProvider(object : ManifestMerger2.FileStreamProvider() {
+                    override fun getInputStream(file: File): java.io.InputStream {
+                        if (client != null) {
+                            val isTarget = targetFile != null && samePath(file, targetFile)
+                            val text = try {
+                                client.readFile(file)
+                            } catch (_: Exception) {
+                                null
+                            }
+                            if (text != null && (text.isNotEmpty() || isTarget)) {
+                                return ByteArrayInputStream(text.toString().toByteArray(StandardCharsets.UTF_8))
+                            }
+                        }
+                        return super.getInputStream(file)
+                    }
+                })
+
+                invoker.withProcessCancellationChecker {
+                    ProgressManager.checkCanceled()
+                }
+
+                if (!model.namespace.isNullOrBlank()) {
+                    invoker.setNamespace(model.namespace)
+                    invoker.setOverride(ManifestSystemProperty.Document.PACKAGE, model.namespace)
+                }
+                model.minSdk?.let {
+                    invoker.setOverride(ManifestSystemProperty.UsesSdk.MIN_SDK_VERSION, it.toString())
+                }
+                model.targetSdk?.let {
+                    invoker.setOverride(ManifestSystemProperty.UsesSdk.TARGET_SDK_VERSION, it.toString())
+                }
+
+                val placeholders = model.lintModelVariant?.manifestPlaceholders
+                if (!placeholders.isNullOrEmpty()) {
+                    invoker.setPlaceHolderValues(HashMap<String, Any>(placeholders))
+                }
+
+                val mergingReport = try {
+                    invoker.merge()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    LOG.debug("Live ManifestMerger2 merge invocation failed", e)
+                    null
+                }
+
+                if (mergingReport != null && !mergingReport.result.isError) {
+                    val mergedXmlText = try {
+                        mergingReport.getMergedDocument(MergingReport.MergedManifestKind.MERGED)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    var mergedDoc: Document? = null
+                    if (!mergedXmlText.isNullOrEmpty() && client != null) {
+                        try {
+                            mergedDoc = client.xmlParser.parseXml(mergedXmlText, mainManifestFile)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            LOG.debug("Failed parsing live merged manifest via client xmlParser", e)
+                        }
+                    }
+                    if (mergedDoc == null) {
+                        try {
+                            mergedDoc = mergingReport.getMergedXmlDocument(MergingReport.MergedManifestKind.MERGED)?.xml
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            LOG.debug("Failed getting live merged XmlDocument", e)
+                        }
+                    }
+
+                    if (mergedDoc != null) {
+                        mergedDoc.setUserData(LintClient.MERGED_MANIFEST, mergingReport.actions, null)
+                        mergedDoc.setUserData(File::class.java.name, mainManifestFile, null)
+                        this.resolvedMergedDocument = mergedDoc
+                        this.cachedManifestDocument = mergedDoc
+                        return mergedDoc
+                    }
+                }
+            }
+        }
+
         this.resolvedMergedDocument = null
         if (targetDom != null) {
             targetDom.setUserData(LintClient.MERGED_MANIFEST, null, null)
@@ -176,6 +327,7 @@ class AndroidLintManifest(
                     }
 
                     is String -> BlameFile.parse(listOf(*report.split("\n".toRegex()).toTypedArray()))
+                    is Actions -> BlameFile.parse(report)
                     else -> BlameFile.NONE
                 }
             } catch (e: CancellationException) {
@@ -188,7 +340,7 @@ class AndroidLintManifest(
         }
 
         var source: Pair<File, out Node>? = null
-        if (blameFile != null && blameFile !== BlameFile.NONE && client != null) {
+        if (blameFile !== BlameFile.NONE && client != null) {
             try {
                 source = blameFile.findSourceNode(client, mergedNode)
             } catch (e: CancellationException) {
@@ -206,7 +358,7 @@ class AndroidLintManifest(
         ProgressManager.checkCanceled()
         if (mergedNode == null) return null
         val source = findManifestSourceNode(mergedNode)
-        if (source != null && source.first != null && source.second != null) {
+        if (source?.first != null && source.second != null) {
             val parser = client?.xmlParser
             if (parser != null) {
                 return parser.getLocation(source.first, source.second)
@@ -316,15 +468,13 @@ class AndroidLintManifest(
             if (targetFile != null && targetFile.toPath().toAbsolutePath().normalize() == srcPath) {
                 if (client != null) {
                     val editorText = client.readFile(targetFile)
-                    if (editorText != null) {
-                        try {
-                            val diskText = Files.readString(srcPath)
-                            if (normalizeLf(editorText) != normalizeLf(diskText)) {
-                                return false
-                            }
-                        } catch (_: IOException) {
+                    try {
+                        val diskText = Files.readString(srcPath)
+                        if (normalizeLf(editorText) != normalizeLf(diskText)) {
                             return false
                         }
+                    } catch (_: IOException) {
+                        return false
                     }
                 }
             }
@@ -357,11 +507,22 @@ class AndroidLintManifest(
                 }
             }
 
-            if (results.isEmpty() && model.moduleRoot != null) {
+            if (model.moduleRoot != null) {
                 val std = model.moduleRoot.resolve("src/main/AndroidManifest.xml")
                 AndroidSources.observeCompiledArchive(std)
                 if (Files.isRegularFile(std) && seen.add(std.toAbsolutePath().normalize())) {
                     results.add(std.toFile())
+                }
+                val variantName = model.variant
+                if (!variantName.isNullOrBlank()) {
+                    val variantManifest = model.moduleRoot.resolve("src/$variantName/AndroidManifest.xml")
+                    AndroidSources.observeCompiledArchive(variantManifest)
+                    if (Files.isRegularFile(variantManifest) && seen.add(
+                            variantManifest.toAbsolutePath().normalize()
+                        )
+                    ) {
+                        results.add(variantManifest.toFile())
+                    }
                 }
             }
         }
@@ -477,6 +638,36 @@ class AndroidLintManifest(
         private fun normalizeLf(text: CharSequence?): String {
             if (text == null) return ""
             return text.toString().replace("\r\n", "\n").replace('\r', '\n')
+        }
+
+        private fun samePath(file1: File, file2: File): Boolean {
+            return try {
+                file1.toPath().toAbsolutePath().normalize() == file2.toPath().toAbsolutePath().normalize()
+            } catch (_: Exception) {
+                file1.absoluteFile == file2.absoluteFile
+            }
+        }
+
+        private class MergerLogger : ILogger {
+            override fun error(t: Throwable?, msgFormat: String?, vararg args: Any?) {
+                val msg = if (args.isEmpty()) msgFormat ?: "" else String.format(msgFormat ?: "", *args)
+                if (t != null) LOG.warn(msg, t) else LOG.warn(msg)
+            }
+
+            override fun warning(msgFormat: String, vararg args: Any?) {
+                val msg = if (args.isEmpty()) msgFormat else String.format(msgFormat, *args)
+                LOG.debug(msg)
+            }
+
+            override fun info(msgFormat: String, vararg args: Any?) {
+                val msg = if (args.isEmpty()) msgFormat else String.format(msgFormat, *args)
+                LOG.debug(msg)
+            }
+
+            override fun verbose(msgFormat: String, vararg args: Any?) {
+                val msg = if (args.isEmpty()) msgFormat else String.format(msgFormat, *args)
+                LOG.debug(msg)
+            }
         }
     }
 }
