@@ -1,6 +1,5 @@
 package org.jetbrains.android.context
 
-import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
@@ -12,6 +11,9 @@ import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.platform.backend.workspace.WorkspaceModel
+import com.intellij.platform.workspace.jps.entities.ModuleId
+import com.intellij.platform.workspace.jps.entities.exModuleOptions
 import com.intellij.psi.PsiFile
 import com.intellij.psi.xml.XmlFile
 import org.jetbrains.android.resource.AndroidFolders
@@ -129,9 +131,10 @@ object AndroidContext {
             }
         }
         if (candidates.isEmpty()) {
-            ExternalSystemApiUtil.getExternalProjectPath(module)?.let {
-                candidates.add(Path.of(it).toAbsolutePath().normalize())
-            }
+            WorkspaceModel.getInstance(module.project).currentSnapshot
+                .resolve(ModuleId(module.name))?.exModuleOptions?.linkedProjectPath?.let {
+                    candidates.add(Path.of(it).toAbsolutePath().normalize())
+                }
         }
         if (candidates.size != 1) return null
         return VirtualFileManager.getInstance().findFileByUrl(VfsUtilCore.pathToUrl(candidates.first().toString()))
