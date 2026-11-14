@@ -15,6 +15,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -24,6 +26,7 @@ import org.jetbrains.android.debug.AndroidDebugService
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.milliseconds
 
 class AndroidDeployment @JvmOverloads constructor(
     private val service: AndroidDebugService,
@@ -165,7 +168,7 @@ class AndroidDeployment @JvmOverloads constructor(
                     onOutput,
                 )
                 try {
-                    withTimeout(installBudgetMs) {
+                    withTimeout(installBudgetMs.milliseconds) {
                         installer.install(resolvedTarget.apksToInstall)
                     }
                 } catch (e: TimeoutCancellationException) {
@@ -658,7 +661,16 @@ class AndroidDeployment @JvmOverloads constructor(
         }
         val current = deviceOps.queryAmsProcesses(device, identity.packageName, identity.userId, 5_000L)
         if (current.any { identity.matchesInstance(it) }) {
-            deviceOps.forceStopPackage(device, identity.userId, identity.packageName, 5_000L)
+            var cleanlyExited = false
+            try {
+                cleanlyExited = deviceOps.terminateJdwpProcess(device, identity.pid, 5_000L)
+            } catch (_: Throwable) {
+                currentCoroutineContext().ensureActive()
+                cleanlyExited = false
+            }
+            if (!cleanlyExited) {
+                deviceOps.forceStopPackage(device, identity.userId, identity.packageName, 5_000L)
+            }
         }
     }
 

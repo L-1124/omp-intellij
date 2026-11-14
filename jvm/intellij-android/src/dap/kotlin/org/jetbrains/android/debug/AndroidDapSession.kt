@@ -109,6 +109,7 @@ import org.jetbrains.android.run.AndroidGradleContext
 import org.jetbrains.android.run.AndroidGradleProject
 import org.jetbrains.android.run.AndroidLaunchArguments
 import org.jetbrains.android.run.AndroidLaunchConfig
+import org.jetbrains.android.run.AndroidProcessDiagnostics
 import org.jetbrains.android.run.AndroidProcessExit
 import org.jetbrains.android.run.AndroidRunError
 import org.jetbrains.android.run.AndroidRunErrorCode
@@ -133,6 +134,7 @@ interface AndroidRunHandle {
 
     suspend fun close(terminateApplication: Boolean)
     suspend fun awaitExit(): AndroidProcessExit
+    suspend fun getDiagnostics(): AndroidProcessDiagnostics? = null
 }
 
 interface AndroidRunBackend {
@@ -199,6 +201,7 @@ class DefaultAndroidRunBackend(
         }
 
         override suspend fun awaitExit(): AndroidProcessExit = delegate.awaitExit()
+        override suspend fun getDiagnostics(): AndroidProcessDiagnostics? = delegate.getProcessDiagnostics()
     }
 }
 
@@ -252,9 +255,12 @@ class AndroidDapSession(
 
     private val activeHandle = AtomicReference<AndroidRunHandle?>(null)
     private val activeDeviceId = AtomicReference<String?>(null)
+
+    suspend fun queryProcessDiagnostics(): AndroidProcessDiagnostics? = activeHandle.get()?.getDiagnostics()
     private val currentCapabilities = AtomicReference<Capabilities?>(null)
     private val supportTerminateDebuggeeFlag = AtomicBoolean(false)
     private val isNoDebugSession = AtomicBoolean(false)
+    private val modeResolved = CompletableDeferred<Unit>()
 
     @Volatile
     private var supportsProgressReporting: Boolean = false
@@ -355,7 +361,11 @@ class AndroidDapSession(
                 detail = "launch/attach can only be called once per DAP session",
             ).toDapException()
         }
+        if (args.noDebug == true) {
+            isNoDebugSession.set(true)
+        }
         if (cleanupStarted.get()) {
+            modeResolved.complete(Unit)
             throw AndroidRunError(
                 code = AndroidRunErrorCode.INVALID_PARAMS,
                 stage = AndroidRunStage.CONFIGURING,
@@ -363,17 +373,27 @@ class AndroidDapSession(
             ).toDapException()
         }
 
-        val projectDir = projectDirectory ?: throw AndroidRunError(
-            code = AndroidRunErrorCode.INVALID_PARAMS,
-            stage = AndroidRunStage.CONFIGURING,
-            detail = "Workspace project directory is unavailable",
-        ).toDapException()
+        val projectDir = projectDirectory ?: run {
+            modeResolved.complete(Unit)
+            throw AndroidRunError(
+                code = AndroidRunErrorCode.INVALID_PARAMS,
+                stage = AndroidRunStage.CONFIGURING,
+                detail = "Workspace project directory is unavailable",
+            ).toDapException()
+        }
 
-        val config = AndroidLaunchArguments.parseLaunch(args, projectDir)
-        activeDeviceId.set(config.deviceId)
-        val noDebug = config.noDebug
-        isNoDebugSession.set(noDebug)
-        sessionMode.set(if (noDebug) SessionMode.LAUNCH_NO_DEBUG else SessionMode.LAUNCH_DEBUG)
+        val (config, noDebug) = try {
+            val parsedConfig = AndroidLaunchArguments.parseLaunch(args, projectDir)
+            activeDeviceId.set(parsedConfig.deviceId)
+            val isNoDebug = parsedConfig.noDebug
+            isNoDebugSession.set(isNoDebug)
+            sessionMode.set(if (isNoDebug) SessionMode.LAUNCH_NO_DEBUG else SessionMode.LAUNCH_DEBUG)
+            modeResolved.complete(Unit)
+            parsedConfig to isNoDebug
+        } catch (t: Throwable) {
+            modeResolved.complete(Unit)
+            throw t
+        }
 
         val requestId = currentDapRequest()?.requestId
         runStartupBlock(
@@ -451,6 +471,7 @@ class AndroidDapSession(
             ).toDapException()
         }
         if (cleanupStarted.get()) {
+            modeResolved.complete(Unit)
             throw AndroidRunError(
                 code = AndroidRunErrorCode.INVALID_PARAMS,
                 stage = AndroidRunStage.CONFIGURING,
@@ -458,16 +479,26 @@ class AndroidDapSession(
             ).toDapException()
         }
 
-        val projectDir = projectDirectory ?: throw AndroidRunError(
-            code = AndroidRunErrorCode.INVALID_PARAMS,
-            stage = AndroidRunStage.CONFIGURING,
-            detail = "Workspace project directory is unavailable",
-        ).toDapException()
+        val projectDir = projectDirectory ?: run {
+            modeResolved.complete(Unit)
+            throw AndroidRunError(
+                code = AndroidRunErrorCode.INVALID_PARAMS,
+                stage = AndroidRunStage.CONFIGURING,
+                detail = "Workspace project directory is unavailable",
+            ).toDapException()
+        }
 
-        val config = AndroidLaunchArguments.parseAttach(args, projectDir)
-        activeDeviceId.set(config.deviceId)
-        isNoDebugSession.set(false)
-        sessionMode.set(SessionMode.EXTERNAL_ATTACH)
+        val config = try {
+            val parsedConfig = AndroidLaunchArguments.parseAttach(args, projectDir)
+            activeDeviceId.set(parsedConfig.deviceId)
+            isNoDebugSession.set(false)
+            sessionMode.set(SessionMode.EXTERNAL_ATTACH)
+            modeResolved.complete(Unit)
+            parsedConfig
+        } catch (t: Throwable) {
+            modeResolved.complete(Unit)
+            throw t
+        }
 
         val requestId = currentDapRequest()?.requestId
         runStartupBlock(
@@ -509,7 +540,7 @@ class AndroidDapSession(
     }
 
     override suspend fun configurationDone(args: ConfigurationDoneArguments) {
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             noDebugConfigurationDone.complete(Unit)
             return
         }
@@ -592,7 +623,7 @@ class AndroidDapSession(
             }
             return
         }
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             return
         }
         if (targetRequestId != null) {
@@ -602,7 +633,7 @@ class AndroidDapSession(
 
     override suspend fun setBreakpoints(args: SetBreakpointsArguments): SetBreakpointsResponse {
         val nativeArgs = sourceConverter.toNativeRequest(args)
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             val clientSource = sourceConverter.toClientSource(nativeArgs.source)
             val breakpoints = if (nativeArgs.breakpoints != null) {
                 nativeArgs.breakpoints!!.map { bp ->
@@ -634,7 +665,7 @@ class AndroidDapSession(
     override suspend fun setFunctionBreakpoints(
         args: SetFunctionBreakpointsArguments
     ): SetFunctionBreakpointsResponse {
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             return SetFunctionBreakpointsResponse(
                 args.breakpoints.map {
                     Breakpoint(
@@ -651,7 +682,7 @@ class AndroidDapSession(
     override suspend fun setDataBreakpoints(
         args: SetDataBreakpointsArguments
     ): SetDataBreakpointsResponse {
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             return SetDataBreakpointsResponse(
                 args.breakpoints.map {
                     Breakpoint(
@@ -668,7 +699,7 @@ class AndroidDapSession(
     override suspend fun setExceptionBreakpoints(
         args: SetExceptionBreakpointsArguments
     ): SetExceptionBreakpointsResponse? {
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             return SetExceptionBreakpointsResponse(
                 args.filters.map {
                     Breakpoint(
@@ -685,7 +716,7 @@ class AndroidDapSession(
     override suspend fun setInstructionBreakpoints(
         args: SetInstructionBreakpointsArguments
     ): SetInstructionBreakpointsResponse {
-        if (isNoDebugSession.get()) {
+        if (isNoDebug()) {
             return SetInstructionBreakpointsResponse(
                 args.breakpoints.map {
                     Breakpoint(
@@ -1168,6 +1199,7 @@ class AndroidDapSession(
                 deviceId = handle?.deviceId ?: activeDeviceId.get(),
             )
         } finally {
+            modeResolved.complete(Unit)
             cleanupDeferred.complete(Unit)
         }
     }
@@ -1268,8 +1300,15 @@ class AndroidDapSession(
         }
     }
 
-    private fun rejectInNoDebug(methodName: String) {
-        if (isNoDebugSession.get()) {
+    private suspend fun isNoDebug(): Boolean {
+        if (started.get() && !modeResolved.isCompleted) {
+            modeResolved.await()
+        }
+        return isNoDebugSession.get()
+    }
+
+    private suspend fun rejectInNoDebug(methodName: String) {
+        if (isNoDebug()) {
             throw AndroidRunError(
                 code = AndroidRunErrorCode.INVALID_PARAMS,
                 stage = AndroidRunStage.CONFIGURING,

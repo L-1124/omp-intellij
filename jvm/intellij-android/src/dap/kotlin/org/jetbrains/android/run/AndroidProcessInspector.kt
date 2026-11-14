@@ -4,12 +4,18 @@ import com.android.adblib.ConnectedDevice
 import com.android.adblib.DeviceSelector
 import com.android.adblib.DeviceState
 import com.android.adblib.ShellCommandOutput
+import com.android.adblib.activityManagerServices
 import com.android.adblib.serialNumber
 import com.android.adblib.shellAsText
 import com.android.adblib.syncRecv
 import com.android.adblib.tools.debugging.appProcessTracker
+import com.android.adblib.tools.debugging.getOrNull
 import com.android.adblib.tools.debugging.jdwpProcessTracker
+import com.android.adblib.tools.debugging.properties
+import com.android.adblib.tools.debugging.resumeProcess
 import com.android.adblib.tools.debugging.scope
+import com.android.adblib.tools.debugging.sendDdmsExit
+import com.android.adblib.tools.debugging.sendVmExit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +30,20 @@ import kotlinx.coroutines.withTimeout
 import org.jetbrains.android.debug.AndroidDebugHandles
 import java.nio.file.Path
 import java.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+
+data class AndroidProcessDiagnostics(
+    val pid: Int,
+    val processName: String? = null,
+    val packageName: String? = null,
+    val userId: Int? = null,
+    val vmIdentifier: String? = null,
+    val instructionSet: String? = null,
+    val isWaitingForDebugger: Boolean? = null,
+    val features: List<String>? = null,
+    val jvmFlags: String? = null,
+    val isNativeDebuggable: Boolean? = null,
+)
 
 interface AndroidDeviceOperations {
     suspend fun getCurrentUser(device: ConnectedDevice, timeoutMs: Long): Int
@@ -51,6 +71,8 @@ interface AndroidDeviceOperations {
     )
 
     suspend fun forceStopPackage(device: ConnectedDevice, userId: Int, packageName: String, timeoutMs: Long)
+    suspend fun terminateJdwpProcess(device: ConnectedDevice, pid: Int, timeoutMs: Long): Boolean = false
+    suspend fun inspectProcessDiagnostics(device: ConnectedDevice, pid: Int): AndroidProcessDiagnostics? = null
     suspend fun awaitProcessIdentity(
         device: ConnectedDevice,
         userId: Int,
@@ -70,25 +92,13 @@ interface AndroidDeviceOperations {
 }
 
 class AndroidProcessInspector(
-    private val shellRunner: suspend (ConnectedDevice, String, Long) -> ShellCommandOutput = { device, command, timeoutMs ->
-        val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
-        withTimeout(timeoutMs) {
-            device.session.deviceServices.shellAsText(
-                device = selector,
-                command = command,
-                commandTimeout = Duration.ofMillis(timeoutMs),
-            )
-        }
-    },
-    private val filePuller: suspend (ConnectedDevice, String, Path, Long) -> Unit = { device, remotePath, destination, timeoutMs ->
-        val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
-        withTimeout(timeoutMs) {
-            device.session.deviceServices.syncRecv(selector, remotePath, destination)
-        }
-    },
+    private val shellRunner: suspend (ConnectedDevice, String, Long) -> ShellCommandOutput = DEFAULT_SHELL_RUNNER,
+    private val filePuller: suspend (ConnectedDevice, String, Path, Long) -> Unit = DEFAULT_FILE_PULLER,
     private val pollIntervalMs: Long = 50L,
     private val exitPollIntervalMs: Long = 250L,
 ) : AndroidDeviceOperations {
+
+    private val isDefaultShellRunner: Boolean = (shellRunner === DEFAULT_SHELL_RUNNER)
 
     override suspend fun getCurrentUser(device: ConnectedDevice, timeoutMs: Long): Int {
         ensureDeviceOnline(device)
@@ -264,26 +274,136 @@ class AndroidProcessInspector(
         validatePackageName(packageName, device.serialNumber)
         ensureDeviceOnline(device)
 
-        val output = runShell(
-            device,
-            "am force-stop --user $userId $packageName",
-            timeoutMs,
-            AndroidRunStage.CLEANUP,
-        )
-        val combined = combinedOutput(output)
-        if (output.exitCode != 0 || containsShellError(output.stdout) || containsShellError(output.stderr)) {
-            ensureDeviceOnline(device)
-            throw AndroidRunException(
-                AndroidRunError(
-                    code = AndroidRunErrorCode.CLEANUP_FAILED,
-                    stage = AndroidRunStage.CLEANUP,
-                    detail = "am force-stop failed for $packageName (user $userId)",
-                    device = device.serialNumber,
-                    exitCode = output.exitCode,
-                    outputTail = combined,
-                )
-            )
+        var stoppedViaAmServices = false
+        if (userId == 0 && isDefaultShellRunner) {
+            try {
+                withTimeout(timeoutMs.milliseconds) {
+                    val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+                    device.session.activityManagerServices.forceStop(selector, packageName)
+                }
+                stoppedViaAmServices = true
+            } catch (ce: CancellationException) {
+                if (ce is TimeoutCancellationException) {
+                    ensureDeviceOnline(device)
+                    throw AndroidRunException(
+                        AndroidRunError(
+                            code = AndroidRunErrorCode.CLEANUP_FAILED,
+                            stage = AndroidRunStage.CLEANUP,
+                            detail = "am force-stop timed out for $packageName (user $userId)",
+                            device = device.serialNumber,
+                        ),
+                        ce,
+                    )
+                }
+                throw ce
+            } catch (_: Throwable) {
+                // Fall back gracefully to shell am force-stop
+            }
         }
+
+        if (!stoppedViaAmServices) {
+            val output = runShell(
+                device,
+                "am force-stop --user $userId $packageName",
+                timeoutMs,
+                AndroidRunStage.CLEANUP,
+            )
+            val combined = combinedOutput(output)
+            if (output.exitCode != 0 || containsShellError(output.stdout) || containsShellError(output.stderr)) {
+                ensureDeviceOnline(device)
+                throw AndroidRunException(
+                    AndroidRunError(
+                        code = AndroidRunErrorCode.CLEANUP_FAILED,
+                        stage = AndroidRunStage.CLEANUP,
+                        detail = "am force-stop failed for $packageName (user $userId)",
+                        device = device.serialNumber,
+                        exitCode = output.exitCode,
+                        outputTail = combined,
+                    )
+                )
+            }
+        }
+    }
+
+    override suspend fun terminateJdwpProcess(
+        device: ConnectedDevice,
+        pid: Int,
+        timeoutMs: Long,
+    ): Boolean {
+        if (device.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
+            return false
+        }
+        val jdwpProc = try {
+            device.jdwpProcessTracker.processesFlow.value.firstOrNull { it.pid == pid }
+        } catch (_: Throwable) {
+            null
+        } ?: return false
+
+        try {
+            if (jdwpProc.properties.isWaitingForDebugger.getOrNull() == true) {
+                jdwpProc.resumeProcess()
+            }
+        } catch (_: Throwable) {
+        }
+
+        val exitSent = try {
+            jdwpProc.sendVmExit(0)
+            true
+        } catch (_: Throwable) {
+            try {
+                jdwpProc.sendDdmsExit(0)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        if (!exitSent) {
+            return false
+        }
+
+        return try {
+            withTimeout(minOf(timeoutMs, 1_500L).milliseconds) {
+                jdwpProc.scope.coroutineContext.job.join()
+            }
+            true
+        } catch (_: TimeoutCancellationException) {
+            false
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override suspend fun inspectProcessDiagnostics(
+        device: ConnectedDevice,
+        pid: Int,
+    ): AndroidProcessDiagnostics? {
+        if (device.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
+            return null
+        }
+        val jdwpProc = try {
+            device.jdwpProcessTracker.processesFlow.value.firstOrNull { it.pid == pid }
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+
+        val props = jdwpProc.properties
+        val instructionSet = props.instructionSet.getOrNull()?.text ?: props.instructionSetDescription.getOrNull()
+        return AndroidProcessDiagnostics(
+            pid = pid,
+            processName = props.processName.getOrNull(),
+            packageName = props.packageName.getOrNull(),
+            userId = props.userId.getOrNull(),
+            vmIdentifier = props.vmIdentifier.getOrNull(),
+            instructionSet = instructionSet,
+            isWaitingForDebugger = props.isWaitingForDebugger.getOrNull(),
+            features = props.features.getOrNull(),
+            jvmFlags = props.jvmFlags.getOrNull(),
+            isNativeDebuggable = props.isNativeDebuggable.getOrNull(),
+        )
     }
 
     override suspend fun awaitProcessIdentity(
@@ -295,7 +415,7 @@ class AndroidProcessInspector(
         timeoutMs: Long,
     ): AndroidDebugHandles.ProcessInstanceIdentity {
         return try {
-            withTimeout(timeoutMs) {
+            withTimeout(timeoutMs.milliseconds) {
                 while (true) {
                     ensureDeviceOnline(device)
                     val processes = queryAmsProcesses(device, packageName, userId, minOf(timeoutMs, 5_000L))
@@ -305,7 +425,7 @@ class AndroidProcessInspector(
                     if (match != null) {
                         return@withTimeout match
                     }
-                    delay(pollIntervalMs)
+                    delay(pollIntervalMs.milliseconds)
                 }
                 @Suppress("UNREACHABLE_CODE")
                 error("Unreachable")
@@ -331,14 +451,14 @@ class AndroidProcessInspector(
         timeoutMs: Long,
     ) {
         try {
-            withTimeout(timeoutMs) {
+            withTimeout(timeoutMs.milliseconds) {
                 while (true) {
                     ensureDeviceOnline(device)
                     val remaining = queryAmsProcesses(device, packageName, userId, minOf(timeoutMs, 5_000L))
                     if (remaining.isEmpty()) {
                         return@withTimeout
                     }
-                    delay(pollIntervalMs)
+                    delay(pollIntervalMs.milliseconds)
                 }
             }
         } catch (_: TimeoutCancellationException) {
@@ -430,7 +550,7 @@ class AndroidProcessInspector(
                     // Non-debuggable/non-profileable release apps are not listed in track-app:
                     // observe AMS ProcessRecord identity directly.
                     while (!result.isCompleted) {
-                        delay(exitPollIntervalMs)
+                        delay(exitPollIntervalMs.milliseconds)
                         if (device.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
                             result.complete(
                                 AndroidProcessExit(
@@ -544,6 +664,23 @@ class AndroidProcessInspector(
     }
 
     companion object {
+        val DEFAULT_SHELL_RUNNER: suspend (ConnectedDevice, String, Long) -> ShellCommandOutput = { device, command, timeoutMs ->
+            val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+            withTimeout(timeoutMs.milliseconds) {
+                device.session.deviceServices.shellAsText(
+                    device = selector,
+                    command = command,
+                    commandTimeout = Duration.ofMillis(timeoutMs),
+                )
+            }
+        }
+        val DEFAULT_FILE_PULLER: suspend (ConnectedDevice, String, Path, Long) -> Unit = { device, remotePath, destination, timeoutMs ->
+            val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+            withTimeout(timeoutMs.milliseconds) {
+                device.session.deviceServices.syncRecv(selector, remotePath, destination)
+            }
+        }
+
         private val SAFE_PACKAGE_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+$")
         private val SAFE_COMPONENT_REGEX = Regex("^[A-Za-z0-9_.$]+/[A-Za-z0-9_.$]+$")
         private val PROCESS_RECORD_HEADER_REGEX = Regex(
@@ -737,24 +874,24 @@ class AndroidProcessInspector(
 
             val result = ArrayList<AndroidDebugHandles.ProcessInstanceIdentity>()
             val seenPids = HashSet<Int>()
-            for (rec in records) {
-                val matchesPkg = if (rec.packages.isNotEmpty()) {
-                    targetPackage in rec.packages
+            for ((amsRecord, pid, processName, userId, uid, startSeq, packages) in records) {
+                val matchesPkg = if (packages.isNotEmpty()) {
+                    targetPackage in packages
                 } else {
-                    rec.processName == targetPackage || rec.processName.startsWith("$targetPackage:")
+                    processName == targetPackage || processName.startsWith("$targetPackage:")
                 }
                 if (!matchesPkg) continue
-                if (targetUserId != null && rec.userId != targetUserId) continue
-                if (!seenPids.add(rec.pid)) continue
+                if (targetUserId != null && userId != targetUserId) continue
+                if (!seenPids.add(pid)) continue
                 result.add(
                     AndroidDebugHandles.ProcessInstanceIdentity(
-                        pid = rec.pid,
-                        userId = rec.userId,
-                        uid = rec.uid,
+                        pid = pid,
+                        userId = userId,
+                        uid = uid,
                         packageName = targetPackage,
-                        processName = rec.processName,
-                        startSeq = rec.startSeq,
-                        amsRecord = rec.amsRecord,
+                        processName = processName,
+                        startSeq = startSeq,
+                        amsRecord = amsRecord,
                     )
                 )
             }

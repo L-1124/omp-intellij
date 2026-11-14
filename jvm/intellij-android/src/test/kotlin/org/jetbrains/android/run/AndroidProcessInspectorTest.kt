@@ -1,5 +1,13 @@
 package org.jetbrains.android.run
 
+import com.android.adblib.DeviceInfo
+import com.android.adblib.DeviceList
+import com.android.adblib.DeviceState
+import com.android.adblib.ShellCommandOutput
+import com.android.adblib.connectedDevicesTracker
+import com.android.adblib.testing.FakeAdbSession
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -133,5 +141,75 @@ class AndroidProcessInspectorTest {
                 exitCode = 1,
             )
         )
+    }
+
+    @Test
+    fun testForceStopPackageFallsBackToShellWithCustomRunner() = runBlocking {
+        FakeAdbSession().use { fakeSession ->
+            fakeSession.hostServices.devices = DeviceList(
+                listOf(DeviceInfo("emulator-5580", DeviceState.ONLINE)),
+                emptyList()
+            )
+            val device = fakeSession.connectedDevicesTracker.connectedDevices.first { it.isNotEmpty() }.first()
+
+            val executedCommands = mutableListOf<String>()
+            val inspector = AndroidProcessInspector(
+                shellRunner = { _, cmd, _ ->
+                    executedCommands.add(cmd)
+                    ShellCommandOutput(stdout = "", stderr = "", exitCode = 0)
+                }
+            )
+
+            inspector.forceStopPackage(device, userId = 0, packageName = "com.example.app", timeoutMs = 5000L)
+            assertEquals(listOf("am force-stop --user 0 com.example.app"), executedCommands)
+
+            inspector.forceStopPackage(device, userId = 10, packageName = "com.example.app", timeoutMs = 5000L)
+            assertEquals(
+                listOf(
+                    "am force-stop --user 0 com.example.app",
+                    "am force-stop --user 10 com.example.app"
+                ),
+                executedCommands
+            )
+        }
+    }
+
+    @Test
+    fun testTerminateAndInspectNonExistentJdwpProcessSafelyReturns() = runBlocking {
+        FakeAdbSession().use { fakeSession ->
+            fakeSession.hostServices.devices = DeviceList(
+                listOf(DeviceInfo("emulator-5580", DeviceState.ONLINE)),
+                emptyList()
+            )
+            val device = fakeSession.connectedDevicesTracker.connectedDevices.first { it.isNotEmpty() }.first()
+            val inspector = AndroidProcessInspector()
+
+            val terminated = inspector.terminateJdwpProcess(device, pid = 99999, timeoutMs = 1000L)
+            assertFalse(terminated)
+
+            val diag = inspector.inspectProcessDiagnostics(device, pid = 99999)
+            assertNull(diag)
+        }
+    }
+
+    @Test
+    fun testProcessDiagnosticsDataClassNullSafety() {
+        val diag = AndroidProcessDiagnostics(
+            pid = 1234,
+            processName = "com.example.app",
+            packageName = "com.example.app",
+            userId = 0,
+            vmIdentifier = "Dalvik/2.1.0",
+            instructionSet = "arm64",
+            isWaitingForDebugger = false,
+            features = listOf("feat1"),
+            jvmFlags = null,
+            isNativeDebuggable = false,
+        )
+        assertEquals(1234, diag.pid)
+        assertEquals("Dalvik/2.1.0", diag.vmIdentifier)
+        assertEquals("arm64", diag.instructionSet)
+        assertEquals(false, diag.isWaitingForDebugger)
+        assertNull(diag.jvmFlags)
     }
 }

@@ -5,6 +5,8 @@ import com.android.adblib.DeviceState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -181,7 +183,23 @@ class AndroidExecutionHandle internal constructor(
             // Preserve any new external instance instead of calling package-wide force-stop.
             return
         }
-        deviceOps.forceStopPackage(device, userId, packageName, stopTimeoutMs)
+
+        var cleanlyExited = false
+        if (isDebuggable) {
+            try {
+                cleanlyExited = deviceOps.terminateJdwpProcess(device, identity.pid, stopTimeoutMs)
+            } catch (_: Throwable) {
+                currentCoroutineContext().ensureActive()
+                cleanlyExited = false
+            }
+        }
+        if (!cleanlyExited) {
+            deviceOps.forceStopPackage(device, userId, packageName, stopTimeoutMs)
+        }
+    }
+
+    suspend fun getProcessDiagnostics(): AndroidProcessDiagnostics? {
+        return deviceOps.inspectProcessDiagnostics(device, pid)
     }
 
     private fun formatFailure(t: Throwable): String {

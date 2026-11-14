@@ -2,6 +2,10 @@ package org.jetbrains.android.debug
 
 import com.android.adblib.*
 import com.android.adblib.tools.debugging.*
+import com.android.sdklib.AndroidApiLevel
+import com.android.sdklib.AndroidVersion
+import com.android.sdklib.SdkVersionInfo
+import com.android.sdklib.getFullReleaseName
 import com.intellij.openapi.Disposable
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,12 +24,43 @@ import java.util.concurrent.*
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import org.jetbrains.annotations.TestOnly
+import kotlin.time.Duration.Companion.milliseconds
 
 data class AndroidEnumeratedDevice(
     val deviceId: String,
     val state: String,
     val abis: List<String>
 )
+
+data class AndroidDevice(
+    val serial: String,
+    val state: String,
+    val apiLevel: Int,
+    val release: String,
+    val abi: String,
+    val manufacturer: String,
+    val model: String,
+    val avdName: String? = null,
+    val isEmulator: Boolean = false,
+) {
+    fun toJsonObject(): JsonObject = buildJsonObject {
+        put("serial", serial)
+        put("state", state)
+        put("apiLevel", apiLevel)
+        put("release", release)
+        put("abi", abi)
+        put("manufacturer", manufacturer)
+        put("model", model)
+        if (avdName != null) {
+            put("avdName", avdName)
+        } else {
+            put("avdName", JsonNull)
+        }
+        put("isEmulator", isEmulator)
+    }
+}
+
+inline val AdbSession.activityManager: AdbActivityManagerServices get() = this.activityManagerServices
 
 open class AndroidDebugService(
     val host: AdbSessionHost,
@@ -128,7 +163,7 @@ open class AndroidDebugService(
 
             currentAdbPath = adbPathStr
             val configFlow = MutableStateFlow(
-                AdbServerConfiguration(adbPath, 5037, false, false, emptyMap())
+                AdbServerConfiguration(adbPath, 5037, isUserManaged = false, isUnitTest = false, envVars = emptyMap())
             )
             val controller = AdbServerController.createServerController(host, configFlow)
             serverController = controller
@@ -191,7 +226,7 @@ open class AndroidDebugService(
             throw AndroidDebugException("invalid_params", "pid must be a positive integer")
         }
         val timeout = timeoutMs?.toLong() ?: 10000L
-        if (timeout < 1 || timeout > 300000L) {
+        if (timeout !in 1..300000L) {
             throw AndroidDebugException("invalid_params", "timeoutMs must be between 1 and 300000")
         }
 
@@ -234,7 +269,7 @@ open class AndroidDebugService(
 
             val socketAddress = status.socketAddress.getOrThrow()
             val port = socketAddress.port
-            if (port <= 0 || port > 65535) {
+            if (port !in 1..65535) {
                 throw AndroidDebugException("proxy_failed", "Invalid proxy port bound: $port")
             }
 
@@ -296,7 +331,7 @@ open class AndroidDebugService(
         if (!isLoopbackHost(host)) {
             throw AndroidDebugException("invalid_params", "Host must be a loopback address: $host")
         }
-        if (port < 1 || port > 65535) {
+        if (port !in 1..65535) {
             throw AndroidDebugException("invalid_params", "Port must be between 1 and 65535: $port")
         }
 
@@ -479,6 +514,145 @@ open class AndroidDebugService(
         return api
     }
 
+    open suspend fun readDeviceDetails(device: ConnectedDevice): AndroidDevice {
+        val props = try {
+            device.deviceProperties().allReadonly()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            throw AndroidDebugException(
+                "device_offline",
+                "Failed to read device properties for ${device.serialNumber}: ${t.message}",
+                t
+            )
+        }
+
+        val apiLevel = try {
+            device.deviceProperties().api(-1)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            -1
+        }
+
+        val rawRelease = props[DevicePropertyNames.RO_BUILD_VERSION_RELEASE]?.trim()
+        val codename = props[DevicePropertyNames.RO_BUILD_VERSION_CODENAME]?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "REL" }
+        val release = if (!rawRelease.isNullOrEmpty()) {
+            rawRelease
+        } else if (apiLevel > 0) {
+            SdkVersionInfo.getVersionString(apiLevel)
+                ?: SdkVersionInfo.getReleaseVersionString(apiLevel)
+                ?: codename
+                ?: "unknown"
+        } else {
+            "unknown"
+        }
+
+        val abis = readDeviceAbis(device)
+        val primaryAbi = abis.firstOrNull() ?: props[DevicePropertyNames.RO_PRODUCT_CPU_ABI]?.trim() ?: "unknown"
+        val manufacturer = props[DevicePropertyNames.RO_PRODUCT_MANUFACTURER]?.trim()
+            ?: props[DevicePropertyNames.RO_MANUFACTURER]?.trim()
+            ?: "unknown"
+        val model = props[DevicePropertyNames.RO_PRODUCT_MODEL]?.trim()
+            ?: props[DevicePropertyNames.RO_MODEL]?.trim()
+            ?: "unknown"
+        val avdName = props[DevicePropertyNames.RO_BOOT_QEMU_AVD_NAME]?.trim()?.takeIf { it.isNotEmpty() }
+            ?: props[DevicePropertyNames.RO_KERNEL_QEMU_AVD_NAME]?.trim()?.takeIf { it.isNotEmpty() }
+        val isEmulator = device.serialNumber.startsWith("emulator-")
+                || props[DevicePropertyNames.RO_KERNEL_QEMU]?.trim() == "1"
+                || avdName != null
+
+        val state = if (device.isOnline) "online" else device.deviceInfo.deviceState.name.lowercase(Locale.ROOT)
+
+        return AndroidDevice(
+            serial = device.serialNumber,
+            state = state,
+            apiLevel = apiLevel,
+            release = release,
+            abi = primaryAbi,
+            manufacturer = manufacturer,
+            model = model,
+            avdName = avdName,
+            isEmulator = isEmulator,
+        )
+    }
+
+    fun formatReadableVersion(apiLevel: Int, codename: String? = null): String {
+        if (apiLevel <= 0) return "unknown"
+        val resolvedCodename = codename?.takeIf { it.isNotBlank() && it != "REL" }
+            ?: SdkVersionInfo.getCodeName(apiLevel)
+        val androidVersion = if (resolvedCodename != null) {
+            AndroidVersion(apiLevel, resolvedCodename)
+        } else {
+            AndroidVersion(AndroidApiLevel(apiLevel))
+        }
+        return try {
+            androidVersion.getFullReleaseName(includeApiLevel = true, includeCodeName = true)
+        } catch (_: Throwable) {
+            SdkVersionInfo.getVersionString(apiLevel) ?: "API $apiLevel"
+        }
+    }
+
+    open suspend fun listDevices(
+        requestedDeviceId: String? = null,
+        adbPath: String? = null,
+        timeoutMs: Long = 10_000L,
+    ): List<AndroidDevice> {
+        if (requestedDeviceId != null && requestedDeviceId.isBlank()) {
+            throw AndroidDebugException("invalid_params", "deviceId must not be blank")
+        }
+        val session = acquireAdbSession(adbPath, timeoutMs)
+        val devices = awaitDevicesInitialized(session, timeoutMs)
+        if (requestedDeviceId != null) {
+            val device = devices.firstOrNull { it.serialNumber == requestedDeviceId }
+            if (device == null || device.deviceInfo.deviceState != DeviceState.ONLINE) {
+                throw AndroidDebugException(
+                    "device_offline",
+                    "Device $requestedDeviceId is not online"
+                )
+            }
+            return listOf(readDeviceDetails(device))
+        }
+
+        val result = ArrayList<AndroidDevice>()
+        for (device in devices) {
+            if (!device.isOnline) continue
+            try {
+                result.add(readDeviceDetails(device))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+            }
+        }
+        return result
+    }
+
+    open suspend fun reverseForwardTcp(
+        device: ConnectedDevice,
+        devicePort: Int,
+        hostPort: Int,
+    ): String? {
+        val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+        return device.session.deviceServices.reverseForward(
+            device = selector,
+            remote = SocketSpec.Tcp(devicePort),
+            local = SocketSpec.Tcp(hostPort),
+            rebind = false,
+        )
+    }
+
+    open suspend fun killReverseForward(
+        device: ConnectedDevice,
+        devicePort: Int,
+    ) {
+        val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+        device.session.deviceServices.reverseKillForward(
+            device = selector,
+            remote = SocketSpec.Tcp(devicePort),
+        )
+    }
+
     open suspend fun prepareByPid(
         device: ConnectedDevice,
         pid: Int,
@@ -515,7 +689,7 @@ open class AndroidDebugService(
             childSession = createdChild
 
             val result = try {
-                withTimeout(timeoutMs) {
+                withTimeout(timeoutMs.milliseconds) {
                     val childDevices = awaitDevicesInitialized(createdChild, timeoutMs)
                     val childDevice = childDevices.firstOrNull { it.serialNumber == device.serialNumber }
                         ?: throw AndroidDebugException("device_offline", "Device ${device.serialNumber} is offline")
@@ -542,7 +716,7 @@ open class AndroidDebugService(
                         )
                     }
                     val port = status.socketAddress.getOrThrow().port
-                    if (port <= 0 || port > 65535) {
+                    if (port !in 1..65535) {
                         throw AndroidDebugException("proxy_failed", "Invalid proxy port bound: $port")
                     }
                     if (childDevice.deviceInfoFlow.value.deviceState != DeviceState.ONLINE || !process.scope.isActive) {
@@ -625,7 +799,7 @@ open class AndroidDebugService(
 
     private suspend fun awaitDevicesInitialized(session: AdbSession, timeoutMs: Long): ConnectedDeviceList {
         return try {
-            withTimeout(timeoutMs) {
+            withTimeout(timeoutMs.milliseconds) {
                 session.connectedDevicesTracker.connectedDevices.first { !it.flowStatus.isStartOfFlow }
             }
         } catch (e: TimeoutCancellationException) {
@@ -714,8 +888,7 @@ open class AndroidDebugService(
                 throw AndroidDebugException("no_device", "Device $requestedDeviceId not found")
             }
 
-            val state = device.deviceInfo.deviceState
-            return when (state) {
+            return when (val state = device.deviceInfo.deviceState) {
                 DeviceState.ONLINE -> device
                 DeviceState.UNAUTHORIZED -> throw AndroidDebugException(
                     "unauthorized_device",
@@ -825,10 +998,10 @@ open class AndroidDebugService(
             }
         }
 
-        if (pid != null) {
-            return selectProcessByPid(device, processFlow, pid, deadlineNanos)
+        return if (pid != null) {
+            selectProcessByPid(device, processFlow, pid, deadlineNanos)
         } else {
-            return selectProcessByPackage(device, processFlow, packageName!!, deadlineNanos)
+            selectProcessByPackage(device, processFlow, packageName!!, deadlineNanos)
         }
     }
 
@@ -1190,7 +1363,7 @@ open class AndroidDebugService(
             if (matches.size == 1 && (!loading || settled)) {
                 return matches[0]
             }
-            if (settled && matches.isEmpty() && unsupported) {
+            if (settled && unsupported) {
                 throw AndroidDebugException(
                     "process_not_found",
                     "Device process metadata cannot confirm package $targetPackage; specify --pid explicitly"

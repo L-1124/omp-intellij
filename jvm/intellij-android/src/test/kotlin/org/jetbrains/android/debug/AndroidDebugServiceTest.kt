@@ -1,23 +1,27 @@
 package org.jetbrains.android.debug
 
+import com.android.adblib.AdbDeviceServices
+import com.android.adblib.AdbSession
 import com.android.adblib.AdbSessionHost
+import com.android.adblib.ConnectedDevice
+import com.android.adblib.DeviceInfo
+import com.android.adblib.DeviceList
+import com.android.adblib.DeviceSelector
+import com.android.adblib.DeviceState
+import com.android.adblib.SocketSpec
+import com.android.adblib.testing.FakeAdbSession
 import com.android.adblib.tools.debugging.JdwpProcess
 import com.android.adblib.tools.debugging.JdwpProcessProperties
 import com.android.adblib.tools.debugging.OptionalValue
+import java.lang.reflect.Proxy
+import java.nio.file.Files
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import java.lang.reflect.Proxy
-import java.nio.file.Files
-import com.android.adblib.DeviceInfo
-import com.android.adblib.DeviceList
-import com.android.adblib.DeviceSelector
-import com.android.adblib.DeviceState
-import com.android.adblib.testing.FakeAdbSession
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.runBlocking
 
 class AndroidDebugServiceTest {
     private lateinit var host: AdbSessionHost
@@ -444,6 +448,149 @@ class AndroidDebugServiceTest {
                 handles.cancelReservation(targetId)
                 activeOwner.cancel()
             }
+        } finally {
+            service.setParentSessionForTesting(null)
+            fakeSession.close()
+        }
+    }
+
+    @Test
+    fun testReadDeviceDetailsWithSdkVersionFallbackAndAvdDetection() = runBlocking {
+        val fakeSession = FakeAdbSession()
+        try {
+            fakeSession.hostServices.devices = DeviceList(
+                listOf(
+                    DeviceInfo("emulator-5580", DeviceState.ONLINE),
+                    DeviceInfo("offline-1", DeviceState.OFFLINE)
+                ),
+                emptyList()
+            )
+            fakeSession.deviceServices.configureDeviceProperties(
+                DeviceSelector.fromSerialNumber("emulator-5580"),
+                mapOf(
+                    "ro.build.version.sdk" to "34",
+                    "ro.build.version.codename" to "UpsideDownCake",
+                    "ro.product.cpu.abilist" to "arm64-v8a,x86_64",
+                    "ro.product.manufacturer" to "Google",
+                    "ro.product.model" to "Pixel 8",
+                    "ro.boot.qemu.avd_name" to "Pixel_8_API_34"
+                )
+            )
+            service.setParentSessionForTesting(fakeSession)
+
+            val device = service.resolveOnlineDevice("emulator-5580")
+            val details = service.readDeviceDetails(device)
+
+            assertEquals("emulator-5580", details.serial)
+            assertEquals("online", details.state)
+            assertEquals(34, details.apiLevel)
+            assertEquals("14.0", details.release)
+            assertEquals("arm64-v8a", details.abi)
+            assertEquals("Google", details.manufacturer)
+            assertEquals("Pixel 8", details.model)
+            assertEquals("Pixel_8_API_34", details.avdName)
+            assertTrue(details.isEmulator)
+
+            val json = details.toJsonObject()
+            assertEquals("emulator-5580", json["serial"]?.jsonPrimitive?.content)
+            assertEquals("online", json["state"]?.jsonPrimitive?.content)
+            assertEquals(34, json["apiLevel"]?.jsonPrimitive?.int)
+            assertEquals("14.0", json["release"]?.jsonPrimitive?.content)
+            assertEquals("arm64-v8a", json["abi"]?.jsonPrimitive?.content)
+            assertEquals("Google", json["manufacturer"]?.jsonPrimitive?.content)
+            assertEquals("Pixel 8", json["model"]?.jsonPrimitive?.content)
+            assertEquals("Pixel_8_API_34", json["avdName"]?.jsonPrimitive?.content)
+            assertEquals(true, json["isEmulator"]?.jsonPrimitive?.boolean)
+
+            val deviceList = service.listDevices()
+            assertEquals(1, deviceList.size)
+            assertEquals("emulator-5580", deviceList[0].serial)
+
+            val singleList = service.listDevices("emulator-5580")
+            assertEquals(1, singleList.size)
+            assertEquals("emulator-5580", singleList[0].serial)
+
+            try {
+                service.listDevices("offline-1")
+                fail("Expected device_offline for offline device")
+            } catch (e: AndroidDebugException) {
+                assertEquals("device_offline", e.reason)
+            }
+        } finally {
+            service.setParentSessionForTesting(null)
+            fakeSession.close()
+        }
+    }
+
+    @Test
+    fun testFormatReadableVersion() {
+        val v34 = service.formatReadableVersion(34, "UpsideDownCake")
+        assertTrue(v34.contains("14") || v34.contains("UpsideDownCake"))
+        val v35 = service.formatReadableVersion(35)
+        assertTrue(v35.contains("15") || v35.contains("VanillaIceCream"))
+        assertEquals("unknown", service.formatReadableVersion(0))
+        assertEquals("unknown", service.formatReadableVersion(-1))
+    }
+
+    @Test
+    fun testReverseForwardTcpAndKillUsingFakeAdbSession() = runBlocking {
+        val fakeSession = FakeAdbSession()
+        try {
+            fakeSession.hostServices.devices = DeviceList(
+                listOf(DeviceInfo("emulator-5580", DeviceState.ONLINE)),
+                emptyList()
+            )
+            service.setParentSessionForTesting(fakeSession)
+            val realDevice = service.resolveOnlineDevice("emulator-5580")
+
+            var capturedDevice: DeviceSelector? = null
+            var capturedRemote: SocketSpec? = null
+            var capturedLocal: SocketSpec? = null
+            var capturedRebind: Boolean? = null
+            var killedDevice: DeviceSelector? = null
+            var killedRemote: SocketSpec? = null
+
+            val delegatingDeviceServices = object : AdbDeviceServices by fakeSession.deviceServices {
+                override suspend fun reverseForward(
+                    device: DeviceSelector,
+                    remote: SocketSpec,
+                    local: SocketSpec,
+                    rebind: Boolean,
+                ): String {
+                    capturedDevice = device
+                    capturedRemote = remote
+                    capturedLocal = local
+                    capturedRebind = rebind
+                    return "tcp:8080"
+                }
+
+                override suspend fun reverseKillForward(
+                    device: DeviceSelector,
+                    remote: SocketSpec,
+                ) {
+                    killedDevice = device
+                    killedRemote = remote
+                }
+            }
+
+            val delegatingSession = object : AdbSession by fakeSession {
+                override val deviceServices: AdbDeviceServices get() = delegatingDeviceServices
+            }
+
+            val delegatingDevice = object : ConnectedDevice by realDevice {
+                override val session: AdbSession get() = delegatingSession
+            }
+
+            val result = service.reverseForwardTcp(delegatingDevice, 8080, 9090)
+            assertEquals("tcp:8080", result)
+            assertEquals(DeviceSelector.fromSerialNumber("emulator-5580").toString(), capturedDevice?.toString())
+            assertEquals(8080, (capturedRemote as? SocketSpec.Tcp)?.port)
+            assertEquals(9090, (capturedLocal as? SocketSpec.Tcp)?.port)
+            assertEquals(false, capturedRebind)
+
+            service.killReverseForward(delegatingDevice, 8080)
+            assertEquals(DeviceSelector.fromSerialNumber("emulator-5580").toString(), killedDevice?.toString())
+            assertEquals(8080, (killedRemote as? SocketSpec.Tcp)?.port)
         } finally {
             service.setParentSessionForTesting(null)
             fakeSession.close()
