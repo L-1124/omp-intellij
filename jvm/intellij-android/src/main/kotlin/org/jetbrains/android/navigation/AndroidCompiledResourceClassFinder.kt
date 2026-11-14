@@ -70,8 +70,8 @@ class AndroidCompiledResourceClassFinder(private val project: Project) : PsiElem
                     file = archives.findFileByPath(url.substring(JarFileSystem.PROTOCOL_PREFIX.length))
                 }
                 if (file == null || (file is AnalyzerVirtualFile && scope.contains(file))) continue
-                val classes: Array<PsiClass> = if (file.fileSystem == archives) {
-                    compiledClasses.computeIfAbsent(file) { f -> readCompiledClasses(f) }
+                val classes: Array<PsiClass> = if (file.fileSystem is CoreJarFileSystem) {
+                    compiledClasses.computeIfAbsent(file) { f -> readCompiledClasses(project, f) }
                 } else {
                     val psi = PsiManager.getInstance(project).findFile(file)
                     if (psi is PsiClassOwner) psi.classes else PsiClass.EMPTY_ARRAY
@@ -86,25 +86,27 @@ class AndroidCompiledResourceClassFinder(private val project: Project) : PsiElem
         return if (result.isEmpty()) PsiClass.EMPTY_ARRAY else result.toTypedArray()
     }
 
-    private fun readCompiledClasses(file: VirtualFile): Array<PsiClass> {
-        try {
-            // The headless indexed stub loader requires AnalyzerVirtualFile; parse the actual class bytes with the platform builder.
-            val stub = ClsFileImpl.buildFileStub(file, file.contentsToByteArray()) ?: return PsiClass.EMPTY_ARRAY
-            val provider = ClassFileViewProvider(PsiManager.getInstance(project), file, false)
-            val tree = StubTree(stub)
-            val compiled = object : ClsFileImpl(provider) {
-                override fun getStubTree(): StubTree = tree
-            }
-            (stub as PsiJavaFileStubImpl).psi = compiled
-            provider.forceCachedPsi(compiled)
-            return compiled.classes
-        } catch (error: Exception) {
-            when (error) {
-                is IOException, is ClsFormatException -> {
-                    throw AndroidQueryException.modelUnavailable("Cannot parse compiled resource class: ${file.path}")
+    companion object {
+        internal fun readCompiledClasses(project: Project, file: VirtualFile): Array<PsiClass> {
+            try {
+                // The indexed stub loader requires AnalyzerVirtualFile; materialize other archive files from real bytes.
+                val stub = ClsFileImpl.buildFileStub(file, file.contentsToByteArray()) ?: return PsiClass.EMPTY_ARRAY
+                val provider = ClassFileViewProvider(PsiManager.getInstance(project), file, false)
+                val tree = StubTree(stub)
+                val compiled = object : ClsFileImpl(provider) {
+                    override fun getStubTree(): StubTree = tree
                 }
+                (stub as PsiJavaFileStubImpl).psi = compiled
+                provider.forceCachedPsi(compiled)
+                return compiled.classes
+            } catch (error: Exception) {
+                when (error) {
+                    is IOException, is ClsFormatException -> {
+                        throw AndroidQueryException.modelUnavailable("Cannot parse compiled resource class: ${file.path}")
+                    }
 
-                else -> throw error
+                    else -> throw error
+                }
             }
         }
     }

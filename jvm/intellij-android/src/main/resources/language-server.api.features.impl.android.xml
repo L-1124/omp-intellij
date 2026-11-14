@@ -5,6 +5,7 @@
     <module name="intellij.platform.core.impl" />
     <module name="intellij.platform.analysis" />
     <module name="intellij.platform.lang" />
+    <module name="intellij.platform.lang.impl" />
     <module name="intellij.platform.editor.ex" />
     <module name="intellij.platform.editor.ui" />
     <module name="intellij.platform.debugger" />
@@ -16,6 +17,8 @@
     <module name="intellij.xml.parser" />
     <module name="intellij.xml.psi" />
     <module name="intellij.xml.psi.impl" />
+    <module name="intellij.libraries.kotlinc.kotlin.compiler.common" />
+    <module name="intellij.libraries.kotlinc.symbol.light.classes" />
     <module name="intellij.libraries.asm" />
     <module name="intellij.libraries.asm.tools" />
     <module name="intellij.libraries.guava" />

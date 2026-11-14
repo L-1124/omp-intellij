@@ -101,7 +101,7 @@ object ManifestTarget {
         )
     }
 
-    private fun classNames(raw: String, base: String?): List<String> {
+    internal fun classNames(raw: String, base: String?): List<String> {
         val name = raw.replace('$', '.')
         if (name.startsWith(".")) {
             return if (base.isNullOrBlank()) emptyList() else listOf(base + name)

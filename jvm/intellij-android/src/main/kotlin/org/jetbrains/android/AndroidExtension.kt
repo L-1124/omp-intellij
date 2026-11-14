@@ -18,6 +18,7 @@ import org.jetbrains.android.navigation.AndroidDefinitionProvider
 import org.jetbrains.android.navigation.AndroidReferencesProvider
 import org.jetbrains.android.navigation.AndroidResourceCommands
 import org.jetbrains.android.navigation.AndroidResourceNavigation
+import org.jetbrains.android.testing.AndroidXmlRelatedTestsProvider
 import org.jetbrains.android.xml.AndroidDocumentSymbols
 
 class AndroidExtension : LanguageServerExtension {
@@ -54,7 +55,8 @@ class AndroidExtension : LanguageServerExtension {
                     AndroidResourceCommands(),
                     AndroidCompiledResourceClassFinder.Entry(),
                     AndroidResourceNavigation.Entry(),
-                    AndroidLintProvider()
+                    AndroidLintProvider(),
+                    AndroidXmlRelatedTestsProvider()
                 ),
                 listOf(module.parent),
                 emptyList()
