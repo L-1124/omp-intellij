@@ -116,6 +116,19 @@ export interface IntegrationSandbox {
   cleanup(): Promise<void>;
 }
 
+export async function stopSandboxServer(sandbox: IntegrationSandbox): Promise<void> {
+  const serverOwnerFile = join(sandbox.systemPath, 'omp-server.json');
+  if (!existsSync(serverOwnerFile)) return;
+  const owner = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid: number };
+  if (!isProcessAlive(owner.pid)) return;
+  killProcessSafely(owner.pid, sandbox);
+  const deadline = Date.now() + 5000;
+  while (isProcessAlive(owner.pid) && Date.now() < deadline) await sleep(100);
+  if (isProcessAlive(owner.pid)) {
+    throw new Error(`Sandbox server ${owner.pid} survived termination`);
+  }
+}
+
 function waitForProcessExit(child: ChildProcess, timeoutMs = 15000): Promise<number | null> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(child.exitCode);
   const { promise, resolve, reject } = Promise.withResolvers<number | null>();
@@ -337,18 +350,7 @@ export async function createIntegrationSandbox(
           }
         });
       }
-      await attempt('ils-stop', async () => {
-        const serverOwnerFile = join(systemPath, 'omp-server.json');
-        if (!existsSync(serverOwnerFile)) return;
-        const owner = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid: number };
-        if (isProcessAlive(owner.pid)) {
-          killProcessSafely(owner.pid, sandbox);
-          const deadline = Date.now() + 5000;
-          while (isProcessAlive(owner.pid) && Date.now() < deadline) await sleep(100);
-          if (isProcessAlive(owner.pid))
-            throw new Error(`Sandbox server ${owner.pid} survived termination`);
-        }
-      });
+      await attempt('ils-stop', () => stopSandboxServer(sandbox));
       await attempt('gradle-stop', async () => {
         if (!existsSync(join(gradleUserHome, 'daemon'))) return;
         const stopped = spawnSync(

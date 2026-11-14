@@ -76,7 +76,11 @@ async function main() {
   if (!noPrepare) {
     const compileStatus = compileTests();
     if (compileStatus !== 0) return compileStatus;
-    const stageStatus = await runGradle(['stageExtension', '--no-daemon']);
+    const stageStatus = await runGradle([
+      'stageExtension',
+      ...(suites.includes('xml') ? ['compileTestKotlin'] : []),
+      '--no-daemon',
+    ]);
     if (stageStatus !== 0) return stageStatus;
   }
   if (smoke) return runSmokeTests(files);

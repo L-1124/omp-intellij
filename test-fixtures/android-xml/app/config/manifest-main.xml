@@ -53,6 +53,63 @@
             android:name=".SecondaryActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".RelatedJavaActivity"
+            android:exported="false" />
+
+        <activity-alias
+            android:name=".RelatedJavaAlias"
+            android:targetActivity=".RelatedJavaActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ContextPriorityActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".FallbackSetContentActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".FallbackInflaterActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".FallbackMenuActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".NoTestsContextActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".JavaCandidateActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".KotlinCandidateActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".OtherMethodActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".OtherMethodActivityKt"
+            android:exported="false" />
+
+        <activity
+            android:name=".CustomInflateActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".AppConsumerActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".SameNameAppActivity"
+            android:exported="false" />
+
     </application>
 
 </manifest>

@@ -29,10 +29,15 @@ android {
             res.srcDir("custom-res")
             manifest.srcFile("config/manifest-main.xml")
         }
+        getByName("test") {
+            java.srcDir("src/customTest/java")
+        }
     }
 }
 
 dependencies {
     implementation(project(":lib"))
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("junit:junit:4.13.2")
 }
