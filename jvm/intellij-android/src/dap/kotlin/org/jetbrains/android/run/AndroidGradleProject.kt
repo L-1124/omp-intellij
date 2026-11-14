@@ -670,16 +670,16 @@ open class AndroidGradleProject @JvmOverloads constructor(
             }
         }
 
-        for (project in modelResult.projects) {
-            if (moduleFilter != null && project.module != moduleFilter) {
+        for ((_, module, _, agpVersion) in modelResult.projects) {
+            if (moduleFilter != null && module != moduleFilter) {
                 continue
             }
-            if (!isSupportedAgpVersion(project.agpVersion)) {
+            if (!isSupportedAgpVersion(agpVersion)) {
                 throw AndroidRunError(
                     code = AndroidRunErrorCode.UNSUPPORTED_AGP,
                     stage = AndroidRunStage.CONFIGURING,
-                    detail = "Unsupported AGP version '${project.agpVersion ?: "unknown"}' for ${project.module}; AGP 9.4.x is required",
-                    module = project.module,
+                    detail = "Unsupported AGP version '${agpVersion ?: "unknown"}' for $module; AGP 9.4.x is required",
+                    module = module,
                 ).toException()
             }
         }

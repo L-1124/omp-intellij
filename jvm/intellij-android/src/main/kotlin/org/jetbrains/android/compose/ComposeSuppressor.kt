@@ -54,7 +54,7 @@ class ComposeSuppressor : InspectionSuppressor {
                 false
             }
         }
-        return isComposable == true
+        return isComposable
     }
 
     override fun getSuppressActions(element: PsiElement?, toolId: String): Array<SuppressQuickFix> {
@@ -62,7 +62,7 @@ class ComposeSuppressor : InspectionSuppressor {
     }
 
     class Component private constructor() : WorkspaceComponent<Any> {
-        override fun init(data: LSConfigurationData): Any = this
+        override fun init(configData: LSConfigurationData): Any = this
 
         override suspend fun registerInApplicationContainer(
             builder: AnalyzerContainerBuilder,
@@ -97,7 +97,7 @@ class ComposeSuppressor : InspectionSuppressor {
             if (registered) return
             synchronized(ComposeSuppressor::class.java) {
                 if (!registered) {
-                    val kotlin: Language? = KotlinLanguage.INSTANCE
+                    val kotlin: Language = KotlinLanguage.INSTANCE
                     if (kotlin != null) {
                         LanguageInspectionSuppressors.INSTANCE.addExplicitExtension(kotlin, INSTANCE)
                     }

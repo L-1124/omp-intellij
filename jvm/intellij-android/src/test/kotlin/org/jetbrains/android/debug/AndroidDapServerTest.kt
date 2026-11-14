@@ -36,6 +36,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -77,6 +78,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.Continuation
+import kotlin.time.Duration.Companion.milliseconds
 
 class AndroidDapServerTest {
 
@@ -131,7 +133,13 @@ class AndroidDapServerTest {
             for (args in invalidCases) {
                 try {
                     withContext(lsConfig) {
-                        with(lsServer) { with(handlerContext) { descriptor.executor.execute(args ?: emptyList()) } }
+                        context(lsServer) {
+                            context(handlerContext) {
+                                descriptor.executor.execute(
+                                    args ?: emptyList()
+                                )
+                            }
+                        }
                     }
                     fail("Expected InvalidParams for args=$args")
                 } catch (e: LspResponseErrorException) {
@@ -159,7 +167,7 @@ class AndroidDapServerTest {
 
             // Missing LSConfiguration in coroutineContext
             try {
-                with(lsServer) { with(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
+                context(lsServer) { context(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
                 fail("Expected InternalError without LSConfiguration")
             } catch (e: LspResponseErrorException) {
                 assertEquals(ErrorCodes.InternalError, e.errorCode)
@@ -168,7 +176,7 @@ class AndroidDapServerTest {
             // Missing wait-for-highwatermark command
             try {
                 withContext(LSConfiguration(configurations = emptyList())) {
-                    with(lsServer) { with(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
+                    context(lsServer) { context(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
                 }
                 fail("Expected InternalError without wait-for-highwatermark")
             } catch (e: LspResponseErrorException) {
@@ -189,12 +197,12 @@ class AndroidDapServerTest {
             }
             val startDeferred = async {
                 withContext(lsConfig) {
-                    with(lsServer) { with(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
+                    context(lsServer) { context(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
                 }
             }
-            withTimeout(5_000) { enteredBarrier.await() }
+            withTimeout(5_000.milliseconds) { enteredBarrier.await() }
             startDeferred.cancel()
-            withTimeout(5_000) { barrierCancelled.await() }
+            withTimeout(5_000.milliseconds) { barrierCancelled.await() }
             assertTrue(startDeferred.isCancelled)
         } finally {
             lspScope.cancel()
@@ -229,7 +237,7 @@ class AndroidDapServerTest {
         try {
             val handlerContext = LspHandlerContext(noOpLspClient(), lspScope)
             val result = withContext(lsConfig) {
-                with(lsServer) { with(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
+                context(lsServer) { context(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
             }
             assertTrue(highWatermarkDone.get())
             val port = result.jsonObject["port"]!!.jsonPrimitive.int
@@ -239,7 +247,7 @@ class AndroidDapServerTest {
             socket.connect(InetSocketAddress("127.0.0.1", port), 5_000)
             socket.soTimeout = 5_000
             socket.use { client ->
-                withTimeout(5_000) { nativeFactoryCalled.await() }
+                withTimeout(5_000.milliseconds) { nativeFactoryCalled.await() }
                 assertTrue(
                     "XDebuggerManager.TOPIC must be subscribed before native factory",
                     subscribedBeforeFactory.get()
@@ -311,8 +319,8 @@ class AndroidDapServerTest {
 
             // Wait for server child job cleanup after EOF
             val childJobs = lspScope.coroutineContext[Job]!!.children.toList()
-            withTimeout(5_000) {
-                childJobs.forEach { it.join() }
+            withTimeout(5_000.milliseconds) {
+                childJobs.joinAll()
             }
             assertTrue("MessageBusConnection must disconnect on EOF", busTracker.disconnected.get())
             awaitReaderThreadExit("android-dap-reader-$port")
@@ -335,12 +343,12 @@ class AndroidDapServerTest {
         try {
             val handlerContext = LspHandlerContext(noOpLspClient(), lspScope)
             val result = withContext(lsConfig) {
-                with(lsServer) { with(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
+                context(lsServer) { context(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
             }
             val port = result.jsonObject["port"]!!.jsonPrimitive.int
             val childJobs = lspScope.coroutineContext[Job]!!.children.toList()
-            withTimeout(5_000) {
-                childJobs.forEach { it.join() }
+            withTimeout(5_000.milliseconds) {
+                childJobs.joinAll()
             }
             var refused = false
             try {
@@ -369,13 +377,13 @@ class AndroidDapServerTest {
         val lspScope1 = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val handlerContext1 = LspHandlerContext(noOpLspClient(), lspScope1)
         val res1 = withContext(lsConfig) {
-            with(lsServer1) { with(handlerContext1) { desc1.executor.execute(listOf(JsonObject(emptyMap()))) } }
+            context(lsServer1) { context(handlerContext1) { desc1.executor.execute(listOf(JsonObject(emptyMap()))) } }
         }
         val port1 = res1.jsonObject["port"]!!.jsonPrimitive.int
         val jobs1 = lspScope1.coroutineContext[Job]!!.children.toList()
         lspScope1.cancel()
-        withTimeout(3_000) {
-            jobs1.forEach { it.join() }
+        withTimeout(3_000.milliseconds) {
+            jobs1.joinAll()
         }
         var refused = false
         try {
@@ -402,7 +410,7 @@ class AndroidDapServerTest {
         val lspScope2 = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val handlerContext2 = LspHandlerContext(noOpLspClient(), lspScope2)
         val res2 = withContext(lsConfig) {
-            with(lsServer2) { with(handlerContext2) { desc2.executor.execute(listOf(JsonObject(emptyMap()))) } }
+            context(lsServer2) { context(handlerContext2) { desc2.executor.execute(listOf(JsonObject(emptyMap()))) } }
         }
         val port2 = res2.jsonObject["port"]!!.jsonPrimitive.int
         val jobs2 = lspScope2.coroutineContext[Job]!!.children.toList()
@@ -426,14 +434,14 @@ class AndroidDapServerTest {
                     )
                 }
             )
-            withTimeout(5_000) { enteredRunner.await() }
+            withTimeout(5_000.milliseconds) { enteredRunner.await() }
             val initResp = readDapResponse(client.getInputStream(), 1)
             assertEquals(true, initResp["success"]?.jsonPrimitive?.content?.toBooleanStrictOrNull())
 
             // Cancel LSP scope while client keeps socket open with no further data
             lspScope2.cancel()
-            withTimeout(5_000) {
-                jobs2.forEach { it.join() }
+            withTimeout(5_000.milliseconds) {
+                jobs2.joinAll()
             }
             assertTrue("MessageBusConnection must disconnect on lspScope cancellation", busTracker2.disconnected.get())
             awaitReaderThreadExit("android-dap-reader-$port2")
@@ -539,10 +547,10 @@ class AndroidDapServerTest {
         try {
             val handlerContext = LspHandlerContext(noOpLspClient(), lspScope)
             val result = withContext(lsConfig) {
-                with(lsServer) { with(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
+                context(lsServer) { context(handlerContext) { descriptor.executor.execute(listOf(JsonObject(emptyMap()))) } }
             }
-            assertSame(lsServer, withTimeout(5_000) { capturedServer.await() })
-            val ctx = withTimeout(5_000) { capturedContext.await() }
+            assertSame(lsServer, withTimeout(5_000.milliseconds) { capturedServer.await() })
+            val ctx = withTimeout(5_000.milliseconds) { capturedContext.await() }
             assertEquals(configuredJdk, ctx.defaultSdk)
             assertEquals(configuredJdk, ctx.importedRoots[configuredRoot]?.javaHome)
             assertEquals("yes", ctx.importedRoots[configuredRoot]?.env?.get("CUSTOM_GRADLE_ENV"))
@@ -596,7 +604,7 @@ class AndroidDapServerTest {
                         )
                     }
                 )
-                assertEquals(51313, withTimeout(5_000) { nativeAttachCalled.await() })
+                assertEquals(51313, withTimeout(5_000.milliseconds) { nativeAttachCalled.await() })
 
                 // Read frames until initialized arrives; confirm exited(0) was suppressed.
                 while (true) {
@@ -628,10 +636,10 @@ class AndroidDapServerTest {
                 // Drop TCP socket without disconnect -> EOF must close owned application handle with true.
             }
 
-            assertEquals(true, withTimeout(5_000) { handleClosedOnEof.await() })
+            assertEquals(true, withTimeout(5_000.milliseconds) { handleClosedOnEof.await() })
             val childJobs = lspScope.coroutineContext[Job]!!.children.toList()
-            withTimeout(5_000) {
-                childJobs.forEach { it.join() }
+            withTimeout(5_000.milliseconds) {
+                childJobs.joinAll()
             }
             assertTrue(busTracker.disconnected.get())
             awaitReaderThreadExit("android-dap-reader-$port")

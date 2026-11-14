@@ -298,8 +298,8 @@ class AndroidRunCommandsTest {
             } as LspClient
 
             val handlerContext = LspHandlerContext(client, scope)
-            return with(server) {
-                with(handlerContext) {
+            return context(server) {
+                context(handlerContext) {
                     commands.commandDescriptors.single().executor.execute(arguments ?: emptyList())
                 }
             }

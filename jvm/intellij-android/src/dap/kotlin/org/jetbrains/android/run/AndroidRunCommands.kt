@@ -155,14 +155,14 @@ class AndroidRunCommands @TestOnly constructor(
         put(
             "devices",
             buildJsonArray {
-                for (device in devices) {
+                for ((deviceId, state, abis) in devices) {
                     add(
                         buildJsonObject {
-                            put("deviceId", device.deviceId)
-                            put("state", device.state)
+                            put("deviceId", deviceId)
+                            put("state", state)
                             put(
                                 "abis",
-                                JsonArray(device.abis.map { JsonPrimitive(it) }),
+                                JsonArray(abis.map { JsonPrimitive(it) }),
                             )
                         }
                     )
@@ -183,23 +183,23 @@ class AndroidRunCommands @TestOnly constructor(
                             put(
                                 "variants",
                                 buildJsonArray {
-                                    for (variant in project.variants) {
+                                    for ((name, assembleTask, listingFile, abiFilters) in project.variants) {
                                         add(
                                             buildJsonObject {
-                                                put("name", variant.name)
+                                                put("name", name)
                                                 put(
                                                     "assembleTask",
-                                                    variant.assembleTask?.let(::JsonPrimitive) ?: JsonNull,
+                                                    assembleTask?.let(::JsonPrimitive) ?: JsonNull,
                                                 )
                                                 put(
                                                     "listingFile",
-                                                    variant.listingFile?.toPath()?.toAbsolutePath()?.normalize()
+                                                    listingFile?.toPath()?.toAbsolutePath()?.normalize()
                                                         ?.toString()
                                                         ?.let(::JsonPrimitive) ?: JsonNull,
                                                 )
                                                 put(
                                                     "abiFilters",
-                                                    variant.abiFilters?.let { filters ->
+                                                    abiFilters?.let { filters ->
                                                         JsonArray(filters.sorted().map(::JsonPrimitive))
                                                     } ?: JsonNull,
                                                 )

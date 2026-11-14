@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.testing.slim
 
 import com.intellij.ide.plugins.PluginMainDescriptor

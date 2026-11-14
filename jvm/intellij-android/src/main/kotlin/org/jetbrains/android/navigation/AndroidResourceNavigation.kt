@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.navigation
 
 import com.intellij.navigation.DirectNavigationProvider
@@ -57,7 +59,7 @@ class AndroidResourceNavigation : DirectNavigationProvider {
                     val location = definitions[0].location
                     val path = AndroidLocations.path(location)
                     val xml = AndroidSources.navigationFile(element.project, path) ?: continue
-                    val document = xml.fileDocument ?: continue
+                    val document = xml.fileDocument
                     val start = document.offsetByPosition(location.range.start)
                     val end = document.offsetByPosition(location.range.end)
                     sources.verify()
@@ -91,7 +93,7 @@ class AndroidResourceNavigation : DirectNavigationProvider {
     }
 
     class Component private constructor() : WorkspaceComponent<Any> {
-        override fun init(data: LSConfigurationData): Any = this
+        override fun init(configData: LSConfigurationData): Any = this
 
         override suspend fun registerInApplicationContainer(
             builder: AnalyzerContainerBuilder,

@@ -1,5 +1,6 @@
 package org.jetbrains.android.run
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Rule
@@ -30,7 +31,7 @@ class AndroidApkManifestInspectorTest {
     }
 
     @Test
-    fun testRelativeProcessAndAliasTargetActivityProcessResolution() = runBlocking {
+    fun testRelativeProcessAndAliasTargetActivityProcessResolution() = runBlocking(Dispatchers.IO) {
         val apk = createDummyApk("app-debug.apk")
         val badging = """
             package: name='com.example.app' versionCode='12' versionName='1.2'
@@ -91,7 +92,7 @@ class AndroidApkManifestInspectorTest {
     }
 
     @Test
-    fun testMultiLauncherRequiresExplicitActivityAndReportsCandidates() = runBlocking {
+    fun testMultiLauncherRequiresExplicitActivityAndReportsCandidates() = runBlocking(Dispatchers.IO) {
         val apk = createDummyApk("multi-launcher.apk")
         val badging = "package: name='com.example.multi' versionCode='1'\napplication-debuggable\n"
         val xmlTree = """
@@ -139,7 +140,7 @@ class AndroidApkManifestInspectorTest {
     }
 
     @Test
-    fun testSplitApkValidationPackageVersionDuplicateBaseAndAbiMismatch() = runBlocking {
+    fun testSplitApkValidationPackageVersionDuplicateBaseAndAbiMismatch() = runBlocking(Dispatchers.IO) {
         val base = createDummyApk("base.apk")
         val splitArm = createDummyApk("split-arm64.apk")
         val splitDup = createDummyApk("split-dup.apk")
@@ -248,7 +249,7 @@ class AndroidApkManifestInspectorTest {
     }
 
     @Test
-    fun testNonDebuggableApkRejectedWhenDebugRequiredAndAllowedInNoDebug() = runBlocking {
+    fun testNonDebuggableApkRejectedWhenDebugRequiredAndAllowedInNoDebug() = runBlocking(Dispatchers.IO) {
         val apk = createDummyApk("app-release.apk")
         val badging =
             "package: name='com.example.rel' versionCode='1'\nlaunchable-activity: name='com.example.rel.MainActivity'\n"
@@ -283,7 +284,7 @@ class AndroidApkManifestInspectorTest {
     }
 
     @Test
-    fun testMissingAapt2ReportsPrerequisiteMissingAndTextManifestParserWorks() = runBlocking {
+    fun testMissingAapt2ReportsPrerequisiteMissingAndTextManifestParserWorks() = runBlocking(Dispatchers.IO) {
         val missingAapt2 = tempFolder.root.toPath().resolve("missing-aapt2")
         val runner = ProcessAapt2Runner(explicitAapt2Path = missingAapt2)
         try {

@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage", "UsagesOfObsoleteApi")
+
 package org.jetbrains.android.debug
 
 import com.intellij.debugger.actions.MuteRendererUtils
@@ -19,7 +21,7 @@ import java.util.IdentityHashMap
 class AndroidDebuggerListener : DebuggerManagerListener, XDebuggerManagerListener {
 
     override fun sessionCreated(session: DebuggerSession) {
-        session.process?.addDebugProcessListener(object : DebugProcessListener {
+        session.process.addDebugProcessListener(object : DebugProcessListener {
             override fun processAttached(process: DebugProcess) {
                 configure(session)
             }
@@ -31,7 +33,7 @@ class AndroidDebuggerListener : DebuggerManagerListener, XDebuggerManagerListene
     }
 
     override fun sessionAttached(session: DebuggerSession) {
-        session.process?.managerThread?.schedule(object : DebuggerCommandImpl() {
+        session.process.managerThread.schedule(object : DebuggerCommandImpl() {
             override fun action() {
                 configure(session)
             }
@@ -59,8 +61,8 @@ class AndroidDebuggerListener : DebuggerManagerListener, XDebuggerManagerListene
         private var previousAsyncJdi: Boolean? = null
 
         private fun configure(session: DebuggerSession) {
-            val process = session.process ?: return
-            val vmProxy = process.virtualMachineProxy ?: return
+            val process = session.process
+            val vmProxy = process.virtualMachineProxy
             if (process.isAttached && DebuggerUtils.isAndroidVM(vmProxy.virtualMachine)) {
                 acquire(session)
                 // Automatic renderers leave ART child presentations incomplete; values stay available on demand.
@@ -80,7 +82,7 @@ class AndroidDebuggerListener : DebuggerManagerListener, XDebuggerManagerListene
 
         private fun acquire(session: DebuggerSession) {
             synchronized(ANDROID_SESSIONS) {
-                val process = session.process ?: return
+                val process = session.process
                 if (!process.isAttached || session in ANDROID_SESSIONS) return
                 if (ANDROID_SESSIONS.isEmpty()) {
                     val asyncJdi = Registry.get("debugger.async.jdi")

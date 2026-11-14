@@ -15,7 +15,7 @@ class AndroidResourceResolveScope : ResolveScopeEnlarger() {
     override fun getAdditionalResolveScope(file: VirtualFile, project: Project): SearchScope? {
         val owner = AndroidContext.findModule(project, file) ?: return null
         val archives = HashSet<Path>()
-        val dependencies = owner.getModuleWithDependenciesScope()
+        val dependencies = owner.moduleWithDependenciesScope
         for (module in ModuleManager.getInstance(project).modules) {
             if (!dependencies.isSearchInModuleContent(module)) continue
             val root = AndroidContext.findModuleRoot(module)

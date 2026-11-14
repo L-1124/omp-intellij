@@ -30,7 +30,7 @@ class AndroidSlimInvocation : Consumer<Pair<LSServer, LspHandlerContext>> {
         check(AndroidExtension::class.java.classLoader.javaClass.name == "com.intellij.ide.plugins.cl.PluginClassLoader")
         runBlocking(server.handlersContext) {
             with(server) {
-                with(handlers) {
+                context(handlers) {
                     val entries = AndroidExtension().configuration.entries
                     val batch = entries.filterIsInstance<LSBatchInspectionProvider>().single()
                     val related = entries.filterIsInstance<LSRelatedTestsProvider>().single()

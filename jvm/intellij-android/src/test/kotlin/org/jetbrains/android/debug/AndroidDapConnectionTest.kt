@@ -1,6 +1,7 @@
 package org.jetbrains.android.debug
 
 import com.jetbrains.lsp.implementation.joinReaderThread
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.io.readString
@@ -17,11 +18,12 @@ import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.milliseconds
 
 class AndroidDapConnectionTest {
 
     @Test
-    fun testRoundTripAndFlushAndClose() = runBlocking {
+    fun testRoundTripAndFlushAndClose() = runBlocking(Dispatchers.IO) {
         val threadName = "android-dap-test-rt-${UUID.randomUUID()}"
         withSocketPair { serverSide, clientSide ->
             val connection = AndroidDapConnection(serverSide, threadName)
@@ -31,7 +33,7 @@ class AndroidDapConnectionTest {
                 clientSide.getOutputStream().write("hello".toByteArray(StandardCharsets.UTF_8))
                 clientSide.getOutputStream().flush()
 
-                val hasBytes = withTimeout(5_000) { connection.input.awaitContent(5) }
+                val hasBytes = withTimeout(5_000.milliseconds) { connection.input.awaitContent(5) }
                 assertTrue(hasBytes)
                 assertEquals("hello", connection.input.readBuffer.readString(5))
 
@@ -54,13 +56,13 @@ class AndroidDapConnectionTest {
     }
 
     @Test
-    fun testPeerEofClosesReaderAndExitsReaderThread() = runBlocking {
+    fun testPeerEofClosesReaderAndExitsReaderThread() = runBlocking(Dispatchers.IO) {
         val threadName = "android-dap-test-eof-${UUID.randomUUID()}"
         withSocketPair { serverSide, clientSide ->
             val connection = AndroidDapConnection(serverSide, threadName)
             try {
                 clientSide.close()
-                val hasMore = withTimeout(5_000) { connection.input.awaitContent(1) }
+                val hasMore = withTimeout(5_000.milliseconds) { connection.input.awaitContent(1) }
                 assertFalse(hasMore)
                 connection.closeAndJoin(3_000)
                 assertFalse(connection.isAlive())
@@ -72,7 +74,7 @@ class AndroidDapConnectionTest {
     }
 
     @Test
-    fun testCancelUnblocksReaderRecordsFirstCauseAndCloseIsIdempotent() = runBlocking {
+    fun testCancelUnblocksReaderRecordsFirstCauseAndCloseIsIdempotent() = runBlocking(Dispatchers.IO) {
         val threadName = "android-dap-test-cancel-${UUID.randomUUID()}"
         withSocketPair { serverSide, _ ->
             val connection = AndroidDapConnection(serverSide, threadName)
@@ -90,7 +92,7 @@ class AndroidDapConnectionTest {
                 assertTrue(connection.input.isClosedForRead)
                 assertFalse(connection.isAlive())
 
-                withTimeout(5_000) {
+                withTimeout(5_000.milliseconds) {
                     connection.input.joinReaderThread(3_000)
                 }
                 awaitReaderThreadExit(threadName)
@@ -98,7 +100,7 @@ class AndroidDapConnectionTest {
                 var flushError: Throwable? = null
                 try {
                     connection.output.flush()
-                } catch (t: Throwable) {
+                } catch (t: IOException) {
                     flushError = t
                 }
                 assertSame(firstCause, flushError)

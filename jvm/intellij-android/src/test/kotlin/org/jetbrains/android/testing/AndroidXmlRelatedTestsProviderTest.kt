@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage", "NonExtendableApiUsage")
+
 package org.jetbrains.android.testing
 
 import com.android.tools.lint.client.api.LintClient
@@ -1237,7 +1239,7 @@ class AndroidXmlRelatedTestsProviderTest {
             application.addExtension(
                 TestFinder.EP_NAME,
                 object : TestFinder {
-                    override fun findSourceElement(from: PsiElement): PsiElement? = from
+                    override fun findSourceElement(from: PsiElement): PsiElement = from
 
                     override fun findTestsForClass(element: PsiElement): Collection<PsiElement> {
                         fixtureState.throwOnFindTests?.let { throw it }
@@ -1361,6 +1363,7 @@ class AndroidXmlRelatedTestsProviderTest {
                 override fun newModule(filePath: String, moduleTypeId: String): Module =
                     throw UnsupportedOperationException()
 
+                @Deprecated("Use loadModule(Path) instead")
                 override fun loadModule(filePath: String): Module = throw UnsupportedOperationException()
                 override fun loadModule(file: Path): Module = throw UnsupportedOperationException()
                 override fun disposeModule(module: Module) {}
@@ -1388,10 +1391,11 @@ class AndroidXmlRelatedTestsProviderTest {
                     get() = emptyList()
 
                 override fun getUnloadedModuleDescription(moduleName: String) = null
-                override fun getModuleGrouper(modifiableModel: com.intellij.openapi.module.ModifiableModuleModel?) =
+                override fun getModuleGrouper(model: com.intellij.openapi.module.ModifiableModuleModel?) =
                     throw UnsupportedOperationException()
 
                 override suspend fun setUnloadedModules(unloadedModuleNames: List<String>) {}
+                @Deprecated("Use setUnloadedModules instead")
                 override fun setUnloadedModulesSync(unloadedModuleNames: List<String>) {}
             }
             environment.project.registerService(ModuleManager::class.java, moduleManager)
@@ -1518,17 +1522,17 @@ class AndroidXmlRelatedTestsProviderTest {
 
                     override fun getFacadeClasses(
                         facadeFqName: FqName,
-                        searchScope: GlobalSearchScope
+                        scope: GlobalSearchScope
                     ): Collection<KtLightClassForFacade> = emptyList()
 
                     override fun getScriptClasses(
                         scriptFqName: FqName,
-                        searchScope: GlobalSearchScope
+                        scope: GlobalSearchScope
                     ): Collection<PsiClass> = emptyList()
 
                     override fun getKotlinInternalClasses(
                         fqName: FqName,
-                        searchScope: GlobalSearchScope
+                        scope: GlobalSearchScope
                     ): Collection<PsiClass> = emptyList()
 
                     override fun findClassOrObjectDeclarationsInPackage(
@@ -1561,13 +1565,13 @@ class AndroidXmlRelatedTestsProviderTest {
                         searchScope: GlobalSearchScope
                     ): Collection<KtScript> = emptyList()
 
-                    override fun packageExists(fqn: FqName, scope: GlobalSearchScope): Boolean = false
-                    override fun getSubPackages(fqName: FqName, scope: GlobalSearchScope): Collection<FqName> =
+                    override fun packageExists(fqName: FqName, scope: GlobalSearchScope): Boolean = false
+                    override fun getSubPackages(fqn: FqName, scope: GlobalSearchScope): Collection<FqName> =
                         emptyList()
 
                     override fun getFacadeClassesInPackage(
                         packageFqName: FqName,
-                        searchScope: GlobalSearchScope
+                        scope: GlobalSearchScope
                     ): Collection<KtLightClassForFacade> = emptyList()
 
                     override fun getFacadeNames(packageFqName: FqName, scope: GlobalSearchScope): Collection<String> =

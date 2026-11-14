@@ -320,8 +320,8 @@ class AndroidApkManifestInspector(
         }
 
         val seenSplits = HashSet<String>()
-        for (split in splits) {
-            val splitName = split.splitName!!
+        for ((path, packageName, versionCode, _, splitName1) in splits) {
+            val splitName = splitName1!!
             if (!seenSplits.add(splitName)) {
                 throw AndroidRunException(
                     AndroidRunError(
@@ -332,22 +332,22 @@ class AndroidApkManifestInspector(
                     )
                 )
             }
-            if (split.packageName != base.packageName) {
+            if (packageName != base.packageName) {
                 throw AndroidRunException(
                     AndroidRunError(
                         code = AndroidRunErrorCode.ARTIFACT_INVALID,
                         stage = AndroidRunStage.CONFIGURING,
-                        detail = "Split APK '${split.path.fileName}' package '${split.packageName}' does not match base package '${base.packageName}'",
+                        detail = "Split APK '${path.fileName}' package '$packageName' does not match base package '${base.packageName}'",
                         device = deviceId,
                     )
                 )
             }
-            if (base.versionCode != null && split.versionCode != null && split.versionCode != base.versionCode) {
+            if (base.versionCode != null && versionCode != null && versionCode != base.versionCode) {
                 throw AndroidRunException(
                     AndroidRunError(
                         code = AndroidRunErrorCode.ARTIFACT_INVALID,
                         stage = AndroidRunStage.CONFIGURING,
-                        detail = "Split APK '${split.path.fileName}' versionCode ${split.versionCode} does not match base versionCode ${base.versionCode}",
+                        detail = "Split APK '${path.fileName}' versionCode $versionCode does not match base versionCode ${base.versionCode}",
                         device = deviceId,
                     )
                 )
@@ -548,15 +548,15 @@ class AndroidApkManifestInspector(
         val launcherCandidates = ArrayList<ResolvedLaunchComponent>()
         val seenCandidateNames = HashSet<String>()
 
-        for (activity in activitiesByName.values) {
-            if (activity.isLauncher && activity.enabled && activity.exported != false) {
-                if (seenCandidateNames.add(activity.name)) {
+        for ((name, _, enabled, exported, isLauncher) in activitiesByName.values) {
+            if (isLauncher && enabled && exported != false) {
+                if (seenCandidateNames.add(name)) {
                     launcherCandidates.add(
                         ResolvedLaunchComponent(
                             packageName = pkg,
-                            activityName = activity.name,
-                            componentName = "$pkg/${activity.name}",
-                            processName = activityProcessByName.getValue(activity.name),
+                            activityName = name,
+                            componentName = "$pkg/$name",
+                            processName = activityProcessByName.getValue(name),
                             debuggable = manifest.debuggable,
                             versionCode = manifest.versionCode,
                             isAlias = false,
@@ -566,16 +566,16 @@ class AndroidApkManifestInspector(
             }
         }
 
-        for (alias in aliasesByName.values) {
-            if (alias.isLauncher && alias.enabled && alias.exported != false) {
-                val target = activitiesByName[alias.targetActivity] ?: continue
+        for ((name, targetActivity, enabled, exported, isLauncher) in aliasesByName.values) {
+            if (isLauncher && enabled && exported != false) {
+                val target = activitiesByName[targetActivity] ?: continue
                 if (!target.enabled) continue
-                if (seenCandidateNames.add(alias.name)) {
+                if (seenCandidateNames.add(name)) {
                     launcherCandidates.add(
                         ResolvedLaunchComponent(
                             packageName = pkg,
-                            activityName = alias.name,
-                            componentName = "$pkg/${alias.name}",
+                            activityName = name,
+                            componentName = "$pkg/$name",
                             processName = activityProcessByName.getValue(target.name),
                             debuggable = manifest.debuggable,
                             versionCode = manifest.versionCode,

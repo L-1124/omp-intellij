@@ -1,3 +1,5 @@
+@file:Suppress("UsagesOfObsoleteApi")
+
 package org.jetbrains.android.debug
 
 import com.android.adblib.AdbSession
@@ -147,10 +149,14 @@ open class AndroidDebugHandles private constructor(
     data class ReleaseResult(val success: Boolean, val cleaned: Boolean, val reason: String?) {
         companion object {
             @JvmStatic
-            fun successCleaned(): ReleaseResult = ReleaseResult(true, true, null)
+            fun successCleaned(): ReleaseResult = ReleaseResult(true, cleaned = true, reason = null)
 
             @JvmStatic
-            fun successAlreadyCleaned(): ReleaseResult = ReleaseResult(true, false, "already_cleaned")
+            fun successAlreadyCleaned(): ReleaseResult = ReleaseResult(
+                success = true,
+                cleaned = false,
+                reason = "already_cleaned"
+            )
         }
     }
 

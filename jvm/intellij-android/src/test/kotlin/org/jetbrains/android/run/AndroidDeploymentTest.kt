@@ -18,6 +18,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.jetbrains.android.debug.AndroidDebugException
 import org.jetbrains.android.debug.AndroidDebugHandles
 import org.jetbrains.android.debug.AndroidDebugService
@@ -32,6 +33,7 @@ import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration.Companion.milliseconds
 
 class AndroidDeploymentTest {
     @get:Rule
@@ -203,7 +205,9 @@ class AndroidDeploymentTest {
 
         override suspend fun pullFile(device: ConnectedDevice, remotePath: String, destination: Path, timeoutMs: Long) {
             destination.parent?.let { pulledTempDirsSeen.add(it) }
-            Files.writeString(destination, "pulled:$remotePath")
+            withContext(Dispatchers.IO) {
+                Files.writeString(destination, "pulled:$remotePath")
+            }
         }
 
         override suspend fun queryAmsProcesses(
@@ -293,7 +297,7 @@ class AndroidDeploymentTest {
             while (true) {
                 if (closeSignal.isCompleted) return closeSignal.await()
                 if (exitLatch.isCompleted) return exitLatch.await()
-                delay(10)
+                delay(10.milliseconds)
             }
         }
     }
@@ -382,98 +386,99 @@ class AndroidDeploymentTest {
     )
 
     @Test
-    fun testRestartAppFalseRejectsRunningSameUserBeforeInstallOrStopAndRespectsDifferentUser() = runBlocking {
-        registerOnlineDevice("emulator-5580")
-        val apk = createApkFile("app-debug.apk")
-        val apkSize = Files.size(apk)
-        val pkg = "com.example.fixture"
-        val ops = FakeDeviceOperations()
-        ops.currentUser = 0
-        ops.amsByKey[0 to pkg] = mutableListOf(
-            AndroidDebugHandles.ProcessInstanceIdentity(
-                pid = 5100,
-                userId = 0,
-                uid = 10243,
-                packageName = pkg,
-                processName = pkg,
-                startSeq = 50L,
-                amsRecord = "rec5100",
+    fun testRestartAppFalseRejectsRunningSameUserBeforeInstallOrStopAndRespectsDifferentUser() =
+        runBlocking(Dispatchers.IO) {
+            registerOnlineDevice("emulator-5580")
+            val apk = createApkFile("app-debug.apk")
+            val apkSize = Files.size(apk)
+            val pkg = "com.example.fixture"
+            val ops = FakeDeviceOperations()
+            ops.currentUser = 0
+            ops.amsByKey[0 to pkg] = mutableListOf(
+                AndroidDebugHandles.ProcessInstanceIdentity(
+                    pid = 5100,
+                    userId = 0,
+                    uid = 10243,
+                    packageName = pkg,
+                    processName = pkg,
+                    startSeq = 50L,
+                    amsRecord = "rec5100",
+                )
             )
-        )
 
-        val installCount = AtomicInteger(0)
-        val deployment = AndroidDeployment(
-            service = service,
-            apkInspector = AndroidApkManifestInspector(
-                FakeAapt2Runner(debugBadging(pkg), manifestXml(pkg))
-            ),
-            deviceOps = ops,
-            installSessionFactory = { session, device, api, user, devId, onOut ->
-                installCount.incrementAndGet()
-                AndroidInstallSession(session, device, api, user, devId, onOut)
-            },
-        )
+            val installCount = AtomicInteger(0)
+            val deployment = AndroidDeployment(
+                service = service,
+                apkInspector = AndroidApkManifestInspector(
+                    FakeAapt2Runner(debugBadging(pkg), manifestXml(pkg))
+                ),
+                deviceOps = ops,
+                installSessionFactory = { session, device, api, user, devId, onOut ->
+                    installCount.incrementAndGet()
+                    AndroidInstallSession(session, device, api, user, devId, onOut)
+                },
+            )
 
-        val ownerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        try {
+            val ownerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             try {
-                deployment.launch(
-                    launchConfig(target = AndroidLaunchTarget.Apks(listOf(apk)), restartApp = false),
+                try {
+                    deployment.launch(
+                        launchConfig(target = AndroidLaunchTarget.Apks(listOf(apk)), restartApp = false),
+                        ownerScope,
+                    )
+                    fail("Expected TARGET_RUNNING")
+                } catch (e: AndroidRunException) {
+                    assertEquals(AndroidRunErrorCode.TARGET_RUNNING, e.error.code)
+                    assertEquals(AndroidRunStage.CONFIGURING, e.error.stage)
+                    assertTrue(e.error.detail.contains("5100"))
+                }
+
+                assertEquals("Install must NOT run before target_running check", 0, installCount.get())
+                assertTrue("force-stop must NOT run on target_running", ops.forceStopped.isEmpty())
+                assertTrue("Original process must remain alive", ops.amsByKey[0 to pkg]!!.any { it.pid == 5100 })
+                assertFalse(
+                    "Deployment reservation must be released",
+                    handles.isDeploymentReserved(AndroidDebugHandles.DeploymentKey("emulator-5580", 0, pkg))
+                )
+
+                // Launching the same package for user 10 must NOT collide with user 0
+                configureFakeInstallCommands("emulator-5580", apkSize, userId = 10, apkName = apk.fileName.toString())
+                ops.nextIdentityOnStart = { uid, p ->
+                    AndroidDebugHandles.ProcessInstanceIdentity(
+                        pid = 6200,
+                        userId = uid,
+                        uid = 1010243,
+                        packageName = p,
+                        processName = p,
+                        startSeq = 60L,
+                        amsRecord = "rec6200",
+                    )
+                }
+
+                val handle = deployment.launch(
+                    launchConfig(userId = 10, target = AndroidLaunchTarget.Apks(listOf(apk)), restartApp = false),
                     ownerScope,
                 )
-                fail("Expected TARGET_RUNNING")
-            } catch (e: AndroidRunException) {
-                assertEquals(AndroidRunErrorCode.TARGET_RUNNING, e.error.code)
-                assertEquals(AndroidRunStage.CONFIGURING, e.error.stage)
-                assertTrue(e.error.detail.contains("5100"))
+                assertEquals(10, handle.userId)
+                assertEquals(6200, handle.pid)
+                assertTrue(handle.isApplication)
+                assertNotNull(handle.port)
+                assertEquals(1, ops.startedCommands.size)
+                assertEquals(10, ops.startedCommands[0].first)
+                assertTrue(ops.startedCommands[0].third) // -D debug flag
+                // User 0 original process is untouched
+                assertEquals(5100, ops.amsByKey[0 to pkg]!![0].pid)
+
+                handle.close(terminateApplication = true)
+                assertEquals(listOf(10 to pkg), ops.forceStopped.toList())
+                assertEquals(5100, ops.amsByKey[0 to pkg]!![0].pid)
+            } finally {
+                ownerScope.cancel()
             }
-
-            assertEquals("Install must NOT run before target_running check", 0, installCount.get())
-            assertTrue("force-stop must NOT run on target_running", ops.forceStopped.isEmpty())
-            assertTrue("Original process must remain alive", ops.amsByKey[0 to pkg]!!.any { it.pid == 5100 })
-            assertFalse(
-                "Deployment reservation must be released",
-                handles.isDeploymentReserved(AndroidDebugHandles.DeploymentKey("emulator-5580", 0, pkg))
-            )
-
-            // Launching the same package for user 10 must NOT collide with user 0
-            configureFakeInstallCommands("emulator-5580", apkSize, userId = 10, apkName = apk.fileName.toString())
-            ops.nextIdentityOnStart = { uid, p ->
-                AndroidDebugHandles.ProcessInstanceIdentity(
-                    pid = 6200,
-                    userId = uid,
-                    uid = 1010243,
-                    packageName = p,
-                    processName = p,
-                    startSeq = 60L,
-                    amsRecord = "rec6200",
-                )
-            }
-
-            val handle = deployment.launch(
-                launchConfig(userId = 10, target = AndroidLaunchTarget.Apks(listOf(apk)), restartApp = false),
-                ownerScope,
-            )
-            assertEquals(10, handle.userId)
-            assertEquals(6200, handle.pid)
-            assertTrue(handle.isApplication)
-            assertNotNull(handle.port)
-            assertEquals(1, ops.startedCommands.size)
-            assertEquals(10, ops.startedCommands[0].first)
-            assertTrue(ops.startedCommands[0].third) // -D debug flag
-            // User 0 original process is untouched
-            assertEquals(5100, ops.amsByKey[0 to pkg]!![0].pid)
-
-            handle.close(terminateApplication = true)
-            assertEquals(listOf(10 to pkg), ops.forceStopped.toList())
-            assertEquals(5100, ops.amsByKey[0 to pkg]!![0].pid)
-        } finally {
-            ownerScope.cancel()
         }
-    }
 
     @Test
-    fun testConcurrentLaunchSameDeviceUserPackageReturnsTargetBusy() = runBlocking {
+    fun testConcurrentLaunchSameDeviceUserPackageReturnsTargetBusy() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val apk = createApkFile("concurrent.apk")
         val apkSize = Files.size(apk)
@@ -540,7 +545,7 @@ class AndroidDeploymentTest {
     }
 
     @Test
-    fun testAliasCustomProcessSelectsExactPidNeverMainProcess() = runBlocking {
+    fun testAliasCustomProcessSelectsExactPidNeverMainProcess() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val apk = createApkFile("alias-proc.apk")
         configureFakeInstallCommands("emulator-5580", Files.size(apk), userId = 0, apkName = apk.fileName.toString())
@@ -604,7 +609,7 @@ class AndroidDeploymentTest {
     }
 
     @Test
-    fun testInstalledTargetPullsToTempCleansUpInFinallyAndSkipsInstall() = runBlocking {
+    fun testInstalledTargetPullsToTempCleansUpInFinallyAndSkipsInstall() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val pkg = "com.example.installed"
         val ops = FakeDeviceOperations()
@@ -668,7 +673,7 @@ class AndroidDeploymentTest {
     }
 
     @Test
-    fun testExternalAttachRefusesTerminateAndPreservesProcessAcrossClose() = runBlocking {
+    fun testExternalAttachRefusesTerminateAndPreservesProcessAcrossClose() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val pkg = "com.example.extattach"
         val ops = FakeDeviceOperations()
@@ -754,122 +759,126 @@ class AndroidDeploymentTest {
     }
 
     @Test
-    fun testStaleApplicationHandlePreservesExternallyRestartedInstanceAndRetainsFailures() = runBlocking {
-        registerOnlineDevice("emulator-5580")
-        val pkg = "com.example.stale"
-        val ops = FakeDeviceOperations()
-        ops.installedPaths[0 to pkg] = listOf("/data/app/base.apk")
-        ops.nextIdentityOnStart = { uid, p ->
-            AndroidDebugHandles.ProcessInstanceIdentity(
-                pid = 5234,
-                userId = uid,
-                uid = 10243,
-                packageName = p,
-                processName = p,
-                startSeq = 79L,
-                amsRecord = "a368399 5234:$p/u0a243",
-            )
-        }
-
-        val deployment = AndroidDeployment(
-            service = service,
-            apkInspector = AndroidApkManifestInspector(
-                FakeAapt2Runner(debugBadging(pkg, debuggable = false), manifestXml(pkg, debuggable = false))
-            ),
-            deviceOps = ops,
-        )
-
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        try {
-            val handle = deployment.launch(
-                launchConfig(userId = 0, target = AndroidLaunchTarget.Installed(pkg), noDebug = true),
-                owner,
-            )
-
-            // Simulate external restart reusing even the same PID with incremented startSeq=80
-            synchronized(ops.amsByKey) {
-                ops.amsByKey[0 to pkg] = mutableListOf(
-                    AndroidDebugHandles.ProcessInstanceIdentity(
-                        pid = 5234,
-                        userId = 0,
-                        uid = 10243,
-                        packageName = pkg,
-                        processName = pkg,
-                        startSeq = 80L,
-                        amsRecord = "b869cb4 5234:$pkg/u0a243",
-                    )
-                )
-            }
-
-            handle.close(terminateApplication = true)
-            assertTrue("Stale handle must preserve externally restarted instance", ops.forceStopped.isEmpty())
-            assertFalse(handles.isDeploymentReserved(AndroidDebugHandles.DeploymentKey("emulator-5580", 0, pkg)))
-            assertEquals(80L, ops.amsByKey[0 to pkg]!![0].startSeq)
-
-            // Now test close(false) followed by close(true) does not stop new launch or old app
+    fun testStaleApplicationHandlePreservesExternallyRestartedInstanceAndRetainsFailures() =
+        runBlocking(Dispatchers.IO) {
+            registerOnlineDevice("emulator-5580")
+            val pkg = "com.example.stale"
+            val ops = FakeDeviceOperations()
+            ops.installedPaths[0 to pkg] = listOf("/data/app/base.apk")
             ops.nextIdentityOnStart = { uid, p ->
                 AndroidDebugHandles.ProcessInstanceIdentity(
-                    pid = 5400,
+                    pid = 5234,
                     userId = uid,
                     uid = 10243,
                     packageName = p,
                     processName = p,
-                    startSeq = 85L,
+                    startSeq = 79L,
+                    amsRecord = "a368399 5234:$p/u0a243",
                 )
             }
-            val handle2 = deployment.launch(
-                launchConfig(
-                    userId = 0,
-                    target = AndroidLaunchTarget.Installed(pkg),
-                    noDebug = true,
-                    restartApp = true
-                ),
-                owner,
-            )
-            handle2.close(terminateApplication = false)
-            ops.forceStopped.clear()
-            handle2.close(terminateApplication = true)
-            assertTrue("Already-kept handle must stay idempotent on subsequent close(true)", ops.forceStopped.isEmpty())
 
-            // Test force-stop failure retention
-            ops.nextIdentityOnStart = { uid, p ->
-                AndroidDebugHandles.ProcessInstanceIdentity(
-                    pid = 5500,
-                    userId = uid,
-                    uid = 10243,
-                    packageName = p,
-                    processName = p,
-                    startSeq = 90L,
-                )
-            }
-            val handle3 = deployment.launch(
-                launchConfig(
-                    userId = 0,
-                    target = AndroidLaunchTarget.Installed(pkg),
-                    noDebug = true,
-                    restartApp = true
+            val deployment = AndroidDeployment(
+                service = service,
+                apkInspector = AndroidApkManifestInspector(
+                    FakeAapt2Runner(debugBadging(pkg, debuggable = false), manifestXml(pkg, debuggable = false))
                 ),
-                owner,
+                deviceOps = ops,
             )
-            ops.forceStopFailure = RuntimeException("force-stop failure")
+
+            val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             try {
-                handle3.close(terminateApplication = true)
-                fail("Expected CLEANUP_FAILED when force-stop fails")
-            } catch (e: AndroidRunException) {
-                assertEquals(AndroidRunErrorCode.CLEANUP_FAILED, e.error.code)
-                assertTrue(e.error.detail.contains("force-stop failure"))
+                val handle = deployment.launch(
+                    launchConfig(userId = 0, target = AndroidLaunchTarget.Installed(pkg), noDebug = true),
+                    owner,
+                )
+
+                // Simulate external restart reusing even the same PID with incremented startSeq=80
+                synchronized(ops.amsByKey) {
+                    ops.amsByKey[0 to pkg] = mutableListOf(
+                        AndroidDebugHandles.ProcessInstanceIdentity(
+                            pid = 5234,
+                            userId = 0,
+                            uid = 10243,
+                            packageName = pkg,
+                            processName = pkg,
+                            startSeq = 80L,
+                            amsRecord = "b869cb4 5234:$pkg/u0a243",
+                        )
+                    )
+                }
+
+                handle.close(terminateApplication = true)
+                assertTrue("Stale handle must preserve externally restarted instance", ops.forceStopped.isEmpty())
+                assertFalse(handles.isDeploymentReserved(AndroidDebugHandles.DeploymentKey("emulator-5580", 0, pkg)))
+                assertEquals(80L, ops.amsByKey[0 to pkg]!![0].startSeq)
+
+                // Now test close(false) followed by close(true) does not stop new launch or old app
+                ops.nextIdentityOnStart = { uid, p ->
+                    AndroidDebugHandles.ProcessInstanceIdentity(
+                        pid = 5400,
+                        userId = uid,
+                        uid = 10243,
+                        packageName = p,
+                        processName = p,
+                        startSeq = 85L,
+                    )
+                }
+                val handle2 = deployment.launch(
+                    launchConfig(
+                        userId = 0,
+                        target = AndroidLaunchTarget.Installed(pkg),
+                        noDebug = true,
+                        restartApp = true
+                    ),
+                    owner,
+                )
+                handle2.close(terminateApplication = false)
+                ops.forceStopped.clear()
+                handle2.close(terminateApplication = true)
+                assertTrue(
+                    "Already-kept handle must stay idempotent on subsequent close(true)",
+                    ops.forceStopped.isEmpty()
+                )
+
+                // Test force-stop failure retention
+                ops.nextIdentityOnStart = { uid, p ->
+                    AndroidDebugHandles.ProcessInstanceIdentity(
+                        pid = 5500,
+                        userId = uid,
+                        uid = 10243,
+                        packageName = p,
+                        processName = p,
+                        startSeq = 90L,
+                    )
+                }
+                val handle3 = deployment.launch(
+                    launchConfig(
+                        userId = 0,
+                        target = AndroidLaunchTarget.Installed(pkg),
+                        noDebug = true,
+                        restartApp = true
+                    ),
+                    owner,
+                )
+                ops.forceStopFailure = RuntimeException("force-stop failure")
+                try {
+                    handle3.close(terminateApplication = true)
+                    fail("Expected CLEANUP_FAILED when force-stop fails")
+                } catch (e: AndroidRunException) {
+                    assertEquals(AndroidRunErrorCode.CLEANUP_FAILED, e.error.code)
+                    assertTrue(e.error.detail.contains("force-stop failure"))
+                }
+                assertFalse(
+                    "ApplicationHandle must still be released despite force-stop error",
+                    handles.isDeploymentReserved(AndroidDebugHandles.DeploymentKey("emulator-5580", 0, pkg))
+                )
+            } finally {
+                owner.cancel()
             }
-            assertFalse(
-                "ApplicationHandle must still be released despite force-stop error",
-                handles.isDeploymentReserved(AndroidDebugHandles.DeploymentKey("emulator-5580", 0, pkg))
-            )
-        } finally {
-            owner.cancel()
         }
-    }
 
     @Test
-    fun testOwnerScopeCancellationMidAttachStopsStartedAppAndFreesReservation() = runBlocking {
+    fun testOwnerScopeCancellationMidAttachStopsStartedAppAndFreesReservation() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val pkg = "com.example.cancelattach"
         val ops = FakeDeviceOperations()
@@ -929,7 +938,7 @@ class AndroidDeploymentTest {
     }
 
     @Test
-    fun testAwaitExitReportsProcessExitDeviceOfflineAndCloseUnblock() = runBlocking {
+    fun testAwaitExitReportsProcessExitDeviceOfflineAndCloseUnblock() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val pkg = "com.example.exitmon"
         val ops = FakeDeviceOperations()
@@ -989,7 +998,7 @@ class AndroidDeploymentTest {
                 owner,
             )
             val exitDeferred2 = async { handle2.awaitExit() }
-            delay(20)
+            delay(20.milliseconds)
             handle2.close(false)
             val res2 = exitDeferred2.await()
             assertEquals("closed", res2.reason)
@@ -999,7 +1008,7 @@ class AndroidDeploymentTest {
     }
 
     @Test
-    fun testGradleTargetValidatesApplicationIdMismatchAndRunsDeployment() = runBlocking {
+    fun testGradleTargetValidatesApplicationIdMismatchAndRunsDeployment() = runBlocking(Dispatchers.IO) {
         registerOnlineDevice("emulator-5580")
         val apk = createApkFile("gradle-app.apk")
         configureFakeInstallCommands("emulator-5580", Files.size(apk), userId = 0, apkName = apk.fileName.toString())

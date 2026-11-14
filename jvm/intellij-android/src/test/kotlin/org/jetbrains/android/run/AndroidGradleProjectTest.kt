@@ -19,6 +19,7 @@ import com.jetbrains.ls.snapshot.api.impl.core.InitializeOptions
 import com.jetbrains.lsp.protocol.URI as LspUri
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -58,6 +59,7 @@ import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration.Companion.milliseconds
 
 class AndroidGradleProjectTest {
 
@@ -151,38 +153,39 @@ class AndroidGradleProjectTest {
     }
 
     @Test
-    fun `validateFullJdk rejects trimmed JBR missing jlink before creating Gradle connection`() = runBlocking {
-        val projectDir = tempFolder.newFolder("app-root").toPath().toAbsolutePath().normalize()
-        val trimmedJbr = createFakeJdk("trimmed-jbr", withJlink = false)
-        val connectorCalls = AtomicInteger(0)
+    fun `validateFullJdk rejects trimmed JBR missing jlink before creating Gradle connection`() =
+        runBlocking(Dispatchers.IO) {
+            val projectDir = tempFolder.newFolder("app-root").toPath().toAbsolutePath().normalize()
+            val trimmedJbr = createFakeJdk("trimmed-jbr", withJlink = false)
+            val connectorCalls = AtomicInteger(0)
 
-        val context = AndroidGradleContext(
-            workspaceDirectory = projectDir,
-            importedRoots = mapOf(
-                projectDir to AndroidGradleRootContext(
-                    buildRoot = projectDir,
-                    javaHome = trimmedJbr,
-                )
-            ),
-        )
-        val gradleProject = AndroidGradleProject(
-            context = context,
-            connectorFactory = { _ ->
-                connectorCalls.incrementAndGet()
-                error("Should not connect when jlink is missing")
-            },
-        )
+            val context = AndroidGradleContext(
+                workspaceDirectory = projectDir,
+                importedRoots = mapOf(
+                    projectDir to AndroidGradleRootContext(
+                        buildRoot = projectDir,
+                        javaHome = trimmedJbr,
+                    )
+                ),
+            )
+            val gradleProject = AndroidGradleProject(
+                context = context,
+                connectorFactory = { _ ->
+                    connectorCalls.incrementAndGet()
+                    error("Should not connect when jlink is missing")
+                },
+            )
 
-        try {
-            gradleProject.queryModels(projectDir)
-            fail("Expected PREREQUISITE_MISSING for trimmed JBR without jlink")
-        } catch (e: AndroidRunException) {
-            assertEquals(AndroidRunErrorCode.PREREQUISITE_MISSING, e.error.code)
-            assertEquals(AndroidRunStage.CONFIGURING, e.error.stage)
-            assertTrue(e.error.detail.contains("jlink"))
+            try {
+                gradleProject.queryModels(projectDir)
+                fail("Expected PREREQUISITE_MISSING for trimmed JBR without jlink")
+            } catch (e: AndroidRunException) {
+                assertEquals(AndroidRunErrorCode.PREREQUISITE_MISSING, e.error.code)
+                assertEquals(AndroidRunStage.CONFIGURING, e.error.stage)
+                assertTrue(e.error.detail.contains("jlink"))
+            }
+            assertEquals(0, connectorCalls.get())
         }
-        assertEquals(0, connectorCalls.get())
-    }
 
     @Test
     fun `AndroidRunModelAction executes AGP v2 models and DTO round-trips via Java serialization`() {
@@ -261,7 +264,7 @@ class AndroidGradleProjectTest {
 
     @Test
     fun `resolveAndBuild executes qualified task follows redirect selects split APK and handles build=false`() =
-        runBlocking {
+        runBlocking(Dispatchers.IO) {
             val buildRoot = tempFolder.newFolder("build-root").toPath().toAbsolutePath().normalize()
             val fullJdk = createFakeJdk("jdk21", withJlink = true)
 
@@ -424,16 +427,17 @@ class AndroidGradleProjectTest {
         }
 
     @Test
-    fun `resolveAndBuild reports ABI_MISMATCH UNSUPPORTED_AGP and non-application errors cleanly`() = runBlocking {
-        val buildRoot = tempFolder.newFolder("errors-root").toPath().toAbsolutePath().normalize()
-        val fullJdk = createFakeJdk("jdk21", withJlink = true)
-        val listingDir = buildRoot.resolve("app/build/outputs/apk/debug")
-        Files.createDirectories(listingDir)
-        val universalApk = listingDir.resolve("app-universal.apk").also { Files.writeString(it, "apk") }
-        val metadataFile = listingDir.resolve("output-metadata.json")
-        Files.writeString(
-            metadataFile,
-            """
+    fun `resolveAndBuild reports ABI_MISMATCH UNSUPPORTED_AGP and non-application errors cleanly`() =
+        runBlocking(Dispatchers.IO) {
+            val buildRoot = tempFolder.newFolder("errors-root").toPath().toAbsolutePath().normalize()
+            val fullJdk = createFakeJdk("jdk21", withJlink = true)
+            val listingDir = buildRoot.resolve("app/build/outputs/apk/debug")
+            Files.createDirectories(listingDir)
+            val universalApk = listingDir.resolve("app-universal.apk").also { Files.writeString(it, "apk") }
+            val metadataFile = listingDir.resolve("output-metadata.json")
+            Files.writeString(
+                metadataFile,
+                """
             {
               "version": 3,
               "artifactType": { "type": "APK", "kind": "Directory" },
@@ -450,107 +454,107 @@ class AndroidGradleProjectTest {
               "elementType": "File"
             }
             """.trimIndent(),
-        )
+            )
 
-        val dto = AndroidRunModelResultDto(
-            buildRoot = buildRoot.toFile(),
-            projects = listOf(
-                AndroidProjectModelDto(
-                    buildRoot = buildRoot.toFile(),
-                    module = ":app",
-                    projectDir = buildRoot.resolve("app").toFile(),
-                    agpVersion = "9.4.1",
-                    projectType = "APPLICATION",
-                    isApplication = true,
-                    variants = listOf(
-                        AndroidVariantModelDto(
-                            name = "debug",
-                            assembleTask = ":app:assembleDebug",
-                            listingFile = metadataFile.toFile(),
-                            abiFilters = setOf("armeabi-v7a"),
-                            applicationId = "com.example.app",
-                        )
+            val dto = AndroidRunModelResultDto(
+                buildRoot = buildRoot.toFile(),
+                projects = listOf(
+                    AndroidProjectModelDto(
+                        buildRoot = buildRoot.toFile(),
+                        module = ":app",
+                        projectDir = buildRoot.resolve("app").toFile(),
+                        agpVersion = "9.4.1",
+                        projectType = "APPLICATION",
+                        isApplication = true,
+                        variants = listOf(
+                            AndroidVariantModelDto(
+                                name = "debug",
+                                assembleTask = ":app:assembleDebug",
+                                listingFile = metadataFile.toFile(),
+                                abiFilters = setOf("armeabi-v7a"),
+                                applicationId = "com.example.app",
+                            )
+                        ),
+                    ),
+                    AndroidProjectModelDto(
+                        buildRoot = buildRoot.toFile(),
+                        module = ":feature",
+                        projectDir = buildRoot.resolve("feature").toFile(),
+                        agpVersion = "9.4.1",
+                        projectType = "DYNAMIC_FEATURE",
+                        isApplication = false,
+                        variants = emptyList(),
+                    ),
+                    AndroidProjectModelDto(
+                        buildRoot = buildRoot.toFile(),
+                        module = ":oldagp",
+                        projectDir = buildRoot.resolve("oldagp").toFile(),
+                        agpVersion = "8.7.0",
+                        projectType = "APPLICATION",
+                        isApplication = true,
+                        variants = emptyList(),
                     ),
                 ),
-                AndroidProjectModelDto(
-                    buildRoot = buildRoot.toFile(),
-                    module = ":feature",
-                    projectDir = buildRoot.resolve("feature").toFile(),
-                    agpVersion = "9.4.1",
-                    projectType = "DYNAMIC_FEATURE",
-                    isApplication = false,
-                    variants = emptyList(),
-                ),
-                AndroidProjectModelDto(
-                    buildRoot = buildRoot.toFile(),
-                    module = ":oldagp",
-                    projectDir = buildRoot.resolve("oldagp").toFile(),
-                    agpVersion = "8.7.0",
-                    projectType = "APPLICATION",
-                    isApplication = true,
-                    variants = emptyList(),
-                ),
-            ),
-            includedBuildRoots = emptyList(),
-            nonAndroidProjectPaths = emptyList(),
-            versionFailureDiagnostics = emptyList(),
-        )
+                includedBuildRoots = emptyList(),
+                nonAndroidProjectPaths = emptyList(),
+                versionFailureDiagnostics = emptyList(),
+            )
 
-        val gradleProject = AndroidGradleProject(
-            context = AndroidGradleContext(
-                importedRoots = mapOf(buildRoot to AndroidGradleRootContext(buildRoot, javaHome = fullJdk))
-            ),
-            connectorFactory = { _ ->
-                fakeGradleConnector(
-                    onModelAction = { _, _, handler -> handler.onComplete(dto) },
-                    onBuild = { _, _, _, _, _, handler -> handler.onComplete(null) },
+            val gradleProject = AndroidGradleProject(
+                context = AndroidGradleContext(
+                    importedRoots = mapOf(buildRoot to AndroidGradleRootContext(buildRoot, javaHome = fullJdk))
+                ),
+                connectorFactory = { _ ->
+                    fakeGradleConnector(
+                        onModelAction = { _, _, handler -> handler.onComplete(dto) },
+                        onBuild = { _, _, _, _, _, handler -> handler.onComplete(null) },
+                    )
+                },
+            )
+
+            // ABI mismatch when universal APK has abiFilters=["armeabi-v7a"] and device only supports arm64-v8a
+            try {
+                gradleProject.resolveAndBuild(
+                    target = AndroidLaunchTarget.Gradle(buildRoot, ":app", "debug", build = false),
+                    deviceAbis = listOf("arm64-v8a"),
+                    onStage = {},
+                    onOutput = {},
                 )
-            },
-        )
+                fail("Expected ABI_MISMATCH")
+            } catch (e: AndroidRunException) {
+                assertEquals(AndroidRunErrorCode.ABI_MISMATCH, e.error.code)
+            }
 
-        // ABI mismatch when universal APK has abiFilters=["armeabi-v7a"] and device only supports arm64-v8a
-        try {
-            gradleProject.resolveAndBuild(
-                target = AndroidLaunchTarget.Gradle(buildRoot, ":app", "debug", build = false),
-                deviceAbis = listOf("arm64-v8a"),
-                onStage = {},
-                onOutput = {},
-            )
-            fail("Expected ABI_MISMATCH")
-        } catch (e: AndroidRunException) {
-            assertEquals(AndroidRunErrorCode.ABI_MISMATCH, e.error.code)
-        }
+            // Dynamic feature rejected with UNSUPPORTED_ARTIFACT
+            try {
+                gradleProject.resolveAndBuild(
+                    target = AndroidLaunchTarget.Gradle(buildRoot, ":feature", "debug", build = false),
+                    deviceAbis = listOf("arm64-v8a"),
+                    onStage = {},
+                    onOutput = {},
+                )
+                fail("Expected UNSUPPORTED_ARTIFACT")
+            } catch (e: AndroidRunException) {
+                assertEquals(AndroidRunErrorCode.UNSUPPORTED_ARTIFACT, e.error.code)
+            }
 
-        // Dynamic feature rejected with UNSUPPORTED_ARTIFACT
-        try {
-            gradleProject.resolveAndBuild(
-                target = AndroidLaunchTarget.Gradle(buildRoot, ":feature", "debug", build = false),
-                deviceAbis = listOf("arm64-v8a"),
-                onStage = {},
-                onOutput = {},
-            )
-            fail("Expected UNSUPPORTED_ARTIFACT")
-        } catch (e: AndroidRunException) {
-            assertEquals(AndroidRunErrorCode.UNSUPPORTED_ARTIFACT, e.error.code)
+            // AGP 8.7.0 rejected with UNSUPPORTED_AGP
+            try {
+                gradleProject.resolveAndBuild(
+                    target = AndroidLaunchTarget.Gradle(buildRoot, ":oldagp", "debug", build = false),
+                    deviceAbis = listOf("arm64-v8a"),
+                    onStage = {},
+                    onOutput = {},
+                )
+                fail("Expected UNSUPPORTED_AGP")
+            } catch (e: AndroidRunException) {
+                assertEquals(AndroidRunErrorCode.UNSUPPORTED_AGP, e.error.code)
+            }
         }
-
-        // AGP 8.7.0 rejected with UNSUPPORTED_AGP
-        try {
-            gradleProject.resolveAndBuild(
-                target = AndroidLaunchTarget.Gradle(buildRoot, ":oldagp", "debug", build = false),
-                deviceAbis = listOf("arm64-v8a"),
-                onStage = {},
-                onOutput = {},
-            )
-            fail("Expected UNSUPPORTED_AGP")
-        } catch (e: AndroidRunException) {
-            assertEquals(AndroidRunErrorCode.UNSUPPORTED_AGP, e.error.code)
-        }
-    }
 
     @Test
     fun `cancellation triggers CancellationTokenSource waits for operation completion then closes ProjectConnection`() =
-        runBlocking {
+        runBlocking(Dispatchers.IO) {
             val buildRoot = tempFolder.newFolder("cancel-root").toPath().toAbsolutePath().normalize()
             val fullJdk = createFakeJdk("jdk21", withJlink = true)
             val listingFile = buildRoot.resolve("app/build/outputs/apk/debug/output-metadata.json").toFile()
@@ -612,19 +616,19 @@ class AndroidGradleProjectTest {
                 }
             }
 
-            val (token, handler) = withTimeout(5_000L) { buildStarted.await() }
+            val (token, handler) = withTimeout(5_000.milliseconds) { buildStarted.await() }
             assertFalse(token.isCancellationRequested)
 
             // Cancel caller coroutine and wait until token cancellation is requested.
             job.cancel(CancellationException("User cancelled build"))
             val deadline = System.nanoTime() + 2_000_000_000L
             while (!token.isCancellationRequested && System.nanoTime() < deadline) {
-                delay(10)
+                delay(10.milliseconds)
             }
             assertTrue("CancellationToken must be cancelled", token.isCancellationRequested)
 
             // Connection must remain open until Gradle ResultHandler completes!
-            delay(50)
+            delay(50.milliseconds)
             assertFalse("ProjectConnection must not close before ResultHandler finishes", buildConnectionClosed.get())
 
             handler.onFailure(BuildCancelledException("Build cancelled by token"))
@@ -635,7 +639,7 @@ class AndroidGradleProjectTest {
             } catch (_: CancellationException) {
                 assertTrue(job.isCancelled)
             }
-            val failure = withTimeout(5_000L) { operationFailure.await() }
+            val failure = withTimeout(5_000.milliseconds) { operationFailure.await() }
             assertEquals(AndroidRunErrorCode.CANCELLED, failure.error.code)
             assertEquals(AndroidRunStage.BUILDING, failure.error.stage)
             assertNull(failure.error.cleanupError)

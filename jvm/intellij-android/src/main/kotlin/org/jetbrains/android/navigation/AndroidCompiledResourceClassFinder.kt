@@ -1,3 +1,5 @@
+@file:Suppress("UsagesOfObsoleteApi")
+
 package org.jetbrains.android.navigation
 
 import com.intellij.openapi.application.Application
@@ -114,7 +116,7 @@ class AndroidCompiledResourceClassFinder(private val project: Project) : PsiElem
     class Entry : WorkspaceComponentEntry, WorkspaceComponent<Any> {
         override fun component(): WorkspaceComponent<*> = this
 
-        override fun init(data: LSConfigurationData): Any = this
+        override fun init(configData: LSConfigurationData): Any = this
 
         override suspend fun registerInApplicationContainer(
             builder: AnalyzerContainerBuilder,

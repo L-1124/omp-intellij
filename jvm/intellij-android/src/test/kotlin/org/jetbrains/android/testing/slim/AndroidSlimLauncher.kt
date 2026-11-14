@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.testing.slim
 
 import com.intellij.idea.LoggerFactory
@@ -40,6 +42,7 @@ import com.jetbrains.lsp.implementation.withLsp
 import com.jetbrains.lsp.protocol.URI
 import fleet.util.async.use
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import java.net.URLClassLoader
@@ -65,7 +68,7 @@ object AndroidSlimLauncher {
         kotlin.system.exitProcess(exitCode)
     }
 
-    private fun run(args: Array<String>) = runBlocking {
+    private fun run(args: Array<String>) = runBlocking(Dispatchers.IO) {
         require(args.size == 4)
         val home = Path.of(System.getProperty("idea.home.path"))
         val project = Path.of(args[0]).toAbsolutePath()
@@ -167,7 +170,16 @@ object AndroidSlimLauncher {
                                         storage.applyChangesWithDeduplication(imported)
                                     }
                                     structure.applyWorkspaceModelUpdate(update).await()
-                                    workspace.session(LSSessionConfig(null, true, false, false, false, false))
+                                    workspace.session(
+                                        LSSessionConfig(
+                                            clientName = null,
+                                            clientSupportsIntellijExtensions = true,
+                                            clientSupportsLazyIntentions = false,
+                                            clientSupportsSnippetWorkspaceEdit = false,
+                                            clientSupportsShowDocument = false,
+                                            clientSupportsRunMainCodeLens = false
+                                        )
+                                    )
                                         .use { server ->
                                             server.waitForHighWatermark()
                                             val incoming = Channel<LspWireBody>(Channel.UNLIMITED)
