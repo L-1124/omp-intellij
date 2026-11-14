@@ -1,5 +1,6 @@
 package org.jetbrains.android.lint
 
+import com.android.SdkConstants
 import com.android.ide.common.rendering.api.ArrayResourceValueImpl
 import com.android.ide.common.rendering.api.AttrResourceValueImpl
 import com.android.ide.common.rendering.api.AttributeFormat
@@ -21,6 +22,7 @@ import com.android.ide.common.util.PathString
 import com.android.resources.ResourceFolderType
 import com.android.resources.ResourceType
 import com.android.resources.ResourceUrl
+import com.android.utils.SdkUtils
 import com.android.tools.lint.client.api.ResourceRepositoryScope
 import com.android.tools.lint.detector.api.Scope
 import com.android.tools.lint.model.LintModelAndroidLibrary
@@ -334,7 +336,7 @@ class AndroidLintResources private constructor() {
 
             // 2. Check resource files: must be direct child of resource subfolder (<resRoot>/<folder>/<file.xml>)
             val parent = normPath.parent
-            if (parent != null && parent.parent != null) {
+            if (parent?.parent != null) {
                 val grandParent = parent.parent?.toAbsolutePath()?.normalize()
                 if (xmlInputs != null && grandParent != null) {
                     for (root in xmlInputs.resourceRoots) {
@@ -560,7 +562,7 @@ class AndroidLintResources private constructor() {
                             val libName = lib.resolvedCoordinates.toString()
                             val libNs = ResourceNamespace.RES_AUTO
 
-                            val publicNames = parsePublicFile(publicRes?.toPath(), tracker)
+                            val publicNames = parsePublicFile(publicRes.toPath(), tracker)
 
                             if (resFolder != null && resFolder.isDirectory) {
                                 parseResourceDirectory(
@@ -673,7 +675,7 @@ class AndroidLintResources private constructor() {
                 } catch (_: IOException) {
                 }
             }
-            if (currentPath != null && currentPath.parent != null && currentPath.parent.parent != null
+            if (currentPath?.parent != null && currentPath.parent.parent != null
                 && currentPath.parent.parent == resDir
             ) {
                 subfolders.add(currentPath.parent)
@@ -697,7 +699,7 @@ class AndroidLintResources private constructor() {
                     } catch (_: IOException) {
                     }
                 }
-                if (currentPath != null && currentPath.parent != null && currentPath.parent == subfolder) {
+                if (currentPath?.parent != null && currentPath.parent == subfolder) {
                     files.add(currentPath)
                 }
 
@@ -744,8 +746,7 @@ class AndroidLintResources private constructor() {
             publicNames: Set<String>?,
         ) {
             val fileName = file.fileName.toString()
-            val dot = fileName.indexOf('.')
-            val resName = if (dot > 0) fileName.substring(0, dot) else fileName
+            val resName = SdkUtils.fileNameToResourceName(fileName)
             val type = folderType.resourceType ?: return
 
             val isPub = publicNames == null || publicNames.contains("${type.getName()}:$resName")
@@ -754,7 +755,7 @@ class AndroidLintResources private constructor() {
             val item = LintResourceItem(resName, type, namespace, libraryName, config, value, pathString, true, isPub)
             repo.add(item)
 
-            if (xmlFile != null && xmlFile.rootTag != null) {
+            if (xmlFile?.rootTag != null) {
                 collectIdsFromTag(xmlFile.rootTag!!, namespace, libraryName, config, pathString, repo, publicNames)
             }
         }
@@ -809,7 +810,7 @@ class AndroidLintResources private constructor() {
         ) {
             if (xmlFile == null) return
             val root = xmlFile.rootTag ?: return
-            if (root.name != "resources") return
+            if (root.name != SdkConstants.TAG_RESOURCES) return
 
             val pathString = PathString(file)
             val fileDeclaredPublic = HashSet<String>()
@@ -830,24 +831,7 @@ class AndroidLintResources private constructor() {
                 val name = tag.getAttributeValue("name")
                 if (name.isNullOrEmpty()) continue
 
-                val type: ResourceType? = when (tagName) {
-                    "string" -> ResourceType.STRING
-                    "color" -> ResourceType.COLOR
-                    "dimen" -> ResourceType.DIMEN
-                    "bool" -> ResourceType.BOOL
-                    "integer" -> ResourceType.INTEGER
-                    "style" -> ResourceType.STYLE
-                    "attr" -> ResourceType.ATTR
-                    "declare-styleable" -> ResourceType.STYLEABLE
-                    "plurals" -> ResourceType.PLURALS
-                    "array", "string-array", "integer-array" -> ResourceType.ARRAY
-                    "item" -> {
-                        val typeAttr = tag.getAttributeValue("type")
-                        if (typeAttr != null) ResourceType.fromXmlTagName(typeAttr) else null
-                    }
-
-                    else -> ResourceType.fromXmlTagName(tagName)
-                }
+                val type: ResourceType? = ResourceType.fromXmlTag(tag, { it.name }, { t, attr -> t.getAttributeValue(attr) })
 
                 if (type == null) continue
 
@@ -870,12 +854,9 @@ class AndroidLintResources private constructor() {
                                 val itemName = itemTag.getAttributeValue("name")
                                 val itemVal = parseRawText(itemTag)
                                 if (itemName != null) {
-                                    var attrNs = namespace
-                                    var attrName = itemName
-                                    if (itemName.startsWith("android:")) {
-                                        attrNs = ResourceNamespace.ANDROID
-                                        attrName = itemName.substring(8)
-                                    }
+                                    val attrUrl = ResourceUrl.parseAttrReference(itemName)
+                                    val attrNs = if (attrUrl != null && attrUrl.isFramework) ResourceNamespace.ANDROID else namespace
+                                    val attrName = attrUrl?.name ?: itemName
                                     style.addItem(StyleItemResourceValueImpl(attrNs, attrName, itemVal, libraryName))
                                     if (attrNs != ResourceNamespace.RES_AUTO && attrNs != ResourceNamespace.ANDROID) {
                                         style.addItem(
@@ -903,12 +884,9 @@ class AndroidLintResources private constructor() {
                             if ("attr" == attrTag.name) {
                                 val attrName = attrTag.getAttributeValue("name")
                                 if (!attrName.isNullOrEmpty()) {
-                                    var attrNs = namespace
-                                    var simpleAttrName = attrName
-                                    if (attrName.startsWith("android:")) {
-                                        attrNs = ResourceNamespace.ANDROID
-                                        simpleAttrName = attrName.substring(8)
-                                    }
+                                    val attrUrl = ResourceUrl.parseAttrReference(attrName)
+                                    val attrNs = if (attrUrl != null && attrUrl.isFramework) ResourceNamespace.ANDROID else namespace
+                                    val simpleAttrName = attrUrl?.name ?: attrName
                                     val childAttr = parseAttrTag(attrTag, attrNs, simpleAttrName, libraryName)
                                     styleable.addValue(childAttr)
                                     if (attrNs != ResourceNamespace.ANDROID && hasAttrDefinition(attrTag)) {
@@ -976,7 +954,7 @@ class AndroidLintResources private constructor() {
                 }
                 return sb.toString().trim()
             }
-            val raw = value.text ?: return null
+            val raw = value.text
             return ValueXmlHelper.unescapeResourceString(raw, true, true)
         }
 
@@ -1020,11 +998,11 @@ class AndroidLintResources private constructor() {
             var description = tag.getAttributeValue("description")
             if (description == null) description = tag.getAttributeValue("_description")
             if (description != null) {
-                attr.setDescription(description)
+                attr.description = description
             }
             val groupName = tag.getAttributeValue("_groupName")
             if (groupName != null) {
-                attr.setGroupName(groupName)
+                attr.groupName = groupName
             }
             return attr
         }

@@ -1,5 +1,7 @@
 package org.jetbrains.android.xml
 
+import com.android.SdkConstants
+import com.android.xml.AndroidManifest
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.util.TextRange
@@ -23,6 +25,7 @@ import com.jetbrains.lsp.protocol.SymbolKind
 import kotlinx.coroutines.flow.Flow
 import org.jetbrains.android.context.AndroidContext
 import org.jetbrains.android.context.AndroidRequests
+import org.jetbrains.android.resource.AndroidFolders
 
 class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProvider {
 
@@ -43,30 +46,30 @@ class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProvider {
     }
 
     private class Customizer : LSDocumentSymbolCustomizer<PsiElement> {
-        override fun getRootDeclarations(file: PsiFile): List<PsiElement> {
+        override fun getRootDeclarations(psiFile: PsiFile): List<PsiElement> {
             ProgressManager.checkCanceled()
-            val xml = file as? XmlFile ?: return emptyList()
+            val xml = psiFile as? XmlFile ?: return emptyList()
             val root = xml.rootTag ?: return emptyList()
             if (!AndroidContext.isSupportedXml(xml)) return emptyList()
-            if (root.name == "manifest") return listOf(root)
-            if (root.name != "resources") return emptyList()
+            if (root.name == AndroidManifest.NODE_MANIFEST) return listOf(root)
+            if (root.name != SdkConstants.TAG_RESOURCES) return emptyList()
             return resourceChildren(root, false)
         }
 
         override fun getNestedDeclarations(element: PsiElement): List<PsiElement> {
             ProgressManager.checkCanceled()
             val tag = element as XmlTag
-            if (tag.name == "manifest") {
+            if (tag.name == AndroidManifest.NODE_MANIFEST) {
                 val result = ArrayList<PsiElement>()
                 for (child in tag.subTags) {
                     ProgressManager.checkCanceled()
-                    if (child.name == "application" || (child.name == "instrumentation" && named(child, true))) {
+                    if (child.name == AndroidManifest.NODE_APPLICATION || (child.name == AndroidManifest.NODE_INSTRUMENTATION && named(child, true))) {
                         result.add(child)
                     }
                 }
                 return result
             }
-            if (tag.name == "application") {
+            if (tag.name == AndroidManifest.NODE_APPLICATION) {
                 val result = ArrayList<PsiElement>()
                 for (child in tag.subTags) {
                     ProgressManager.checkCanceled()
@@ -110,10 +113,14 @@ class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProvider {
         override fun getKind(element: PsiElement): SymbolKind? {
             val tag = element as XmlTag
             return when (tag.name) {
-                "manifest" -> SymbolKind.Namespace
-                "application" -> SymbolKind.Module
-                "activity", "service", "provider", "receiver", "instrumentation" -> SymbolKind.Class
-                "activity-alias" -> SymbolKind.Interface
+                AndroidManifest.NODE_MANIFEST -> SymbolKind.Namespace
+                AndroidManifest.NODE_APPLICATION -> SymbolKind.Module
+                AndroidManifest.NODE_ACTIVITY,
+                AndroidManifest.NODE_SERVICE,
+                AndroidManifest.NODE_PROVIDER,
+                AndroidManifest.NODE_RECEIVER,
+                AndroidManifest.NODE_INSTRUMENTATION -> SymbolKind.Class
+                AndroidManifest.NODE_ACTIVITY_ALIAS -> SymbolKind.Interface
                 else -> {
                     val parentTag = tag.parentTag
                     if (parentTag != null && parentTag.name == "style") SymbolKind.Property else resourceKind(tag)
@@ -152,19 +159,25 @@ class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProvider {
         }
 
         private fun nameAttribute(tag: XmlTag): XmlAttribute? {
-            if (tag.name == "manifest") return tag.getAttribute("package")
-            if (tag.name == "application" || tag.name == "instrumentation" || COMPONENTS.contains(tag.name)) {
+            if (tag.name == AndroidManifest.NODE_MANIFEST) return tag.getAttribute(AndroidManifest.ATTRIBUTE_PACKAGE)
+            if (tag.name == AndroidManifest.NODE_APPLICATION || tag.name == AndroidManifest.NODE_INSTRUMENTATION || COMPONENTS.contains(tag.name)) {
                 return AndroidXml.androidName(tag)
             }
-            return tag.getAttribute("name")
+            return tag.getAttribute(AndroidManifest.ATTRIBUTE_NAME)
         }
     }
 
     companion object {
-        private val COMPONENTS = setOf("activity", "service", "provider", "receiver", "activity-alias")
+        private val COMPONENTS = setOf(
+            AndroidManifest.NODE_ACTIVITY,
+            AndroidManifest.NODE_SERVICE,
+            AndroidManifest.NODE_PROVIDER,
+            AndroidManifest.NODE_RECEIVER,
+            AndroidManifest.NODE_ACTIVITY_ALIAS
+        )
 
         private fun named(tag: XmlTag, android: Boolean): Boolean {
-            val attribute = if (android) AndroidXml.androidName(tag) else tag.getAttribute("name")
+            val attribute = if (android) AndroidXml.androidName(tag) else tag.getAttribute(AndroidManifest.ATTRIBUTE_NAME)
             val valueElement = attribute?.valueElement
             val value = attribute?.value
             if (attribute == null || valueElement == null || value.isNullOrBlank()) {
@@ -175,8 +188,11 @@ class AndroidDocumentSymbols(language: LSLanguage) : LSDocumentSymbolProvider {
         }
 
         private fun resourceKind(tag: XmlTag): SymbolKind? {
-            val type = if (tag.name == "item") tag.getAttributeValue("type") else tag.name
-            if (type == null) return null
+            val type = if (tag.name == "declare-styleable") {
+                "declare-styleable"
+            } else {
+                AndroidFolders.valueResourceType(tag) ?: return null
+            }
             return when (type) {
                 "string" -> SymbolKind.String
                 "color", "dimen" -> SymbolKind.Constant

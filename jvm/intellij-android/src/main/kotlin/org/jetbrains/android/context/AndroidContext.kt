@@ -1,5 +1,10 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.context
 
+import com.android.SdkConstants
+import com.android.resources.ResourceFolderType
+import com.android.xml.AndroidManifest
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
@@ -25,28 +30,13 @@ import java.nio.file.Path
 import java.util.regex.Pattern
 
 object AndroidContext {
-    const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
-    private val RESOURCE_TYPES = setOf(
-        "anim",
-        "animator",
-        "color",
-        "drawable",
-        "font",
-        "interpolator",
-        "layout",
-        "menu",
-        "mipmap",
-        "navigation",
-        "raw",
-        "transition",
-        "xml"
-    )
+    const val ANDROID_NS = SdkConstants.ANDROID_URI
     private val PACKAGE = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*")
 
     @JvmStatic
     fun identify(file: PsiFile?): AndroidFileInfo {
         ProgressManager.checkCanceled()
-        if (file == null || file.virtualFile == null || !file.isValid) return AndroidFileInfo.nonAndroid()
+        if (file?.virtualFile == null || !file.isValid) return AndroidFileInfo.nonAndroid()
         val module = findModule(file.project, file.virtualFile)
         if (module != null && isAndroidModule(module)) {
             val direct = identify(file, module)
@@ -81,11 +71,12 @@ object AndroidContext {
         val rootTag = (file as? XmlFile)?.rootTag
         if (file is XmlFile && rootTag != null) {
             val name = rootTag.name
-            if (name == "manifest" && layout.manifests.contains(path)) role = AndroidFileRole.MANIFEST
+            if (name == AndroidManifest.NODE_MANIFEST && layout.manifests.contains(path)) role = AndroidFileRole.MANIFEST
             else if (path.parent?.parent != null && layout.resources.contains(path.parent.parent)) {
                 val folder = path.parent.fileName.toString()
-                if (name == "resources" && AndroidFolders.isValues(folder)) role = AndroidFileRole.VALUES_XML
-                else if (RESOURCE_TYPES.contains(folder.substringBefore('-'))) role = AndroidFileRole.RESOURCE_XML
+                val folderType = ResourceFolderType.getFolderType(folder)
+                if (name == SdkConstants.TAG_RESOURCES && AndroidFolders.isValues(folder)) role = AndroidFileRole.VALUES_XML
+                else if (folderType != null && folderType != ResourceFolderType.VALUES && AndroidFolders.isResourceFolder(folder)) role = AndroidFileRole.RESOURCE_XML
             }
         } else if (file.name.endsWith(".java") || file.name.endsWith(".kt")) {
             if (module == ProjectFileIndex.getInstance(file.project).getModuleForFile(file.virtualFile))

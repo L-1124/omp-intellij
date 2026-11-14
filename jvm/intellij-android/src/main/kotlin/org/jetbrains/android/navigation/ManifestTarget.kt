@@ -1,5 +1,7 @@
 package org.jetbrains.android.navigation
 
+import com.android.SdkConstants
+import com.android.xml.AndroidManifest
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
@@ -21,7 +23,13 @@ import org.jetbrains.android.context.AndroidQueryException
 import org.jetbrains.android.xml.AndroidXml
 
 object ManifestTarget {
-    private val COMPONENTS = setOf("activity", "service", "provider", "receiver", "activity-alias")
+    private val COMPONENTS = setOf(
+        AndroidManifest.NODE_ACTIVITY,
+        AndroidManifest.NODE_SERVICE,
+        AndroidManifest.NODE_PROVIDER,
+        AndroidManifest.NODE_RECEIVER,
+        AndroidManifest.NODE_ACTIVITY_ALIAS
+    )
 
     @JvmStatic
     fun resolve(project: Project, file: PsiFile, offset: Int): ManifestClassTarget? {
@@ -43,11 +51,11 @@ object ManifestTarget {
             return ManifestClassTarget.notClassAttribute()
         }
         val raw = AndroidXml.value(attribute)
-        if (raw == null || raw.isBlank() || raw.contains("\${") || raw.startsWith("@")) {
+        if (raw.isNullOrBlank() || raw.contains("\${") || raw.startsWith("@")) {
             return ManifestClassTarget.notClassAttribute()
         }
         val root = xml.rootTag
-        var base = root?.getAttribute("package")?.let { AndroidXml.value(it) }
+        var base = root?.getAttribute(AndroidManifest.ATTRIBUTE_PACKAGE)?.let { AndroidXml.value(it) }
         if (base.isNullOrBlank()) base = info.namespace
         val names = classNames(raw, base)
         if (names.isEmpty()) {
@@ -113,18 +121,18 @@ object ManifestTarget {
     }
 
     private fun supported(attribute: XmlAttribute, root: XmlTag?): Boolean {
-        if (AndroidContext.ANDROID_NS != attribute.namespace || root == null) return false
+        if (SdkConstants.ANDROID_URI != attribute.namespace || root == null) return false
         val tag = attribute.parent
         val name = tag.name
-        if (name == "application" || name == "instrumentation") {
-            return tag.parentTag == root && attribute.localName == "name"
+        if (name == AndroidManifest.NODE_APPLICATION || name == AndroidManifest.NODE_INSTRUMENTATION) {
+            return tag.parentTag == root && attribute.localName == AndroidManifest.ATTRIBUTE_NAME
         }
         if (!COMPONENTS.contains(name)) return false
         val application = tag.parentTag
-        if (application == null || application.name != "application" || application.parentTag != root) {
+        if (application == null || application.name != AndroidManifest.NODE_APPLICATION || application.parentTag != root) {
             return false
         }
-        val expected = if (name == "activity-alias") "targetActivity" else "name"
+        val expected = if (name == AndroidManifest.NODE_ACTIVITY_ALIAS) AndroidManifest.ATTRIBUTE_TARGET_ACTIVITY else AndroidManifest.ATTRIBUTE_NAME
         return attribute.localName == expected
     }
 }

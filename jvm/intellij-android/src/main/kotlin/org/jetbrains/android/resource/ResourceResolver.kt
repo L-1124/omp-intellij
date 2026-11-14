@@ -1,7 +1,15 @@
 package org.jetbrains.android.resource
 
+import com.android.SdkConstants
+import com.android.ide.common.resources.getIdentifiedSourceSetMap
+import com.android.ide.common.resources.relativeResourcePathToAbsolutePath
+import com.android.resources.FolderTypeRelationship
+import com.android.resources.ResourceFolderType
 import com.android.resources.ResourceType
 import com.android.resources.ResourceUrl
+import com.android.resources.getFieldNameByResourceName
+import com.android.utils.SdkUtils
+import com.android.xml.AndroidManifest
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
@@ -58,7 +66,7 @@ object ResourceResolver {
         val text = if (parent is XmlAttribute) AndroidXml.value(parent) else null
         if (text == null || text.length < 2 || (text[0] != '@' && text[0] != '?')) return null
         val url = ResourceUrl.parse(text)
-        if (url == null || url.type == null || !url.hasValidName()) return null
+        if (url?.type == null || !url.hasValidName()) return null
         var document: Document? = file.fileDocument
         if (document == null) document = PsiDocumentManager.getInstance(file.project).getDocument(file)
         if (document == null) return null
@@ -126,7 +134,7 @@ object ResourceResolver {
     @JvmStatic
     fun resolve(project: Project, module: Module?, reference: ResourceReference?): List<LSDefinitionLocation> {
         val all = resolveAll(project, module, reference)
-        if (reference != null && reference.classOrigin != null && reference.originRange != null) {
+        if (reference?.classOrigin != null && reference.originRange != null) {
             // When queried from Kotlin or Java, the platform's LSCommonDefinitionProvider
             // resolves the R field and navigates to the first source via AndroidResourceNavigation
             // (DirectNavigationProvider). Emitting only supplementary qualifiers prevents duplicate
@@ -176,8 +184,10 @@ object ResourceResolver {
     @JvmStatic
     fun key(type: String, name: String): String {
         var effectiveType = type
-        if (effectiveType == "string-array" || effectiveType == "integer-array") effectiveType = "array"
-        return effectiveType + '\u0000' + name.replace('.', '_').replace(':', '_')
+        if (effectiveType == "string-array" || effectiveType == "integer-array") {
+            effectiveType = ResourceType.ARRAY.getName()
+        }
+        return effectiveType + '\u0000' + getFieldNameByResourceName(name)
     }
 
     @JvmStatic
@@ -232,17 +242,23 @@ object ResourceResolver {
 
     private fun declaration(tag: XmlTag): String? {
         val parent = tag.parentTag
-        if (parent == null || !(parent.name == "resources" || (tag.name == "attr" && parent.name == "declare-styleable"))) {
+        if (parent == null || !(parent.name == SdkConstants.TAG_RESOURCES || (tag.name == "attr" && parent.name == "declare-styleable"))) {
             return null
         }
-        val name = AndroidXml.value(tag.getAttribute("name"))
-        val type = if (tag.name == "item") AndroidXml.value(tag.getAttribute("type")) else tag.name
+        val name = AndroidXml.value(tag.getAttribute(AndroidManifest.ATTRIBUTE_NAME))
+        val type = if (tag.name == "attr" && parent.name == "declare-styleable") {
+            "attr"
+        } else if (tag.name == "declare-styleable") {
+            "declare-styleable"
+        } else {
+            AndroidFolders.valueResourceType(tag)
+        }
         return if (name == null || type == null) null else key(type, name)
     }
 
     private fun declarations(file: XmlFile?): Map<String, MutableList<TextRange>> {
         val result = LinkedHashMap<String, MutableList<TextRange>>()
-        if (file == null || file.rootTag == null) return result
+        if (file?.rootTag == null) return result
         collect(file.rootTag!!, result)
         return result
     }
@@ -250,7 +266,7 @@ object ResourceResolver {
     private fun collect(tag: XmlTag, result: MutableMap<String, MutableList<TextRange>>) {
         ProgressManager.checkCanceled()
         val identity = declaration(tag)
-        val nameAttr = tag.getAttribute("name")
+        val nameAttr = tag.getAttribute(AndroidManifest.ATTRIBUTE_NAME)
         if (identity != null && nameAttr != null && nameAttr.valueElement != null) {
             result.computeIfAbsent(identity) { ArrayList() }.add(nameAttr.valueElement!!.valueTextRange)
         }
@@ -303,6 +319,7 @@ object ResourceResolver {
         private val roots = LinkedHashSet<Path>()
         private val membership = LinkedHashMap<Path, MutableSet<String>>()
         private val sourceIds = LinkedHashMap<String, Path>()
+        private val sourceSetPaths = LinkedHashMap<String, String>()
 
         init {
             val cap = variant[0].uppercaseChar().toString() + variant.substring(1)
@@ -361,17 +378,17 @@ object ResourceResolver {
                         val path = Path.of(item.getAttributeValue("path")!!).toAbsolutePath().normalize()
                         if (!path.startsWith(root)) throw InvalidProvenance()
                         val keys = membership.computeIfAbsent(path) { LinkedHashSet() }
-                        var name = AndroidXml.value(item.getAttribute("name"))
+                        var name = AndroidXml.value(item.getAttribute(AndroidManifest.ATTRIBUTE_NAME))
                         var type = AndroidXml.value(item.getAttribute("type"))
                         if (name != null && type != null) keys.add(key(type, name))
                         for (child in item.subTags) {
-                            name = AndroidXml.value(child.getAttribute("name"))
+                            name = AndroidXml.value(child.getAttribute(AndroidManifest.ATTRIBUTE_NAME))
                             type =
                                 if (child.name == "item") AndroidXml.value(child.getAttribute("type")) else child.name
                             if (name != null && type != null) keys.add(key(type, name))
                             if (child.name == "declare-styleable") {
                                 for (attr in child.subTags) {
-                                    val attribute = AndroidXml.value(attr.getAttribute("name"))
+                                    val attribute = AndroidXml.value(attr.getAttribute(AndroidManifest.ATTRIBUTE_NAME))
                                     if (attr.name == "attr" && attribute != null) {
                                         keys.add(key("attr", attribute))
                                     }
@@ -387,13 +404,14 @@ object ResourceResolver {
             paths.add(incremental.resolve("stripped.dir"))
             val pngs = module.resolve("build/generated/res/pngs").resolve(variant)
             if (Files.isDirectory(pngs)) paths.add(pngs)
-            val sorted =
-                paths.stream().sorted(Comparator.comparing { path -> path.toString().replace('\\', '/') }).toList()
-            val moduleName = module.fileName.toString()
-            val prefix = namespace + (if (namespace.endsWith(moduleName)) "" else ".$moduleName")
-            for (index in 0 until sorted.size) {
-                val path = sorted[index]
-                sourceIds[(prefix + "-" + path.parent.fileName + "-" + index).replace(' ', '_')] = path
+            val identifiedMap = getIdentifiedSourceSetMap(
+                paths.map { it.toFile() },
+                namespace,
+                module.fileName.toString()
+            )
+            sourceSetPaths.putAll(identifiedMap)
+            for ((key, pathStr) in identifiedMap) {
+                sourceIds[key] = Path.of(pathStr).toAbsolutePath().normalize()
             }
             try {
                 mergedAt = Files.getLastModifiedTime(merger)
@@ -428,8 +446,13 @@ object ResourceResolver {
         private fun decode(value: String): Path {
             val separator = value.indexOf(":/")
             if (separator >= 0 && !(separator == 1 && value[0].isLetter())) {
+                val abs = try {
+                    relativeResourcePathToAbsolutePath(value, sourceSetPaths)
+                } catch (_: Exception) {
+                    throw InvalidProvenance()
+                }
                 val root = sourceIds[value.substring(0, separator)] ?: throw InvalidProvenance()
-                val path = root.resolve(value.substring(separator + 2)).normalize()
+                val path = Path.of(abs).normalize()
                 if (!path.startsWith(root)) throw InvalidProvenance()
                 return path
             }
@@ -439,11 +462,12 @@ object ResourceResolver {
         private fun fileMatches(path: Path, type: String, name: String): Boolean {
             if (path.parent == null || path.parent.fileName == null) return false
             val folder = path.parent.fileName.toString()
-            var filename = path.fileName.toString()
-            val extension = filename.lastIndexOf('.')
-            if (extension >= 0) filename = filename.substring(0, extension)
-            if (filename.endsWith(".9")) filename = filename.substring(0, filename.length - 2)
-            return (folder == type || folder.startsWith("$type-")) && filename == name
+            val folderType = ResourceFolderType.getFolderType(folder) ?: return false
+            if (folderType == ResourceFolderType.VALUES) return false
+            val resType = ResourceType.fromClassName(type) ?: ResourceType.fromXmlTagName(type) ?: return false
+            if (!FolderTypeRelationship.match(resType, folderType)) return false
+            val filename = SdkUtils.fileNameToResourceName(path.fileName.toString())
+            return filename == name
         }
 
         fun validate(wanted: String, type: String, name: String) {
@@ -458,8 +482,11 @@ object ResourceResolver {
                 }
                 for (folder in folders) {
                     val folderName = folder.fileName.toString()
-                    val values = folderName == "values" || folderName.startsWith("values-")
-                    val typed = folderName == type || folderName.startsWith("$type-")
+                    val values = AndroidFolders.isValues(folderName)
+                    val folderType = ResourceFolderType.getFolderType(folderName)
+                    val resType = ResourceType.fromClassName(type) ?: ResourceType.fromXmlTagName(type)
+                    val typed = folderType != null && resType != null && folderType != ResourceFolderType.VALUES &&
+                        FolderTypeRelationship.match(resType, folderType)
                     if (!values && !typed && type != "id") continue
                     val files = LinkedHashSet<Path>(children(folder))
                     if (virtualRoot != null) {
@@ -477,16 +504,16 @@ object ResourceResolver {
                         val regular = Files.isRegularFile(path)
                         if (built && !regular) throw InvalidProvenance()
                         val time = mergedAt ?: throw InvalidProvenance()
-                        if (regular && path.toString().endsWith(".xml") && AndroidSources.modifiedAfter(path, time)) {
+                        if (regular && path.toString().endsWith(SdkConstants.DOT_XML) && AndroidSources.modifiedAfter(path, time)) {
                             val current = AndroidSources.current(project, path)
-                            if (current != null && path.toString().endsWith(".xml") &&
+                            if (current != null && path.toString().endsWith(SdkConstants.DOT_XML) &&
                                 current.text != StringUtil.convertLineSeparators(AndroidSources.text(path) ?: "")
                             ) {
                                 throw InvalidProvenance()
                             }
                         }
                         if (values || type == "id") {
-                            if (!path.toString().endsWith(".xml")) continue
+                            if (!path.toString().endsWith(SdkConstants.DOT_XML)) continue
                             val exists = declarations(AndroidSources.xml(project, path)).containsKey(wanted)
                             if (exists != built) throw InvalidProvenance()
                             if (exists) actual.add(path)
@@ -497,8 +524,8 @@ object ResourceResolver {
                     }
                 }
             }
-            for (entry in membership.entries) {
-                if (entry.value.contains(wanted) && !actual.contains(entry.key)) {
+            for ((key, value) in membership) {
+                if (value.contains(wanted) && !actual.contains(key)) {
                     throw InvalidProvenance()
                 }
             }
@@ -511,10 +538,10 @@ object ResourceResolver {
             val result = LinkedHashSet<Location>()
             for (folder in children(merged)) {
                 val qualifier = folder.fileName.toString()
-                if (qualifier != "values" && !qualifier.startsWith("values-")) continue
-                val output = folder.resolve(if (qualifier == "values") "values.xml" else "$qualifier.xml")
+                if (!AndroidFolders.isValues(qualifier)) continue
+                val output = folder.resolve(if (qualifier == SdkConstants.FD_RES_VALUES) "values.xml" else "$qualifier.xml")
                 val xml = AndroidSources.xml(project, output)
-                if (xml == null || xml.rootTag == null) continue
+                if (xml?.rootTag == null) continue
                 for (tag in xml.rootTag!!.subTags) {
                     if (wanted != declaration(tag)) continue
                     val blameFile = blame.resolve("multi-v2").resolve("$qualifier.json")
@@ -590,7 +617,7 @@ object ResourceResolver {
             val file =
                 AndroidSources.xml(project, path) ?: throw InvalidProvenance("Source XML cannot be opened: $path")
             val ranges = declarations(file)[wanted]
-            if (ranges == null || ranges.isEmpty()) {
+            if (ranges.isNullOrEmpty()) {
                 throw InvalidProvenance("Declaration range missing for $wanted in $path")
             }
             var document: Document? = file.fileDocument

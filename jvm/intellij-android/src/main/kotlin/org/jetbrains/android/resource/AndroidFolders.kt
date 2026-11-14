@@ -1,21 +1,52 @@
 package org.jetbrains.android.resource
 
+import com.android.SdkConstants
+import com.android.ide.common.resources.configuration.FolderConfiguration
+import com.android.resources.FolderTypeRelationship
+import com.android.resources.ResourceFolderType
+import com.android.resources.ResourceType
+import com.intellij.psi.xml.XmlTag
+
 object AndroidFolders {
-    private val VALUES = Regex(
-        "values" +
-            "(?:-mcc[0-9]{3})?(?:-mnc[0-9]{1,3})?" +
-            "(?:-(?:[a-z]{2,3}(?:-r(?:[A-Z]{2}|[0-9]{3}))?|b\\+[A-Za-z0-9]+(?:\\+[A-Za-z0-9]+)*))?" +
-            "(?:-(?:neuter|feminine|masculine))?(?:-(?:ldltr|ldrtl))?" +
-            "(?:-sw[1-9][0-9]*dp)?(?:-w[1-9][0-9]*dp)?(?:-h[1-9][0-9]*dp)?" +
-            "(?:-(?:small|normal|large|xlarge))?(?:-(?:long|notlong))?(?:-(?:round|notround))?" +
-            "(?:-(?:widecg|nowidecg))?(?:-(?:highdr|lowdr))?(?:-(?:port|land|square))?" +
-            "(?:-(?:car|desk|television|appliance|watch|vrheadset))?(?:-(?:night|notnight))?" +
-            "(?:-(?:ldpi|mdpi|tvdpi|hdpi|xhdpi|xxhdpi|xxxhdpi|nodpi|anydpi|[1-9][0-9]*dpi))?" +
-            "(?:-(?:notouch|finger|stylus))?(?:-(?:keysexposed|keyshidden|keyssoft))?" +
-            "(?:-(?:nokeys|qwerty|12key))?(?:-(?:navexposed|navhidden))?" +
-            "(?:-(?:nonav|dpad|trackball|wheel))?(?:-[1-9][0-9]*x[1-9][0-9]*)?(?:-v[1-9][0-9]*)?"
-    )
 
     @JvmStatic
-    fun isValues(name: String): Boolean = VALUES.matches(name)
+    fun isValues(name: String): Boolean =
+        ResourceFolderType.getFolderType(name) == ResourceFolderType.VALUES &&
+            FolderConfiguration.getConfigForFolder(name) != null
+
+    @JvmStatic
+    fun isResourceFolder(name: String): Boolean =
+        ResourceFolderType.getFolderType(name) != null &&
+            FolderConfiguration.getConfigForFolder(name) != null
+
+    @JvmStatic
+    fun folderNames(type: String): List<String> {
+        val resType = ResourceType.fromClassName(type) ?: ResourceType.fromXmlTagName(type) ?: return emptyList()
+        val result = ArrayList<String>()
+        val nonValues = FolderTypeRelationship.getNonValuesRelatedFolder(resType)
+        if (nonValues != null) {
+            result.add(nonValues.getName())
+        }
+        if (FolderTypeRelationship.match(resType, ResourceFolderType.VALUES)) {
+            result.add(ResourceFolderType.VALUES.getName())
+        }
+        return result
+    }
+
+    @JvmStatic
+    fun valueResourceType(tag: XmlTag): String? {
+        val tagName = tag.name
+        if (tagName == SdkConstants.TAG_RESOURCES ||
+            tagName == "declare-styleable" ||
+            tagName == "eat-comment" ||
+            tagName == "skip" ||
+            tagName == "public" ||
+            tagName == "overlayable" ||
+            tagName == "bag"
+        ) {
+            return null
+        }
+        val resType = ResourceType.fromXmlTag(tag, { it.name }, { t, attr -> t.getAttributeValue(attr) })
+        return resType?.getName()
+    }
 }

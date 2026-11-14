@@ -183,9 +183,9 @@ class AndroidLayout(
                     }
                     val res = LinkedHashSet<Path>()
                     val manifest = LinkedHashSet<Path>()
-                    for (sourceSet in sourceSets.values) {
-                        res.addAll(sourceSet.resources)
-                        manifest.addAll(sourceSet.manifests)
+                    for ((resources1, manifests1) in sourceSets.values) {
+                        res.addAll(resources1)
+                        manifest.addAll(manifests1)
                     }
                     resources = if (resourcesKnown) java.util.Set.copyOf(res) else emptySet()
                     manifests = if (manifestsKnown) java.util.Set.copyOf(manifest) else emptySet()
@@ -251,7 +251,7 @@ class AndroidLayout(
                         if (argExpr != null) nested.add(argExpr)
                     }
                 } else if (expression is KtCollectionLiteralExpression) {
-                    nested.addAll(expression.getInnerExpressions())
+                    nested.addAll(expression.innerExpressions)
                 } else {
                     return null
                 }
@@ -292,7 +292,7 @@ class AndroidLayout(
             variant: String?,
             importedSourceSets: Set<String>
         ): GroovyLayoutData {
-            if (ast == null || ast.statementBlock == null) {
+            if (ast?.statementBlock == null) {
                 return GroovyLayoutData(false, null, emptySet(), emptySet())
             }
             val androidBlocks = mutableListOf<MethodCallExpression>()
@@ -321,11 +321,11 @@ class AndroidLayout(
                     val expr = s.expression
                     if (expr is MethodCallExpression && "namespace" == expr.methodAsString) {
                         val value = getLiteral(expr.arguments)
-                        if (value != null && !value.isBlank()) namespaces.add(value)
+                        if (!value.isNullOrBlank()) namespaces.add(value)
                     } else if (expr is BinaryExpression && "=" == expr.operation.text) {
                         if ("namespace" == expr.leftExpression.text) {
                             val value = getLiteral(expr.rightExpression)
-                            if (value != null && !value.isBlank()) namespaces.add(value)
+                            if (!value.isNullOrBlank()) namespaces.add(value)
                         }
                     }
                 }
@@ -408,9 +408,9 @@ class AndroidLayout(
 
             val res = LinkedHashSet<Path>()
             val manifest = LinkedHashSet<Path>()
-            for (s in sourceSets.values) {
-                res.addAll(s.resources)
-                manifest.addAll(s.manifests)
+            for ((resources, manifests) in sourceSets.values) {
+                res.addAll(resources)
+                manifest.addAll(manifests)
             }
 
             return GroovyLayoutData(

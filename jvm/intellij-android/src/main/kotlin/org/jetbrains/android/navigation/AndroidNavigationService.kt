@@ -1,5 +1,12 @@
 package org.jetbrains.android.navigation
 
+import com.android.SdkConstants
+import com.android.resources.FolderTypeRelationship
+import com.android.resources.getFieldNameByResourceName
+import com.android.resources.ResourceFolderType
+import com.android.resources.ResourceType
+import com.android.utils.SdkUtils
+import com.android.xml.AndroidManifest
 import com.intellij.find.findUsages.FindUsagesManager
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.module.Module
@@ -248,8 +255,8 @@ class AndroidNavigationService private constructor() {
             throw AndroidQueryException.classNotFound("Verified R class not found for $namespace.R")
         }
 
-        val rTypeName = if (type == "string-array" || type == "integer-array") "array" else type
-        val rFieldName = name.replace('.', '_').replace(':', '_')
+        val rTypeName = if (type == "string-array" || type == "integer-array") ResourceType.ARRAY.getName() else type
+        val rFieldName = getFieldNameByResourceName(name)
         val fields = ArrayList<PsiField>()
         for (rClass in verifiedRClasses) {
             ProgressManager.checkCanceled()
@@ -272,13 +279,13 @@ class AndroidNavigationService private constructor() {
             // Proven ownership and the imported consumer graph define visibility, including omitted library R roots.
             ReferencesSearch.search(field, searchScope, true).forEach { reference ->
                 ProgressManager.checkCanceled()
-                val element = reference.element ?: return@forEach
+                val element = reference.element
                 val containing = element.containingFile
                 if (containing == null || containing is XmlFile) return@forEach
                 val vFile = containing.virtualFile
                 if (vFile == null || !vFile.isValid) return@forEach
                 AndroidSources.observe(vFile)
-                val doc = containing.fileDocument ?: return@forEach
+                val doc = containing.fileDocument
                 synchronized(docStamps) {
                     docStamps.putIfAbsent(doc, doc.modificationStamp)
                 }
@@ -337,7 +344,7 @@ class AndroidNavigationService private constructor() {
 
         val refElements = ArrayList<JsonElement>()
         for (loc in references) {
-            refElements.add(Json.Default.encodeToJsonElement(Location.serializer(), loc))
+            refElements.add(Json.encodeToJsonElement(Location.serializer(), loc))
         }
         response["references"] = JsonArray(refElements)
 
@@ -427,25 +434,16 @@ class AndroidNavigationService private constructor() {
                 val element = xml.findElementAt(offset)
                 val tag = PsiTreeUtil.getParentOfType(element, XmlTag::class.java, false) ?: return null
                 val parent = tag.parentTag ?: return null
-                if ("resources" != parent.name) return null
+                if (SdkConstants.TAG_RESOURCES != parent.name) return null
                 val tagName = tag.name
                 // Attribute and declare-styleable resources have distinct search paths;
                 // keep native behavior per section 7.4.
                 if ("declare-styleable" == tagName || "attr" == tagName) return null
-                val nameAttr = tag.getAttribute("name")
+                val nameAttr = tag.getAttribute(AndroidManifest.ATTRIBUTE_NAME)
                 val valueElement = nameAttr?.valueElement ?: return null
                 val rawName = AndroidXml.value(nameAttr)
                 if (rawName.isNullOrBlank()) return null
-                val type: String
-                if ("item" == tagName) {
-                    val rawType = AndroidXml.value(tag.getAttribute("type"))
-                    if (rawType.isNullOrBlank()) return null
-                    type = rawType
-                } else if ("string-array" == tagName || "integer-array" == tagName) {
-                    type = "array"
-                } else {
-                    type = tagName
-                }
+                val type = org.jetbrains.android.resource.AndroidFolders.valueResourceType(tag) ?: return null
                 if ("attr" == type || "declare-styleable" == type || "styleable" == type) {
                     return null
                 }
@@ -466,10 +464,12 @@ class AndroidNavigationService private constructor() {
                 val vFile = xml.virtualFile
                 val parent = vFile?.parent ?: return null
                 val folder = parent.name
-                val type = folder.split("-", limit = 2)[0]
+                val folderType = ResourceFolderType.getFolderType(folder) ?: return null
+                val resType = folderType.resourceType ?: FolderTypeRelationship.getNonIdRelatedResourceType(folderType)
+                val type = resType.getName()
                 val fileName = xml.name
-                val dot = fileName.indexOf('.')
-                val rawName = if (dot >= 0) fileName.substring(0, dot) else fileName
+                val rawName = SdkUtils.fileNameToResourceName(fileName)
+                if (rawName.isEmpty()) return null
                 val rootTag = xml.rootTag ?: return null
                 var nameToken = rootTag.firstChild
                 while (nameToken != null && nameToken.text != rootTag.name) {

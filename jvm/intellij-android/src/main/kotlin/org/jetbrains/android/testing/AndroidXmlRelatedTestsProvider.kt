@@ -1,7 +1,10 @@
+@file:Suppress("UsagesOfObsoleteApi")
+
 package org.jetbrains.android.testing
 
 import com.android.AndroidXConstants
 import com.android.SdkConstants
+import com.android.resources.getFieldNameByResourceName
 import com.android.resources.ResourceFolderType
 import com.android.resources.ResourceType
 import com.android.utils.SdkUtils
@@ -304,8 +307,8 @@ class AndroidXmlRelatedTestsProvider : LSRelatedTestsProvider {
                 loadVerifiedRClassesFromOrigins(project, verifiedJars, "$namespace.R", verifiedRClasses)
             }
             if (verifiedRClasses.isEmpty()) return emptyList()
-            val rTypeName = if (type == "string-array" || type == "integer-array") "array" else type
-            val rFieldName = name.replace('.', '_').replace(':', '_')
+            val rTypeName = if (type == "string-array" || type == "integer-array") ResourceType.ARRAY.getName() else type
+            val rFieldName = getFieldNameByResourceName(name)
             val fields = ArrayList<PsiField>()
             for (rClass in verifiedRClasses) {
                 ProgressManager.checkCanceled()

@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.resource
 
 import com.intellij.core.CoreApplicationEnvironment
@@ -223,5 +225,12 @@ class ResourceResolverTest {
             val ref = findReferenceInAttr(file, attr)
             assertNull("Expected null reference for attribute $attr", ref)
         }
+    }
+
+    @Test
+    fun keyNormalizesArrayTypesAndHyphens() {
+        assertEquals("array\u0000Theme_Foo_Bar", ResourceResolver.key("string-array", "Theme.Foo-Bar"))
+        assertEquals("array\u0000my_items", ResourceResolver.key("integer-array", "my-items"))
+        assertEquals("color\u0000primary_dark", ResourceResolver.key("color", "primary-dark"))
     }
 }

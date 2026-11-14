@@ -1,15 +1,16 @@
 package org.jetbrains.android.xml
 
+import com.android.SdkConstants
+import com.android.xml.AndroidManifest
 import com.intellij.psi.xml.XmlAttribute
 import com.intellij.psi.xml.XmlEntityRef
 import com.intellij.psi.xml.XmlTag
-import org.jetbrains.android.context.AndroidContext
 
 object AndroidXml {
     @JvmStatic
     fun androidName(tag: XmlTag): XmlAttribute? {
         for (attribute in tag.attributes) {
-            if (attribute.localName == "name" && AndroidContext.ANDROID_NS == attribute.namespace) {
+            if (attribute.localName == AndroidManifest.ATTRIBUTE_NAME && SdkConstants.ANDROID_URI == attribute.namespace) {
                 return attribute
             }
         }
