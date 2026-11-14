@@ -10,21 +10,30 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.psi.PsiFile
 import com.jetbrains.ls.api.core.LSServer
 import com.jetbrains.ls.api.core.util.uri
 import com.jetbrains.ls.api.features.diagnostics.LSDiagnosticProvider
+import com.jetbrains.ls.api.features.inspectCode.LSBatchFileResult
+import com.jetbrains.ls.api.features.inspectCode.LSBatchInspection
+import com.jetbrains.ls.api.features.inspectCode.LSBatchInspectionProvider
 import com.jetbrains.ls.api.features.language.LSLanguage
 import com.jetbrains.lsp.implementation.LspHandlerContext
 import com.jetbrains.lsp.protocol.Diagnostic
 import com.jetbrains.lsp.protocol.DiagnosticRelatedInformation
 import com.jetbrains.lsp.protocol.DiagnosticSeverity
 import com.jetbrains.lsp.protocol.DocumentDiagnosticParams
+import com.jetbrains.lsp.protocol.DocumentUri
 import com.jetbrains.lsp.protocol.Position
 import com.jetbrains.lsp.protocol.Range
 import com.jetbrains.lsp.protocol.StringOrInt
+import com.jetbrains.lsp.protocol.TextDocumentIdentifier
+import com.jetbrains.lsp.protocol.URI
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.jetbrains.android.AndroidExtension
@@ -37,8 +46,9 @@ import java.nio.file.Path
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.LinkedHashMap
+import java.util.TreeSet
 
-class AndroidLintProvider : LSDiagnosticProvider {
+class AndroidLintProvider : LSDiagnosticProvider, LSBatchInspectionProvider {
 
     private data class CacheKey(
         val projectLocationHash: String,
@@ -49,7 +59,8 @@ class AndroidLintProvider : LSDiagnosticProvider {
         val modelFingerprint: String?,
         val ruleJarFingerprints: List<String>?,
         val lintXmlFingerprint: String?,
-        val contentFingerprint: String
+        val contentFingerprint: String,
+        val issueIds: List<String>?
     )
 
     private val cache: MutableMap<CacheKey, List<Diagnostic>> = Collections.synchronizedMap(
@@ -60,6 +71,8 @@ class AndroidLintProvider : LSDiagnosticProvider {
         }
     )
 
+    private val inspectionCatalog = AndroidLintInspections()
+
     override val supportedLanguages: Set<LSLanguage> = setOf(
         LSLanguage("java", JavaLanguage.INSTANCE, listOf("java")),
         LSLanguage("kotlin", KotlinLanguage.INSTANCE, listOf("kt", "kts")),
@@ -67,48 +80,86 @@ class AndroidLintProvider : LSDiagnosticProvider {
     )
 
     context(server: LSServer, handlerContext: LspHandlerContext)
-    override fun getDiagnostics(params: DocumentDiagnosticParams): Flow<Diagnostic> {
-        return AndroidRequests.diagnosticQuery(server, params.textDocument) { project, file, document ->
-            val xml = file is com.intellij.psi.xml.XmlFile
-            if (!xml && !file.name.endsWith(".java") && !file.name.endsWith(".kt")) {
-                return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
-            }
-            if (xml && !Files.isRegularFile(file.virtualFile.toNioPath())) {
-                return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
-            }
-            val model = AndroidLintModelResolver.resolve(project, file.virtualFile)
-                ?: return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
-            val scope = if (xml) {
-                AndroidLintResources.scope(model, file.virtualFile.toNioPath())
-            } else {
-                Scope.JAVA_FILE
-            } ?: return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
-            val uri = file.virtualFile.uri.uri
-            val key = CacheKey(
-                project.locationHash,
-                uri,
-                AndroidSources.version(server, uri),
-                document.modificationStamp,
-                scope,
-                model.fingerprint,
-                model.ruleJarFingerprints,
-                model.lintXmlFingerprint,
-                Hashing.sha256().hashUnencodedChars(document.immutableCharSequence).toString()
-            )
-            val existing = cache[key]
-            if (existing != null) {
-                Logger.getInstance(AndroidLintProvider::class.java).debug("Android lint cache hit: $uri")
-                return@diagnosticQuery AndroidRequests.DiagnosticResult(java.util.List.copyOf(existing))
-            }
-            val client = AndroidLintClient(model, file, document.text, scope)
-            val incidents = client.analyze()
-            val values = diagnostics(incidents, document)
-            AndroidRequests.DiagnosticResult(values, Runnable {
-                if (client.isAnalysisComplete()) {
-                    cache[key] = values
-                }
-            })
+    override fun getDiagnostics(params: DocumentDiagnosticParams): Flow<Diagnostic> =
+        AndroidRequests.diagnosticQuery(server, params.textDocument) { project, file, document ->
+            analyzeFile(project, file, document, null)
+                ?: AndroidRequests.DiagnosticResult(emptyList())
         }
+
+    context(server: LSServer)
+    override suspend fun inspectFile(uri: URI, inspectionIds: Set<String>?): LSBatchFileResult {
+        val selection = normalizeIssueIds(inspectionIds)
+        var applicable = false
+        val values = AndroidRequests.diagnosticQuery(
+            server,
+            TextDocumentIdentifier(DocumentUri(uri))
+        ) { project, file, document ->
+            val result = analyzeFile(project, file, document, selection)
+            applicable = result != null
+            result ?: AndroidRequests.DiagnosticResult(emptyList())
+        }.toList()
+        return if (applicable) LSBatchFileResult(values) else LSBatchFileResult.SKIPPED
+    }
+
+    context(server: LSServer)
+    override suspend fun inspections(): List<LSBatchInspection> =
+        inspectionCatalog.inspections(server, supportedLanguages)
+
+    context(server: LSServer)
+    private fun analyzeFile(
+        project: Project,
+        file: PsiFile,
+        document: Document,
+        issueIds: List<String>?
+    ): AndroidRequests.DiagnosticResult<Diagnostic>? {
+        val xml = file is com.intellij.psi.xml.XmlFile
+        if (!xml && !file.name.endsWith(".java") && !file.name.endsWith(".kt")) return null
+        if (xml && !Files.isRegularFile(file.virtualFile.toNioPath())) return null
+        val model = AndroidLintModelResolver.resolve(project, file.virtualFile) ?: return null
+        val scope = if (xml) {
+            AndroidLintResources.scope(model, file.virtualFile.toNioPath())
+        } else {
+            Scope.JAVA_FILE
+        } ?: return null
+        val uri = file.virtualFile.uri.uri
+        val key = CacheKey(
+            project.locationHash,
+            uri,
+            AndroidSources.version(server, uri),
+            document.modificationStamp,
+            scope,
+            model.fingerprint,
+            model.ruleJarFingerprints,
+            model.lintXmlFingerprint,
+            Hashing.sha256().hashUnencodedChars(document.immutableCharSequence).toString(),
+            issueIds
+        )
+        val existing = cache[key]
+        if (existing != null) {
+            Logger.getInstance(AndroidLintProvider::class.java).debug("Android lint cache hit: $uri")
+            return AndroidRequests.DiagnosticResult(java.util.List.copyOf(existing))
+        }
+        if (issueIds != null && issueIds.isEmpty()) return emptyResult(key)
+        val selected = issueIds?.let { java.util.Set.copyOf(it) }
+        val client = AndroidLintClient(model, file, document.text, scope, selected)
+        if (selected != null && client.availableIssues().none { it.id in selected }) {
+            return if (client.isIssueEnumerationComplete()) emptyResult(key)
+            else AndroidRequests.DiagnosticResult(emptyList())
+        }
+        val values = diagnostics(client.analyze(), document)
+        return AndroidRequests.DiagnosticResult(values, Runnable {
+            if (client.isAnalysisComplete()) cache[key] = values
+        })
+    }
+
+    private fun emptyResult(key: CacheKey): AndroidRequests.DiagnosticResult<Diagnostic> =
+        AndroidRequests.DiagnosticResult(emptyList(), Runnable { cache[key] = emptyList() })
+
+    private fun normalizeIssueIds(inspectionIds: Set<String>?): List<String>? {
+        if (inspectionIds == null) return null
+        val ids = TreeSet<String>()
+        for (id in inspectionIds) ids.add(id.removePrefix("AndroidLint."))
+        return java.util.List.copyOf(ids)
     }
 
     private data class Mapped(val diagnostic: Diagnostic, val code: String)

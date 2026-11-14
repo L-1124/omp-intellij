@@ -3,9 +3,11 @@ package org.jetbrains.android.lint
 import com.android.ide.common.resources.ResourceRepository
 import com.android.tools.lint.client.api.CompositeIssueRegistry
 import com.android.tools.lint.client.api.Configuration
+import com.android.tools.lint.client.api.ConfigurationHierarchy
 import com.android.tools.lint.client.api.GradleVisitor
 import com.android.tools.lint.client.api.IssueRegistry
 import com.android.tools.lint.client.api.JarFileIssueRegistry
+import com.android.tools.lint.client.api.Vendor
 import com.android.tools.lint.client.api.LintClient
 import com.android.tools.lint.client.api.LintDriver
 import com.android.tools.lint.client.api.LintOptionsConfiguration
@@ -18,6 +20,7 @@ import com.android.tools.lint.detector.api.Context
 import com.android.tools.lint.detector.api.Incident
 import com.android.tools.lint.detector.api.Issue
 import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Option
 import com.android.tools.lint.detector.api.PartialResult
 import com.android.tools.lint.detector.api.Platform
 import com.android.tools.lint.detector.api.Scope
@@ -40,6 +43,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiPackage
 import com.intellij.util.lang.UrlClassLoader
+import org.jetbrains.android.context.AndroidQueryException
 import org.jetbrains.android.resource.AndroidSources
 import org.jetbrains.kotlin.config.ApiVersion
 import org.jetbrains.kotlin.config.KotlinFacetSettingsProvider
@@ -52,8 +56,9 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
-import java.util.ArrayList
 import java.util.Collections
 import java.util.EnumSet
 import java.util.HexFormat
@@ -67,10 +72,12 @@ open class AndroidLintClient(
     private val model: AndroidLintModel?,
     private val mainFile: PsiFile?,
     private val contents: String?,
-    private val scope: Scope?
+    private val scope: Scope?,
+    selectedIssueIds: Set<String>?
 ) : LintClient(CLIENT_STUDIO) {
 
-    private val ideaProject: Project? = mainFile?.project
+    private val selectedIssueIds: Set<String>? = selectedIssueIds?.let { java.util.Set.copyOf(it) }
+    private val ideaProject: Project? = mainFile?.project ?: model?.module?.takeIf { !it.isDisposed }?.project
     private val ideaModule: Module? = model?.module
     private val mainFilePath: Path? = mainFile?.virtualFile?.toNioPath()?.toAbsolutePath()?.normalize()
     override val xmlParser: XmlParser = AndroidLintXmlParser(this)
@@ -79,6 +86,10 @@ open class AndroidLintClient(
     private var xmlParsingFailed: Boolean = false
     private val collectedIncidents: MutableList<Incident> = ArrayList()
     private val partialResults: MutableMap<Issue, PartialResult> = LinkedHashMap()
+    private var cachedAarRegistries: List<JarFileIssueRegistry>? = null
+    private var cachedAarLoadFailed: Boolean = false
+    private var issueEnumerationComplete: Boolean = false
+    private var issueEnumerationFailed: Boolean = false
 
     @Volatile
     private var lastDetectorFailure: Throwable? = null
@@ -87,6 +98,9 @@ open class AndroidLintClient(
         val root = model?.projectRoot
         if (root != null) {
             configurations.rootDir = root.toFile()
+        }
+        if (this.selectedIssueIds != null) {
+            configurations.overrides = SelectionOverrideConfiguration(configurations, this.selectedIssueIds)
         }
     }
 
@@ -407,8 +421,81 @@ open class AndroidLintClient(
         return LanguageVersionSettingsImpl.DEFAULT
     }
 
+    fun availableIssues(): List<Issue> {
+        return availableIssues(scope ?: Scope.JAVA_FILE)
+    }
+
+    internal fun availableIssues(targetScope: Scope): List<Issue> {
+        ProgressManager.checkCanceled()
+        val currentModel = model
+        if (currentModel == null) {
+            issueEnumerationComplete = true
+            return emptyList()
+        }
+        val moduleDir = currentModel.moduleRoot?.toFile()
+        if (moduleDir == null) {
+            issueEnumerationFailed = true
+            return emptyList()
+        }
+
+        val project = createLintProject(currentModel, moduleDir, null)
+        val builtin = createBuiltinRegistry(currentModel, targetScope)
+        val aarRegistries = assembleAarRegistries(currentModel, project, null)
+        if (cachedAarLoadFailed) {
+            issueEnumerationFailed = true
+        }
+
+        val registries = ArrayList<IssueRegistry>(1 + aarRegistries.size)
+        registries.add(builtin)
+        registries.addAll(aarRegistries)
+        val uniqueRegistries = ArrayList<IssueRegistry>(LinkedHashSet(registries))
+
+        val enumerated = runWithIsolationInternal(
+            uniqueRegistries,
+            onFailure = { issueEnumerationFailed = true }
+        ) { reg ->
+            ProgressManager.checkCanceled()
+            val lastApplicableById = LinkedHashMap<String, Issue>()
+            for (issue in reg.issues) {
+                ProgressManager.checkCanceled()
+                if (isApplicableForEnumeration(issue, targetScope, currentModel.minSdkPremiseMissing)) {
+                    lastApplicableById[issue.id] = issue
+                }
+            }
+            val selected = ArrayList<Issue>(lastApplicableById.size)
+            for ((id, fallback) in lastApplicableById) {
+                ProgressManager.checkCanceled()
+                val representative = reg.getIssue(id)
+                if (representative != null &&
+                    representative.id == id &&
+                    isApplicableForEnumeration(representative, targetScope, currentModel.minSdkPremiseMissing)
+                ) {
+                    selected.add(representative)
+                } else {
+                    selected.add(fallback)
+                }
+            }
+            selected
+        }
+
+        val deduped = LinkedHashMap<String, Issue>(enumerated.size)
+        for (issue in enumerated) {
+            deduped[issue.id] = issue
+        }
+        issueEnumerationComplete = true
+        return java.util.List.copyOf(deduped.values)
+    }
+
+    internal fun isIssueEnumerationComplete(): Boolean {
+        return issueEnumerationComplete && !issueEnumerationFailed
+    }
+
     fun analyze(): List<Incident> {
         ProgressManager.checkCanceled()
+        if (selectedIssueIds != null && selectedIssueIds.isEmpty()) {
+            analysisComplete = true
+            return emptyList()
+        }
         if (model == null || mainFilePath == null) {
             return emptyList()
         }
@@ -416,70 +503,49 @@ open class AndroidLintClient(
         val mainIoFile = mainFilePath.toFile()
         if (scope != Scope.JAVA_FILE && !mainIoFile.isFile) return emptyList()
 
-        val registries = ArrayList<IssueRegistry>()
         val effectiveScope = scope ?: Scope.JAVA_FILE
-        val builtin = AndroidLintIssueRegistry.create(model.minSdkPremiseMissing, effectiveScope)
-        if (model.minSdkPremiseMissing) {
-            LOG.debug("Skipping ApiDetector checks: minSdk premise missing for module " + (ideaModule?.name ?: ""))
-        }
-        registries.add(builtin)
+        val builtin = createBuiltinRegistry(model, effectiveScope)
+        val preProject = createLintProject(model, moduleDir, mainIoFile)
 
-        val preProject = AndroidLintProject(
-            this,
-            moduleDir,
-            ideaModule,
-            model,
-            model.lintModelModule,
-            model.lintModelVariant
-        )
-        preProject.addFile(mainIoFile)
-
-        val request = LintRequest(this, listOf(mainIoFile))
-        request.setProjects(listOf(preProject))
-        request.setScope(EnumSet.of(effectiveScope))
-        request.setPlatform(Platform.ANDROID_SET)
-
-        val preDriver = LintDriver(builtin, this, request)
-        preDriver.checkTestSources = true
-        preDriver.checkDependencies = false
-
-        val ruleJars = model.ruleJars
-        for (jarPath in ruleJars) {
-            ProgressManager.checkCanceled()
-            if (!Files.isRegularFile(jarPath)) continue
-            try {
-                val jarRegistries = loadAarRegistries(jarPath, preProject, preDriver)
-                registries.addAll(jarRegistries)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                LOG.warn("Failed to load lint rules from $jarPath", t)
+        val preDriver = if (model.ruleJars.isNotEmpty()) {
+            val request = LintRequest(this, listOf(mainIoFile))
+            request.setProjects(listOf(preProject))
+            request.setScope(EnumSet.of(effectiveScope))
+            request.setPlatform(Platform.ANDROID_SET)
+            LintDriver(builtin, this, request).also {
+                it.checkTestSources = true
+                it.checkDependencies = false
             }
+        } else {
+            null
         }
 
+        val aarRegistries = assembleAarRegistries(model, preProject, preDriver)
+        val registries = ArrayList<IssueRegistry>(1 + aarRegistries.size)
+        registries.add(builtin)
+        registries.addAll(aarRegistries)
         val uniqueRegistries = ArrayList<IssueRegistry>(LinkedHashSet(registries))
+
         return runWithIsolation(uniqueRegistries) { reg ->
             ProgressManager.checkCanceled()
             collectedIncidents.clear()
             partialResults.clear()
             lastDetectorFailure = null
 
-            val runProject = AndroidLintProject(
-                this,
-                moduleDir,
-                ideaModule,
-                model,
-                model.lintModelModule,
-                model.lintModelVariant
-            )
-            runProject.addFile(mainIoFile)
+            val executionRegistry = pruneRegistryForSelection(reg)
+            if (executionRegistry == null) {
+                analysisComplete = true
+                return@runWithIsolation emptyList()
+            }
+
+            val runProject = createLintProject(model, moduleDir, mainIoFile)
 
             val req = LintRequest(this, listOf(mainIoFile))
             req.setProjects(listOf(runProject))
             req.setScope(EnumSet.of(effectiveScope))
             req.setPlatform(Platform.ANDROID_SET)
 
-            val driver = LintDriver(reg, this, req)
+            val driver = LintDriver(executionRegistry, this, req)
             driver.checkTestSources = true
             driver.checkDependencies = false
             driver.analyze()
@@ -501,21 +567,119 @@ open class AndroidLintClient(
         return analysisComplete && !xmlParsingFailed
     }
 
+    private fun createLintProject(
+        currentModel: AndroidLintModel,
+        moduleDir: File,
+        mainIoFile: File?
+    ): AndroidLintProject {
+        val project = AndroidLintProject(
+            this,
+            moduleDir,
+            ideaModule,
+            currentModel,
+            currentModel.lintModelModule,
+            currentModel.lintModelVariant
+        )
+        if (mainIoFile != null) {
+            project.addFile(mainIoFile)
+        }
+        return project
+    }
+
+    private fun createBuiltinRegistry(
+        currentModel: AndroidLintModel,
+        targetScope: Scope
+    ): IssueRegistry {
+        if (currentModel.minSdkPremiseMissing) {
+            LOG.debug("Skipping ApiDetector checks: minSdk premise missing for module " + (ideaModule?.name ?: ""))
+        }
+        return AndroidLintIssueRegistry.create(currentModel.minSdkPremiseMissing, targetScope)
+    }
+
+    private fun isApplicableForEnumeration(
+        issue: Issue,
+        targetScope: Scope,
+        minSdkPremiseMissing: Boolean
+    ): Boolean {
+        if (!AndroidLintIssueRegistry.isIssueSupported(issue, targetScope)) {
+            return false
+        }
+        if (minSdkPremiseMissing && AndroidLintIssueRegistry.isApiDetectorIssue(issue)) {
+            return false
+        }
+        return true
+    }
+
+    private fun pruneRegistryForSelection(registry: IssueRegistry): IssueRegistry? {
+        val selected = selectedIssueIds ?: return registry
+        if (selected.isEmpty()) return null
+        val filtered = registry.issues.filter { it.id in selected }
+        if (filtered.isEmpty()) return null
+        return SelectedIssueRegistry(registry, filtered)
+    }
+
+    private fun assembleAarRegistries(
+        currentModel: AndroidLintModel,
+        project: AndroidLintProject,
+        driver: LintDriver?
+    ): List<JarFileIssueRegistry> {
+        cachedAarRegistries?.let { return it }
+        val ruleJars = currentModel.ruleJars
+        if (ruleJars.isEmpty()) {
+            val empty = emptyList<JarFileIssueRegistry>()
+            cachedAarRegistries = empty
+            return empty
+        }
+        val loaded = ArrayList<JarFileIssueRegistry>()
+        for (jarPath in ruleJars) {
+            ProgressManager.checkCanceled()
+            AndroidSources.observeCompiledArchive(jarPath)
+            if (!Files.isRegularFile(jarPath)) {
+                cachedAarLoadFailed = true
+                continue
+            }
+            try {
+                val jarRegistries = loadAarRegistries(jarPath, project, driver)
+                if (jarRegistries.isEmpty()) {
+                    cachedAarLoadFailed = true
+                } else {
+                    loaded.addAll(jarRegistries)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: AndroidQueryException) {
+                throw e
+            } catch (t: Throwable) {
+                cachedAarLoadFailed = true
+                LOG.warn("Failed to load lint rules from $jarPath", t)
+            }
+        }
+        val result = java.util.List.copyOf(loaded)
+        cachedAarRegistries = result
+        return result
+    }
+
     private fun loadAarRegistries(
         originalJar: Path,
         project: AndroidLintProject,
-        driver: LintDriver
+        driver: LintDriver?
     ): List<JarFileIssueRegistry> {
         try {
+            AndroidSources.observeCompiledArchive(originalJar)
+            val beforeStamp = readSourceFileStamp(originalJar)
+            if (beforeStamp == null) {
+                cachedAarLoadFailed = true
+                return emptyList()
+            }
             val cacheAarDir = getCacheDir("aar", true)
             val copiedJar = copyToAarCache(originalJar, cacheAarDir.toPath())
-            val lastModified = Files.getLastModifiedTime(originalJar).toMillis()
-            val size = Files.size(originalJar)
+            val lastModified = beforeStamp.modified.toMillis()
+            val size = beforeStamp.size
             val key = AarCacheKey(copiedJar, lastModified, size)
 
             var moduleCache: MutableMap<AarCacheKey, List<JarFileIssueRegistry>>? = null
             val mod = ideaModule
-            if (mod != null) {
+            if (mod != null && !mod.isDisposed) {
                 moduleCache = MODULE_AAR_CACHE.computeIfAbsent(mod) {
                     Collections.synchronizedMap(
                         object : LinkedHashMap<AarCacheKey, List<JarFileIssueRegistry>>(16, 0.75f, true) {
@@ -526,7 +690,11 @@ open class AndroidLintClient(
                     )
                 }
                 val cached = moduleCache[key]
-                if (cached != null) {
+                if (cached != null && cached.isNotEmpty() && cached.all { it.isUpToDate }) {
+                    val afterStamp = readSourceFileStamp(originalJar)
+                    if (afterStamp == null || afterStamp != beforeStamp) {
+                        throw AndroidQueryException("content_modified", -32801)
+                    }
                     return cached
                 }
             }
@@ -538,17 +706,90 @@ open class AndroidLintClient(
                 driver,
                 true
             )
+            val afterStamp = readSourceFileStamp(originalJar)
+            if (afterStamp == null || afterStamp != beforeStamp) {
+                throw AndroidQueryException("content_modified", -32801)
+            }
             if (!list.isNullOrEmpty()) {
                 moduleCache?.put(key, list)
                 return list
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: AndroidQueryException) {
+            throw e
         } catch (t: Throwable) {
+            lastDetectorFailure = null
+            cachedAarLoadFailed = true
             LOG.warn("Failed to load AAR lint registry from $originalJar", t)
         }
         return emptyList()
     }
+
+    private class SelectedIssueRegistry(
+        private val delegate: IssueRegistry,
+        issues: List<Issue>
+    ) : IssueRegistry() {
+        override val issues: List<Issue> = java.util.List.copyOf(issues)
+        override val vendor: Vendor? get() = delegate.vendor
+        override val api: Int get() = delegate.api
+        override val minApi: Int get() = delegate.minApi
+        override val maxApi: Int get() = delegate.maxApi
+        override val deletedIssues: List<String> get() = delegate.deletedIssues
+        override val isUpToDate: Boolean get() = delegate.isUpToDate
+        override fun cacheable(): Boolean = false
+    }
+
+    private class SelectionOverrideConfiguration(
+        configurations: ConfigurationHierarchy,
+        private val selectedIds: Set<String>
+    ) : Configuration(configurations) {
+        init {
+            isOverriding = true
+            fileLevel = false
+        }
+
+        override var baselineFile: File? = null
+
+        override fun getDefinedSeverity(
+            issue: Issue,
+            source: Configuration,
+            visibleDefault: Severity
+        ): Severity? {
+            return if (issue.id in selectedIds) null else Severity.IGNORE
+        }
+
+        override fun addConfiguredIssues(
+            targetMap: MutableMap<String, Severity>,
+            registry: IssueRegistry,
+            specificOnly: Boolean
+        ) {
+        }
+
+        override fun getOption(issue: Issue, name: String, default: String?): String? = default
+
+        override fun getOption(option: Option): Any? = null
+
+        override fun getOptionAsFile(issue: Issue, name: String, default: File?): File? = default
+
+        override fun ignore(context: Context, issue: Issue, location: Location?, message: String) {
+        }
+
+        override fun ignore(issue: Issue, file: File) {
+        }
+
+        override fun ignore(issueId: String, file: File) {
+        }
+
+        override fun setSeverity(issue: Issue, severity: Severity?) {
+        }
+    }
+
+    private data class SourceFileStamp(
+        val size: Long,
+        val modified: FileTime,
+        val fileKey: Any?
+    )
 
     private data class AarCacheKey(val copiedJarPath: Path, val originalLastModified: Long, val originalSize: Long)
 
@@ -668,6 +909,14 @@ open class AndroidLintClient(
             registries: List<IssueRegistry>?,
             runner: (IssueRegistry) -> List<Incident>
         ): List<Incident> {
+            return runWithIsolationInternal(registries, null, runner)
+        }
+
+        private inline fun <T> runWithIsolationInternal(
+            registries: List<IssueRegistry>?,
+            noinline onFailure: (() -> Unit)?,
+            runner: (IssueRegistry) -> List<T>
+        ): List<T> {
             if (registries.isNullOrEmpty()) {
                 return emptyList()
             }
@@ -676,9 +925,10 @@ open class AndroidLintClient(
                     runner(registries[0])
                 } catch (e: CancellationException) {
                     throw e
-                } catch (e: org.jetbrains.android.context.AndroidQueryException) {
+                } catch (e: AndroidQueryException) {
                     throw e
                 } catch (t: Throwable) {
+                    onFailure?.invoke()
                     LOG.warn("Failed lint registry execution: ${registries[0]}", t)
                     emptyList()
                 }
@@ -689,11 +939,11 @@ open class AndroidLintClient(
                 runner(composite)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: org.jetbrains.android.context.AndroidQueryException) {
+            } catch (e: AndroidQueryException) {
                 throw e
             } catch (t: Throwable) {
                 LOG.warn("Composite lint registry execution failed, retrying with per-registry isolation", t)
-                val combined = ArrayList<Incident>()
+                val combined = ArrayList<T>()
                 for (registry in registries) {
                     try {
                         val batch = runner(registry)
@@ -702,13 +952,23 @@ open class AndroidLintClient(
                         }
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (e: org.jetbrains.android.context.AndroidQueryException) {
+                    } catch (e: AndroidQueryException) {
                         throw e
                     } catch (regError: Throwable) {
+                        onFailure?.invoke()
                         LOG.warn("Skipping failing lint issue registry: $registry", regError)
                     }
                 }
                 combined
+            }
+        }
+
+        private fun readSourceFileStamp(path: Path): SourceFileStamp? {
+            return try {
+                val attrs = Files.readAttributes(path, BasicFileAttributes::class.java)
+                SourceFileStamp(attrs.size(), attrs.lastModifiedTime(), attrs.fileKey())
+            } catch (_: IOException) {
+                null
             }
         }
 

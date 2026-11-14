@@ -125,6 +125,10 @@ tasks.withType<JavaCompile>().configureEach {
     options.release.set(25)
 }
 
+tasks.withType<Test>().configureEach {
+    jvmArgs("--add-opens=java.base/sun.nio.fs=ALL-UNNAMED")
+}
+
 repositories {
     google()
     mavenCentral()
