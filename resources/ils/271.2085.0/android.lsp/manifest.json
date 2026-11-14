@@ -18,14 +18,14 @@
     {
       "name": "language-server.api.features.impl.android.dap.jar",
       "path": "lib/modules/language-server.api.features.impl.android.dap.jar",
-      "sha256": "daca40cfca897fb9f44397aa35d8490894568a325c0ee22637b82ca70da55211",
-      "size": 1406064
+      "sha256": "82e534fa930027dc65a9803182b361c4de2dcfbe8636c2216f3384595bcd2af4",
+      "size": 1537433
     },
     {
       "name": "language-server.api.features.impl.android.jar",
       "path": "lib/modules/language-server.api.features.impl.android.jar",
-      "sha256": "903962242f2cc050bff77ef2538a5e9825aaa67be0eeecb5441eeee81b0bb5db",
-      "size": 1489601
+      "sha256": "70b6a9560d9d873196f8b4a3ef634de36448a597becbe039e97ad17346d361d7",
+      "size": 1744495
     },
     {
       "name": "adblib-9.4.1.jar",
