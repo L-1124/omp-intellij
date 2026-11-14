@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.lint
 
 import com.android.ide.common.rendering.api.AttrResourceValue
@@ -141,8 +143,8 @@ class AndroidLintResourcesTest {
             defaultConfig,
             variantValue,
             PathString("/app/src/debug/res/values/strings.xml"),
-            false,
-            true,
+            fileBased = false,
+            isPublic = true,
         )
         repo.add(variantItem)
 
@@ -156,8 +158,8 @@ class AndroidLintResourcesTest {
             defaultConfig,
             mainValue,
             PathString("/app/src/main/res/values/strings.xml"),
-            false,
-            true,
+            fileBased = false,
+            isPublic = true,
         )
         repo.add(mainItem)
 
@@ -191,8 +193,8 @@ class AndroidLintResourcesTest {
                 defaultConfig,
                 defaultValue,
                 PathString("/app/res/values/strings.xml"),
-                false,
-                true
+                fileBased = false,
+                isPublic = true
             )
         )
 
@@ -206,8 +208,8 @@ class AndroidLintResourcesTest {
                 esConfig,
                 esValue,
                 PathString("/app/res/values-es/strings.xml"),
-                false,
-                true
+                fileBased = false,
+                isPublic = true
             )
         )
 
@@ -233,8 +235,8 @@ class AndroidLintResourcesTest {
                 FolderConfiguration.createDefault(),
                 pubVal,
                 PathString("/lib/res/values/strings.xml"),
-                false,
-                true
+                fileBased = false,
+                isPublic = true
             )
         )
 
@@ -248,8 +250,8 @@ class AndroidLintResourcesTest {
                 FolderConfiguration.createDefault(),
                 privVal,
                 PathString("/lib/res/values/strings.xml"),
-                false,
-                false
+                fileBased = false,
+                isPublic = false
             )
         )
 

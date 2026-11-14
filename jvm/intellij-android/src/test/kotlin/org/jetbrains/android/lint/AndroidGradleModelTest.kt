@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.lint
 
 import com.android.sdklib.AndroidTargetHash
@@ -100,8 +102,15 @@ class AndroidGradleModelTest {
             return AndroidLintModel(
                 null, null, null, null, null, null,
                 compileSdk, compileTarget, 21, 34, "com.example",
-                false, false, null, null,
-                emptyList(), emptyList(), "fp", "xmlfp", null
+                isLibrary = false,
+                minSdkPremiseMissing = false,
+                lintModelModule = null,
+                lintModelVariant = null,
+                ruleJars = emptyList(),
+                ruleJarFingerprints = emptyList(),
+                fingerprint = "fp",
+                lintXmlFingerprint = "xmlfp",
+                xmlInputs = null
             )
         }
     }

@@ -22,6 +22,7 @@
     <module name="intellij.libraries.asm" />
     <module name="intellij.libraries.asm.tools" />
     <module name="intellij.libraries.guava" />
+    <module name="intellij.libraries.gson" />
     <module name="language-server.analyzer" />
     <module name="language-server.api.features" />
   </dependencies>

@@ -102,7 +102,7 @@ open class AndroidLintXmlParser(
             } catch (e: AndroidQueryException) {
                 throw e
             } catch (t: Exception) {
-                client.log(t, "Failed converting PSI parse tree to DOM for %1\$s", file.path)
+                client.log(t, $$"Failed converting PSI parse tree to DOM for %1$s", file.path)
                 markFailed()
                 return null
             }
@@ -135,7 +135,7 @@ open class AndroidLintXmlParser(
             } catch (e: AndroidQueryException) {
                 throw e
             } catch (t: Exception) {
-                client.log(t, "Failed converting PSI parse tree to DOM for %1\$s", file.path)
+                client.log(t, $$"Failed converting PSI parse tree to DOM for %1$s", file.path)
                 markFailed()
                 return null
             }
@@ -145,7 +145,6 @@ open class AndroidLintXmlParser(
             if (document != null) {
                 document.setUserData(File::class.java.name, file, null)
                 document.setUserData(PositionXmlParser.CONTENT_KEY, xml.toString(), null)
-                document.setUserData("contents", xml.toString(), null)
             }
             return document
         } catch (e: CancellationException) {
@@ -176,16 +175,7 @@ open class AndroidLintXmlParser(
     override fun parseXml(context: XmlContext): Document? {
         val contents = context.getContents()
         val file = context.file
-        if (contents == null && file == null) {
-            return null
-        }
-        if (contents != null && file != null) {
-            return parseXml(contents, file)
-        }
-        if (file != null) {
-            return parseXml(file)
-        }
-        return null
+        return if (contents != null) parseXml(contents, file) else parseXml(file)
     }
 
     private fun findManifestSource(node: Node?): Pair<File, out Node>? {
@@ -221,7 +211,7 @@ open class AndroidLintXmlParser(
     }
 
     override fun getLocation(context: XmlContext, node: Node): Location {
-        val file = context.file ?: return Location.NONE
+        val file = context.file
         return getLocation(file, node)
     }
 
@@ -229,7 +219,7 @@ open class AndroidLintXmlParser(
         return getLocation(file, node)
     }
 
-    override fun getLocation(context: XmlContext, node: Node, startDelta: Int, endDelta: Int): Location {
+    override fun getLocation(context: XmlContext, node: Node, start: Int, end: Int): Location {
         var targetFile = resolveFile(context.file, node) ?: return Location.NONE
         var targetNode: Node = node
         val merged = findManifestSource(targetNode)
@@ -239,16 +229,16 @@ open class AndroidLintXmlParser(
             targetNode = merged.second
         }
         if (targetNode !is AndroidDomPsiConverter.AndroidDomNode) {
-            val pos = PositionXmlParser.getPosition(targetNode, startDelta, endDelta)
+            val pos = PositionXmlParser.getPosition(targetNode, start, end)
             if (pos == null || pos == SourcePosition.UNKNOWN) {
                 return Location.create(targetFile).withSource(targetNode)
             }
             return Location.create(targetFile, pos).withSource(targetNode)
         }
         val textRange = AndroidDomPsiConverter.getTextRange(targetNode)
-        val start = AndroidDomPsiConverter.AndroidLintXmlPosition(targetNode, textRange.startOffset + startDelta)
-        val end = AndroidDomPsiConverter.AndroidLintXmlPosition(targetNode, textRange.startOffset + endDelta)
-        return Location.create(targetFile, start, end).withSource(targetNode)
+        val startPosition = AndroidDomPsiConverter.AndroidLintXmlPosition(targetNode, textRange.startOffset + start)
+        val endPosition = AndroidDomPsiConverter.AndroidLintXmlPosition(targetNode, textRange.startOffset + end)
+        return Location.create(targetFile, startPosition, endPosition).withSource(targetNode)
     }
 
     override fun getNameLocation(client: LintClient, file: File, node: Node): Location {
@@ -266,7 +256,7 @@ open class AndroidLintXmlParser(
             if (start != null) {
                 val delta = if (targetNode is Element) 1 else 0
                 val name = targetNode.nodeName
-                val length = name?.length ?: 0
+                val length = name.length
                 val startOffset = start.offset + delta
                 val startColumn = start.column + delta
                 return Location.create(
@@ -284,7 +274,7 @@ open class AndroidLintXmlParser(
     }
 
     override fun getNameLocation(context: XmlContext, node: Node): Location {
-        val file = context.file ?: return Location.NONE
+        val file = context.file
         val lintClient = this.client ?: context.client
         return getNameLocation(lintClient, file, node)
     }
@@ -306,10 +296,7 @@ open class AndroidLintXmlParser(
             val start = location.start
             if (start != null) {
                 val ownerDoc = targetNode.ownerDocument
-                var contents = ownerDoc?.getUserData(PositionXmlParser.CONTENT_KEY) as? String
-                if (contents == null && ownerDoc != null) {
-                    contents = ownerDoc.getUserData("contents") as? String
-                }
+                val contents = ownerDoc?.getUserData(PositionXmlParser.CONTENT_KEY) as? String
                 if (contents != null) {
                     var valueStartOffset = start.offset
                     val docLen = contents.length
@@ -340,7 +327,7 @@ open class AndroidLintXmlParser(
     }
 
     override fun getValueLocation(context: XmlContext, node: Attr): Location {
-        val file = context.file ?: return Location.NONE
+        val file = context.file
         val lintClient = this.client ?: context.client
         return getValueLocation(lintClient, file, node)
     }
@@ -360,7 +347,7 @@ open class AndroidLintXmlParser(
     }
 
     override fun getNodeStartOffset(context: XmlContext, node: Node): Int {
-        val file = context.file ?: return -1
+        val file = context.file
         val lintClient = this.client ?: context.client
         return getNodeStartOffset(lintClient, file, node)
     }
@@ -380,13 +367,13 @@ open class AndroidLintXmlParser(
     }
 
     override fun getNodeEndOffset(context: XmlContext, node: Node): Int {
-        val file = context.file ?: return -1
+        val file = context.file
         val lintClient = this.client ?: context.client
         return getNodeEndOffset(lintClient, file, node)
     }
 
     override fun findNodeAt(context: XmlContext, offset: Int): Node? {
-        val document = context.document ?: return null
+        val document = context.document
         return findNodeAt(document, offset)
     }
 

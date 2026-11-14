@@ -3,8 +3,10 @@ package org.jetbrains.android
 import com.intellij.debugger.settings.NodeRendererSettings
 import com.intellij.ide.plugins.ContentModuleDescriptor
 import com.intellij.ide.plugins.cl.PluginAwareClassLoader
+import com.intellij.lang.java.JavaLanguage
 import com.intellij.lang.xml.XMLLanguage
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.fileTypes.PlainTextLanguage
 import com.intellij.openapi.util.registry.Registry
 import com.intellij.xdebugger.settings.XDebuggerSettingsManager
 import com.jetbrains.ls.api.features.LanguageServerExtension
@@ -12,6 +14,8 @@ import com.jetbrains.ls.api.features.language.LSConfigurationPiece
 import com.jetbrains.ls.api.features.language.LSLanguage
 import org.jetbrains.annotations.ApiStatus
 import org.jetbrains.android.compose.ComposeSuppressor
+import org.jetbrains.android.lint.AndroidLintCodeActionProvider
+import org.jetbrains.android.lint.AndroidLintHoverProvider
 import org.jetbrains.android.lint.AndroidLintProvider
 import org.jetbrains.android.navigation.AndroidCompiledResourceClassFinder
 import org.jetbrains.android.navigation.AndroidDefinitionProvider
@@ -20,6 +24,7 @@ import org.jetbrains.android.navigation.AndroidResourceCommands
 import org.jetbrains.android.navigation.AndroidResourceNavigation
 import org.jetbrains.android.testing.AndroidXmlRelatedTestsProvider
 import org.jetbrains.android.xml.AndroidDocumentSymbols
+import org.jetbrains.kotlin.idea.KotlinLanguage
 
 class AndroidExtension : LanguageServerExtension {
     @Suppress("UnstableApiUsage")
@@ -56,15 +61,35 @@ class AndroidExtension : LanguageServerExtension {
                     AndroidCompiledResourceClassFinder.Entry(),
                     AndroidResourceNavigation.Entry(),
                     AndroidLintProvider(),
+                    AndroidLintCodeActionProvider(),
+                    AndroidLintHoverProvider(),
                     AndroidXmlRelatedTestsProvider()
                 ),
                 listOf(module.parent),
-                emptyList()
+                listOf(TOML, GROOVY, PROGUARD)
             )
         }
 
     companion object {
         @JvmField
+        val JAVA = LSLanguage("java", JavaLanguage.INSTANCE, listOf("java"))
+
+        @JvmField
+        val KOTLIN = LSLanguage("kotlin", KotlinLanguage.INSTANCE, listOf("kt", "kts"))
+
+        @JvmField
         val XML = LSLanguage("xml", XMLLanguage.INSTANCE, listOf("xml"))
+
+        @JvmField
+        val PROPERTIES = LSLanguage("properties", PlainTextLanguage.INSTANCE, listOf("properties"))
+
+        @JvmField
+        val TOML = LSLanguage("toml", PlainTextLanguage.INSTANCE, listOf("toml"))
+
+        @JvmField
+        val GROOVY = LSLanguage("groovy", PlainTextLanguage.INSTANCE, listOf("gradle"))
+
+        @JvmField
+        val PROGUARD = LSLanguage("proguard", PlainTextLanguage.INSTANCE, listOf("pro", "cfg"))
     }
 }

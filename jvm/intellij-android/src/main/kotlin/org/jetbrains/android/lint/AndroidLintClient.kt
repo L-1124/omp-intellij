@@ -7,18 +7,25 @@ import com.android.tools.lint.client.api.ConfigurationHierarchy
 import com.android.tools.lint.client.api.GradleVisitor
 import com.android.tools.lint.client.api.IssueRegistry
 import com.android.tools.lint.client.api.JarFileIssueRegistry
-import com.android.tools.lint.client.api.Vendor
+import com.android.tools.lint.client.api.LintBaseline
 import com.android.tools.lint.client.api.LintClient
 import com.android.tools.lint.client.api.LintDriver
 import com.android.tools.lint.client.api.LintOptionsConfiguration
 import com.android.tools.lint.client.api.LintRequest
 import com.android.tools.lint.client.api.LintXmlConfiguration
 import com.android.tools.lint.client.api.ResourceRepositoryScope
+import com.android.tools.lint.client.api.UastGradleVisitor
 import com.android.tools.lint.client.api.UastParser
+import com.android.tools.lint.client.api.Vendor
 import com.android.tools.lint.client.api.XmlParser
 import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.DefaultPosition
+import com.android.tools.lint.detector.api.Desugaring
+import com.android.tools.lint.detector.api.GradleContext
+import com.android.tools.lint.detector.api.GradleScanner
 import com.android.tools.lint.detector.api.Incident
 import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
 import com.android.tools.lint.detector.api.Location
 import com.android.tools.lint.detector.api.Option
 import com.android.tools.lint.detector.api.PartialResult
@@ -43,6 +50,21 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiPackage
 import com.intellij.util.lang.UrlClassLoader
+import org.codehaus.groovy.ast.ASTNode
+import org.codehaus.groovy.ast.ModuleNode
+import org.codehaus.groovy.ast.expr.ArgumentListExpression
+import org.codehaus.groovy.ast.expr.BinaryExpression
+import org.codehaus.groovy.ast.expr.ClosureExpression
+import org.codehaus.groovy.ast.expr.ConstantExpression
+import org.codehaus.groovy.ast.expr.Expression
+import org.codehaus.groovy.ast.expr.MapEntryExpression
+import org.codehaus.groovy.ast.expr.MethodCallExpression
+import org.codehaus.groovy.ast.expr.NamedArgumentListExpression
+import org.codehaus.groovy.ast.expr.TupleExpression
+import org.codehaus.groovy.ast.stmt.BlockStatement
+import org.codehaus.groovy.ast.stmt.ExpressionStatement
+import org.codehaus.groovy.ast.stmt.Statement
+import org.codehaus.groovy.control.SourceUnit
 import org.jetbrains.android.context.AndroidQueryException
 import org.jetbrains.android.resource.AndroidSources
 import org.jetbrains.kotlin.config.ApiVersion
@@ -90,6 +112,7 @@ open class AndroidLintClient(
     private var cachedAarLoadFailed: Boolean = false
     private var issueEnumerationComplete: Boolean = false
     private var issueEnumerationFailed: Boolean = false
+    private var activeBaseline: LintBaseline? = null
 
     @Volatile
     private var lastDetectorFailure: Throwable? = null
@@ -166,8 +189,40 @@ open class AndroidLintClient(
         xmlParsingFailed = true
     }
 
+    override fun openConnection(url: java.net.URL): java.net.URLConnection? = null
+
+    override fun openConnection(url: java.net.URL, timeout: Int): java.net.URLConnection? = null
+
+    override fun getDesugaring(project: com.android.tools.lint.detector.api.Project): Set<Desugaring> {
+        val desugaring = EnumSet.noneOf(Desugaring::class.java)
+        try {
+            desugaring.addAll(super.getDesugaring(project))
+        } catch (_: Throwable) {
+            desugaring.addAll(Desugaring.DEFAULT)
+        }
+        if (project.isCoreLibraryDesugaringEnabled || model?.coreLibraryDesugaringEnabled == true) {
+            desugaring.add(Desugaring.JAVA_8_LIBRARY)
+        }
+        return desugaring
+    }
+
     override fun getGradleVisitor(): GradleVisitor {
-        return GradleVisitor()
+        if (mainFilePath?.fileName?.toString()?.endsWith(".gradle.kts") == true) {
+            val proj = ideaProject
+            if (proj != null && model != null) {
+                val moduleDir = model.moduleRoot?.toFile() ?: File(".")
+                val lintProject = createLintProject(model, moduleDir, mainFilePath.toFile())
+                val driver = LintDriver(
+                    AndroidLintIssueRegistry(scope = Scope.GRADLE_FILE),
+                    this,
+                    LintRequest(this, listOf(mainFilePath.toFile()))
+                )
+                val javaContext = JavaContext(driver, lintProject, lintProject, mainFilePath.toFile())
+                javaContext.uastParser = getUastParser(lintProject)
+                return UastGradleVisitor(javaContext)
+            }
+        }
+        return AndroidGroovyGradleVisitor(this)
     }
 
     override fun getResources(
@@ -299,9 +354,9 @@ open class AndroidLintClient(
 
     override fun report(context: Context, incident: Incident, format: TextFormat) {
         if (incident.severity == Severity.IGNORE) return
-        val location = incident.location ?: return
+        val location = incident.location
         if (location == Location.NONE) return
-        val file = location.file ?: return
+        val file = location.file
         val incidentPath = file.toPath().toAbsolutePath().normalize()
         if (mainFilePath == null || incidentPath != mainFilePath) return
         val start = location.start
@@ -313,7 +368,9 @@ open class AndroidLintClient(
         if (msg != null) {
             msg = format.convertTo(msg, TextFormat.RAW)
         }
-        incident.message = msg ?: ""
+        incident.message = msg
+        val baseline = activeBaseline
+        if (baseline != null && baseline.findAndMark(incident)) return
         collectedIncidents.add(incident)
     }
 
@@ -501,7 +558,8 @@ open class AndroidLintClient(
         }
         val moduleDir = model.moduleRoot?.toFile() ?: return emptyList()
         val mainIoFile = mainFilePath.toFile()
-        if (scope != Scope.JAVA_FILE && !mainIoFile.isFile) return emptyList()
+        val hasContent = contents != null || mainIoFile.isFile
+        if (!hasContent) return emptyList()
 
         val effectiveScope = scope ?: Scope.JAVA_FILE
         val builtin = createBuiltinRegistry(model, effectiveScope)
@@ -548,7 +606,26 @@ open class AndroidLintClient(
             val driver = LintDriver(executionRegistry, this, req)
             driver.checkTestSources = true
             driver.checkDependencies = false
-            driver.analyze()
+
+            val baselineFile = model.lintModelModule?.lintOptions?.baselineFile
+                ?: model.moduleRoot.resolve("lint-baseline.xml").toFile()
+            val baseline = if (baselineFile != null && baselineFile.isFile) {
+                LintBaseline(this, baselineFile).also {
+                    it.writeOnClose = false
+                }
+            } else {
+                null
+            }
+            if (baseline != null) {
+                driver.baseline = baseline
+            }
+            activeBaseline = baseline
+            try {
+                driver.analyze()
+            } finally {
+                activeBaseline = null
+                baseline?.close()
+            }
 
             val failure = lastDetectorFailure
             if (failure != null) {
@@ -690,7 +767,7 @@ open class AndroidLintClient(
                     )
                 }
                 val cached = moduleCache[key]
-                if (cached != null && cached.isNotEmpty() && cached.all { it.isUpToDate }) {
+                if (!cached.isNullOrEmpty() && cached.all { it.isUpToDate }) {
                     val afterStamp = readSourceFileStamp(originalJar)
                     if (afterStamp == null || afterStamp != beforeStamp) {
                         throw AndroidQueryException("content_modified", -32801)
@@ -826,7 +903,7 @@ open class AndroidLintClient(
             if (project is AndroidLintProject) {
                 mod = project.ideaModule
                 if (mod == null && project.model != null) {
-                    mod = project.model?.module
+                    mod = project.model.module
                 }
             }
             return AndroidJavaEvaluator(p, project, mod)
@@ -1012,5 +1089,182 @@ open class AndroidLintClient(
             }
             return target
         }
+    }
+}
+
+private class AndroidGroovyGradleVisitor(private val client: LintClient) : GradleVisitor() {
+    override fun visitBuildScript(context: GradleContext, detectors: List<GradleScanner>) {
+        val file = context.file
+        val contents = client.readFile(file).toString()
+        if (contents.isBlank()) return
+        val unit = try {
+            SourceUnit.create(file.name, contents).apply {
+                parse()
+                completePhase()
+                convert()
+            }
+        } catch (_: Throwable) {
+            return
+        }
+        val moduleNode = unit.ast ?: return
+        val statementBlock = moduleNode.statementBlock ?: return
+
+        for (detector in detectors) {
+            if (detector.customVisitor) {
+                detector.visitBuildScript(context)
+            }
+        }
+
+        walkStatements(context, detectors, statementBlock.statements, "", "", contents)
+    }
+
+    private fun walkStatements(
+        context: GradleContext,
+        detectors: List<GradleScanner>,
+        statements: List<Statement>,
+        parent: String,
+        parentParent: String,
+        contents: String
+    ) {
+        for (statement in statements) {
+            if (statement is ExpressionStatement) {
+                walkExpression(context, detectors, statement.expression, parent, parentParent, contents)
+            }
+        }
+    }
+
+    private fun walkExpression(
+        context: GradleContext,
+        detectors: List<GradleScanner>,
+        expr: Expression,
+        parent: String,
+        parentParent: String,
+        contents: String
+    ) {
+        when (expr) {
+            is MethodCallExpression -> {
+                val methodName = expr.methodAsString
+                    ?: (expr.method as? ConstantExpression)?.value?.toString()
+                    ?: ""
+                val namedArgs = LinkedHashMap<String, String>()
+                val unnamedArgs = ArrayList<String>()
+
+                val rawArgs = expr.arguments
+                if (rawArgs is ArgumentListExpression) {
+                    for (arg in rawArgs.expressions) {
+                        if (arg is NamedArgumentListExpression) {
+                            for (entry in arg.mapEntryExpressions) {
+                                namedArgs[entry.keyExpression.text] = sourceText(contents, entry.valueExpression)
+                            }
+                        } else if (arg is MapEntryExpression) {
+                            namedArgs[arg.keyExpression.text] = sourceText(contents, arg.valueExpression)
+                        } else if (arg !is ClosureExpression) {
+                            unnamedArgs.add(sourceText(contents, arg))
+                        }
+                    }
+                } else if (rawArgs is TupleExpression) {
+                    for (arg in rawArgs.expressions) {
+                        if (arg !is ClosureExpression) {
+                            unnamedArgs.add(sourceText(contents, arg))
+                        }
+                    }
+                }
+
+                for (detector in detectors) {
+                    // The current overload delegates to legacy detectors exactly once.
+                    detector.checkMethodCall(context, methodName, parent, parentParent, namedArgs, unnamedArgs, expr)
+                }
+
+                val closure = (rawArgs as? ArgumentListExpression)?.expressions?.filterIsInstance<ClosureExpression>()
+                    ?.firstOrNull()
+                    ?: (rawArgs as? TupleExpression)?.expressions?.filterIsInstance<ClosureExpression>()?.firstOrNull()
+                if (closure != null && closure.code is BlockStatement) {
+                    walkStatements(
+                        context,
+                        detectors,
+                        (closure.code as BlockStatement).statements,
+                        methodName,
+                        parent,
+                        contents
+                    )
+                }
+            }
+
+            is BinaryExpression -> {
+                val prop = expr.leftExpression.text
+                val value = sourceText(contents, expr.rightExpression)
+                for (detector in detectors) {
+                    // Real AST cookies preserve independent property and value locations.
+                    detector.checkDslPropertyAssignment(
+                        context,
+                        prop,
+                        value,
+                        parent,
+                        parentParent,
+                        expr.leftExpression,
+                        expr.rightExpression,
+                        expr
+                    )
+                }
+            }
+
+            is MapEntryExpression -> {
+                val prop = expr.keyExpression.text
+                val value = sourceText(contents, expr.valueExpression)
+                for (detector in detectors) {
+                    detector.checkDslPropertyAssignment(
+                        context,
+                        prop,
+                        value,
+                        parent,
+                        parentParent,
+                        expr.keyExpression,
+                        expr.valueExpression,
+                        expr
+                    )
+                }
+            }
+        }
+    }
+
+    private fun sourceText(contents: String, expression: Expression): String {
+        val start = offsetOf(contents, expression.lineNumber, expression.columnNumber)
+        val end = offsetOf(contents, expression.lastLineNumber, expression.lastColumnNumber)
+        return contents.substring(start, end)
+    }
+
+    override fun createLocation(context: GradleContext, cookie: Any): Location {
+        if (cookie is ASTNode && cookie.lineNumber > 0) {
+            val contents = client.readFile(context.file)
+            val line = (cookie.lineNumber - 1).coerceAtLeast(0)
+            val col = (cookie.columnNumber - 1).coerceAtLeast(0)
+            val endLine = (cookie.lastLineNumber - 1).coerceAtLeast(line)
+            val endCol = (cookie.lastColumnNumber - 1).coerceAtLeast(col)
+            val startOffset = offsetOf(contents, cookie.lineNumber, cookie.columnNumber)
+            val endOffset = offsetOf(contents, cookie.lastLineNumber, cookie.lastColumnNumber)
+            return Location.create(
+                context.file,
+                DefaultPosition(line, col, startOffset),
+                DefaultPosition(endLine, endCol, endOffset)
+            )
+        }
+        return Location.create(context.file)
+    }
+
+    override fun getStartOffset(context: GradleContext, cookie: Any): Int {
+        val loc = createLocation(context, cookie)
+        return loc.start?.offset ?: -1
+    }
+
+    private fun offsetOf(contents: CharSequence, line1: Int, col1: Int): Int {
+        if (line1 <= 0) return 0
+        var curLine = 1
+        for (i in 0 until contents.length) {
+            if (curLine == line1) {
+                return (i + (col1 - 1)).coerceIn(0, contents.length)
+            }
+            if (contents[i] == '\n') curLine++
+        }
+        return contents.length
     }
 }

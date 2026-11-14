@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage", "UsagesOfObsoleteApi")
+
 package org.jetbrains.android.lint
 
 import com.android.resources.ResourceFolderType

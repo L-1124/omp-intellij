@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.lint
 
 import com.android.tools.lint.checks.ApiDetector
@@ -523,8 +525,8 @@ class AndroidLintConfigurationTest {
             21,
             34,
             "com.example.test",
-            false,
-            false,
+            isLibrary = false,
+            minSdkPremiseMissing = false,
             buildModule,
             null,
             emptyList(),

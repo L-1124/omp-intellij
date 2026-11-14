@@ -84,7 +84,11 @@ object AndroidLintModelResolver {
         val minSdkPremiseMissing: Boolean,
         val minSdkUnsafe: Boolean,
         val targetSdkUnsafe: Boolean,
-        val compileSdkUnsafe: Boolean
+        val compileSdkUnsafe: Boolean,
+        val coreLibraryDesugaringEnabled: Boolean? = null,
+        val desugaredMethodsFiles: List<Path> = emptyList(),
+        val resValues: Map<String, String> = emptyMap(),
+        val proguardFiles: List<Path> = emptyList()
     )
 
     @JvmStatic
@@ -136,6 +140,24 @@ object AndroidLintModelResolver {
                 }
                 module = best
             }
+        }
+        if (module == null) {
+            val candidates = ArrayList<Module>()
+            for (candidate in ModuleManager.getInstance(project).modules) {
+                if (!candidate.isDisposed && isAndroidModule(candidate)) {
+                    candidates.add(candidate)
+                }
+            }
+            candidates.sortWith { a, b ->
+                val aApp = isAppModule(project, a)
+                val bApp = isAppModule(project, b)
+                if (aApp != bApp) {
+                    if (aApp) -1 else 1
+                } else {
+                    a.name.compareTo(b.name)
+                }
+            }
+            module = candidates.firstOrNull()
         }
         if (module == null || module.isDisposed) return null
 
@@ -428,7 +450,6 @@ object AndroidLintModelResolver {
 
             try {
                 loadedModule = LintModelSerialization.readModule(foundModelDir.toFile(), null, true, PathVariables())
-                    ?: throw IOException("Null module read from $foundModelDir")
 
                 if (variant != null) {
                     loadedVariant = loadedModule.findVariant(variant)
@@ -440,12 +461,8 @@ object AndroidLintModelResolver {
                 }
 
                 val loadedVariantName = loadedVariant.name
-                if (loadedVariant.minSdkVersion != null) {
-                    loadedMinSdk = loadedVariant.minSdkVersion?.apiLevel
-                }
-                if (loadedVariant.targetSdkVersion != null) {
-                    loadedTargetSdk = loadedVariant.targetSdkVersion?.apiLevel
-                }
+                loadedMinSdk = loadedVariant.minSdkVersion?.androidApiLevel?.majorVersion
+                loadedTargetSdk = loadedVariant.targetSdkVersion?.androidApiLevel?.majorVersion
                 loadedNamespace = loadedVariant.`package`
                 if (loadedNamespace == null) loadedNamespace = loadedModule.namespace
                 loadedIsLibrary = loadedModule.type == LintModelModuleType.LIBRARY
@@ -455,21 +472,18 @@ object AndroidLintModelResolver {
                     if (m.find()) loadedCompileSdk = m.group(1).toInt()
                 }
 
-                val mainArtifact = loadedVariant.mainArtifact
-                if (mainArtifact?.dependencies != null) {
-                    for (lib in mainArtifact.dependencies.getAll()) {
-                        val lintJarFile = lib.lintJar
-                        if (lintJarFile != null) {
-                            val p = lintJarFile.toPath().toAbsolutePath().normalize()
-                            AndroidSources.observeCompiledArchive(p)
-                            if (Files.isRegularFile(p)) {
-                                loadedRuleJars.add(p)
-                                loadedRuleJarFingerprints.add(
-                                    "$p:${Files.size(p)}:${
-                                        Files.getLastModifiedTime(p).toMillis()
-                                    }"
-                                )
-                            }
+                for (lib in loadedVariant.artifact.dependencies.getAll()) {
+                    val lintJarFile = lib.lintJar
+                    if (lintJarFile != null) {
+                        val p = lintJarFile.toPath().toAbsolutePath().normalize()
+                        AndroidSources.observeCompiledArchive(p)
+                        if (Files.isRegularFile(p)) {
+                            loadedRuleJars.add(p)
+                            loadedRuleJarFingerprints.add(
+                                "$p:${Files.size(p)}:${
+                                    Files.getLastModifiedTime(p).toMillis()
+                                }"
+                            )
                         }
                     }
                 }
@@ -542,8 +556,8 @@ object AndroidLintModelResolver {
                     minSdk = null
                     minSdkPremiseMissing = true
                 }
-                if (targetSdk == null && !ast.targetSdkUnsafe) targetSdk = ast.targetSdk
-                if (namespace == null) namespace = ast.namespace
+                if (!ast.targetSdkUnsafe) targetSdk = ast.targetSdk
+                namespace = ast.namespace
                 if (ast.isLibrary != null) isLibrary = ast.isLibrary
             }
 
@@ -673,6 +687,27 @@ object AndroidLintModelResolver {
 
         val combinedFingerprint = "$fingerprint:${xmlInputs.fingerprint}"
 
+        val coreLibraryDesugaringEnabled: Boolean
+        val desugaredMethodsFiles: List<Path>
+        val resValues: Map<String, String>
+        val proguardFiles: List<Path>
+        if (lintModelVariant != null) {
+            coreLibraryDesugaringEnabled = lintModelVariant.buildFeatures.coreLibraryDesugaringEnabled
+            desugaredMethodsFiles = lintModelVariant.desugaredMethodsFiles.map { it.toPath() }
+            resValues = lintModelVariant.resValues.mapValues { it.value.value }
+            proguardFiles = lintModelVariant.proguardFiles.map { it.toPath() }
+        } else if (ast != null) {
+            coreLibraryDesugaringEnabled = ast.coreLibraryDesugaringEnabled ?: false
+            desugaredMethodsFiles = ast.desugaredMethodsFiles
+            resValues = ast.resValues
+            proguardFiles = ast.proguardFiles
+        } else {
+            coreLibraryDesugaringEnabled = false
+            desugaredMethodsFiles = emptyList()
+            resValues = emptyMap()
+            proguardFiles = emptyList()
+        }
+
         return AndroidLintModel(
             module,
             androidModule,
@@ -693,14 +728,22 @@ object AndroidLintModelResolver {
             ruleJarFingerprints,
             combinedFingerprint,
             lintXmlFingerprint,
-            xmlInputs
+            xmlInputs,
+            coreLibraryDesugaringEnabled,
+            desugaredMethodsFiles,
+            resValues,
+            proguardFiles
         )
     }
 
     @JvmStatic
     fun parseCleanAst(ktFile: KtFile?): CleanAstResult {
         if (ktFile == null) {
-            return CleanAstResult(null, null, null, null, null, null, true, true, true, true)
+            return CleanAstResult(
+                null, null, null, null, null, null,
+                minSdkPremiseMissing = true, minSdkUnsafe = true,
+                targetSdkUnsafe = true, compileSdkUnsafe = true
+            )
         }
 
         val isApp = detectAppPlugin(ktFile)
@@ -715,11 +758,58 @@ object AndroidLintModelResolver {
         }
 
         if (androidBlocks.isEmpty()) {
-            return CleanAstResult(null, null, null, null, null, isLibrary, true, false, false, false)
+            return CleanAstResult(
+                null, null, null, null, null, isLibrary,
+                minSdkPremiseMissing = true, minSdkUnsafe = false,
+                targetSdkUnsafe = false, compileSdkUnsafe = false
+            )
         }
 
         var hasProductFlavors = false
         var buildTypesOverridesMinSdk = false
+        var coreLibraryDesugaringEnabled: Boolean? = null
+        val resValues = LinkedHashMap<String, String>()
+        val proguardFiles = ArrayList<Path>()
+        val moduleDir = ktFile.virtualFile?.parent?.let {
+            try {
+                Path.of(it.path).toAbsolutePath().normalize()
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        for (block in androidBlocks) {
+            val body = body(block) ?: continue
+            for (elem in PsiTreeUtil.collectElements(body) { true }) {
+                if (elem is KtBinaryExpression && elem.operationReference.text == "=") {
+                    val left = elem.left?.text ?: ""
+                    if (left == "isCoreLibraryDesugaringEnabled" || left == "coreLibraryDesugaringEnabled") {
+                        if (elem.right?.text == "true") coreLibraryDesugaringEnabled = true
+                    }
+                } else if (elem is KtCallExpression) {
+                    val callName = name(elem)
+                    if (callName == "coreLibraryDesugaring" || callName == "coreLibraryDesugaringEnabled" || callName == "isCoreLibraryDesugaringEnabled") {
+                        val arg = elem.valueArguments.firstOrNull()?.text
+                        if (arg == "true" || arg == null) coreLibraryDesugaringEnabled = true
+                    } else if (callName == "resValue") {
+                        val args = elem.valueArguments
+                        if (args.size >= 3) {
+                            val key = args[1].text.trim('"', '\'')
+                            val value = args[2].text.trim('"', '\'')
+                            resValues[key] = value
+                        }
+                    } else if (callName == "proguardFiles") {
+                        for (arg in elem.valueArguments) {
+                            val text = arg.text.trim('"', '\'')
+                            if (!text.startsWith("getDefaultProguardFile") && !text.contains("(")) {
+                                val p = moduleDir?.resolve(text)?.normalize() ?: Path.of(text)
+                                if (!proguardFiles.contains(p)) proguardFiles.add(p)
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         for (block in androidBlocks) {
             val body = body(block) ?: continue
@@ -948,14 +1038,22 @@ object AndroidLintModelResolver {
             minSdkPremiseMissing,
             minSdkUnsafe,
             targetSdkDynamic,
-            compileSdkDynamic
+            compileSdkDynamic,
+            coreLibraryDesugaringEnabled,
+            emptyList(),
+            resValues,
+            proguardFiles
         )
     }
 
     @JvmStatic
     fun parseCleanAst(moduleNode: ModuleNode?): CleanAstResult {
         val statementBlock = moduleNode?.statementBlock
-            ?: return CleanAstResult(null, null, null, null, null, null, true, true, true, true)
+            ?: return CleanAstResult(
+                null, null, null, null, null, null,
+                minSdkPremiseMissing = true, minSdkUnsafe = true,
+                targetSdkUnsafe = true, compileSdkUnsafe = true
+            )
 
         val isApp = detectGroovyAppPlugin(moduleNode)
         val isLibrary = isApp?.not()
@@ -971,11 +1069,65 @@ object AndroidLintModelResolver {
         }
 
         if (androidBlocks.isEmpty()) {
-            return CleanAstResult(null, null, null, null, null, isLibrary, true, false, false, false)
+            return CleanAstResult(
+                null, null, null, null, null, isLibrary,
+                minSdkPremiseMissing = true, minSdkUnsafe = false,
+                targetSdkUnsafe = false, compileSdkUnsafe = false
+            )
         }
 
         var hasProductFlavors = false
         var buildTypesOverridesMinSdk = false
+        var coreLibraryDesugaringEnabled: Boolean? = null
+        val resValues = LinkedHashMap<String, String>()
+        val proguardFiles = ArrayList<Path>()
+
+        for (block in androidBlocks) {
+            val ce = getGroovyClosure(block) ?: continue
+            val body = ce.code as? BlockStatement ?: continue
+            body.visit(object : org.codehaus.groovy.ast.CodeVisitorSupport() {
+                override fun visitMethodCallExpression(call: MethodCallExpression) {
+                    val mName = call.methodAsString
+                    if (mName == "coreLibraryDesugaringEnabled" || mName == "isCoreLibraryDesugaringEnabled") {
+                        val args = (call.arguments as? TupleExpression)?.expressions
+                            ?: (call.arguments as? ArgumentListExpression)?.expressions
+                        val first = args?.firstOrNull()?.text
+                        if (first == "true") coreLibraryDesugaringEnabled = true
+                    } else if (mName == "resValue") {
+                        val args = (call.arguments as? TupleExpression)?.expressions
+                            ?: (call.arguments as? ArgumentListExpression)?.expressions
+                        if (args != null && args.size >= 3) {
+                            val key = args[1].text.trim('"', '\'')
+                            val value = args[2].text.trim('"', '\'')
+                            resValues[key] = value
+                        }
+                    } else if (mName == "proguardFiles") {
+                        val args = (call.arguments as? TupleExpression)?.expressions
+                            ?: (call.arguments as? ArgumentListExpression)?.expressions
+                        if (args != null) {
+                            for (arg in args) {
+                                val text = arg.text.trim('"', '\'')
+                                if (!text.contains("getDefaultProguardFile")) {
+                                    val p = Path.of(text)
+                                    if (!proguardFiles.contains(p)) proguardFiles.add(p)
+                                }
+                            }
+                        }
+                    }
+                    super.visitMethodCallExpression(call)
+                }
+
+                override fun visitBinaryExpression(expression: BinaryExpression) {
+                    if (expression.operation.text == "=") {
+                        val left = expression.leftExpression.text
+                        if (left == "coreLibraryDesugaringEnabled" || left == "isCoreLibraryDesugaringEnabled") {
+                            if (expression.rightExpression.text == "true") coreLibraryDesugaringEnabled = true
+                        }
+                    }
+                    super.visitBinaryExpression(expression)
+                }
+            })
+        }
 
         for (block in androidBlocks) {
             val ce = getGroovyClosure(block) ?: continue
@@ -1167,7 +1319,11 @@ object AndroidLintModelResolver {
             minSdkPremiseMissing,
             minSdkUnsafe,
             targetSdkDynamic,
-            compileSdkDynamic
+            compileSdkDynamic,
+            coreLibraryDesugaringEnabled,
+            emptyList(),
+            resValues,
+            proguardFiles
         )
     }
 

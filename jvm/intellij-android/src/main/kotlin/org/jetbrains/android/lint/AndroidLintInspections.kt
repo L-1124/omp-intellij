@@ -76,16 +76,16 @@ internal class AndroidLintInspections {
                 val snapshots = ArrayList<AndroidSources.Scope>()
                 snapshots.add(baseline.snapshot)
                 val models = LinkedHashMap<ModelIdentity, ModelInput>()
-                for (probe in baseline.probes) {
+                for ((module1, roots) in baseline.probes) {
                     requestContext.ensureActive()
                     readAction {
                         ProgressManager.checkCanceled()
-                        if (probe.module.isDisposed) modified()
+                        if (module1.isDisposed) modified()
                         AndroidSources.Scope(server, null, openVersions).use { sources ->
                             sources.useSavedModelInputs()
-                            for (root in probe.roots) {
+                            for (root in roots) {
                                 ProgressManager.checkCanceled()
-                                val model = AndroidLintModelResolver.resolve(project, root, probe.module) ?: continue
+                                val model = AndroidLintModelResolver.resolve(project, root, module1) ?: continue
                                 val module = model.module ?: continue
                                 val identity = ModelIdentity(
                                     model.moduleRoot?.toUri()?.toString() ?: root.url,

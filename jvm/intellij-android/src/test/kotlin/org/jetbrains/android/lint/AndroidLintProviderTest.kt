@@ -1,3 +1,5 @@
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.lint
 
 import com.android.resources.ResourceFolderType
@@ -10,6 +12,8 @@ import com.android.tools.lint.detector.api.Category
 import com.android.tools.lint.detector.api.Detector
 import com.android.tools.lint.detector.api.Implementation
 import com.android.tools.lint.detector.api.Incident
+import com.android.tools.lint.detector.api.GradleContext
+import com.android.tools.lint.detector.api.GradleScanner
 import com.android.tools.lint.detector.api.Issue
 import com.android.tools.lint.detector.api.Location
 import com.android.tools.lint.detector.api.Scope
@@ -24,7 +28,10 @@ import com.intellij.lang.xml.XMLParserDefinition
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.fileTypes.PlainTextFileType
 import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiFile
+import com.intellij.psi.impl.source.PsiPlainTextFileImpl
 import com.intellij.psi.SingleRootFileViewProvider
 import com.intellij.psi.xml.XmlFile
 import com.intellij.testFramework.LightVirtualFile
@@ -469,6 +476,128 @@ class AndroidLintProviderTest {
             }
         } finally {
             deleteRecursively(tempDir)
+        }
+    }
+
+    @Test
+    fun groovyGradleReportsOctalAssignmentsAtTheirSourceRange() {
+        val tempDir = Files.createTempDirectory("lint_groovy_octal")
+        try {
+            val (model) = prepareXmlProject(tempDir, emptyList())
+            val text = "android {\n    defaultConfig {\n        minSdkVersion = 0777\n    }\n}"
+            val path = model.moduleRoot!!.resolve("build.gradle")
+            Files.writeString(path, text)
+            AndroidSources.Scope(null, null).use {
+                val client = AndroidLintClient(
+                    model, createGradleFile(path, text), text, Scope.GRADLE_FILE, setOf("AccidentalOctal")
+                )
+                val incidents = client.analyze()
+                assertTrue(client.isAnalysisComplete())
+                assertEquals(listOf("AccidentalOctal"), incidents.map { it.issue.id })
+                val location = incidents.single().location
+                assertEquals(path.toFile(), location.file)
+                assertEquals(2, location.start!!.line)
+                assertEquals(
+                    "0777",
+                    text.substring(location.start!!.offset, location.end!!.offset)
+                )
+            }
+        } finally {
+            deleteRecursively(tempDir)
+        }
+    }
+
+    @Test
+    fun groovyGradleLegacyDetectorReportsEachMethodOnce() {
+        val tempDir = Files.createTempDirectory("lint_groovy_legacy")
+        try {
+            LegacyGradleRegistry.calls.set(0)
+            val jar = writeLintRegistryJar(tempDir.resolve("lint.jar"), LegacyGradleRegistry::class.java.name)
+            val (model) = prepareXmlProject(tempDir, listOf(jar))
+            val text =
+                "dependencies {\n    legacyDependency 'example:library:1'\n}\nandroid { defaultConfig { versionCode = 7 } }"
+            val path = model.moduleRoot!!.resolve("build.gradle")
+            Files.writeString(path, text)
+            AndroidSources.Scope(null, null).use {
+                val client = AndroidLintClient(
+                    model, createGradleFile(path, text), text, Scope.GRADLE_FILE,
+                    setOf(LegacyGradleRegistry.ISSUE.id)
+                )
+                val incidents = client.analyze()
+                assertTrue(client.isAnalysisComplete())
+                assertEquals(1, LegacyGradleRegistry.calls.get())
+                assertEquals(
+                    listOf(LegacyGradleRegistry.ISSUE.id, LegacyGradleRegistry.ISSUE.id),
+                    incidents.map { it.issue.id }
+                )
+                assertEquals(
+                    listOf("legacyDependency 'example:library:1'", "versionCode"),
+                    incidents.map { text.substring(it.location.start!!.offset, it.location.end!!.offset) }
+                )
+            }
+        } finally {
+            deleteRecursively(tempDir)
+        }
+    }
+
+    private fun createGradleFile(path: Path, content: String): PsiFile {
+        val env = environment ?: error("Environment not initialized")
+        val virtualFile = object : LightVirtualFile(path.fileName.toString(), PlainTextFileType.INSTANCE, content) {
+            override fun getPath(): String = path.toString()
+            override fun toNioPath(): Path = path
+        }
+        val provider = SingleRootFileViewProvider(
+            PsiManager.getInstance(env.project), virtualFile, true, PlainTextFileType.INSTANCE
+        )
+        return PsiPlainTextFileImpl(provider)
+    }
+
+    class LegacyGradleDetector : Detector(), GradleScanner {
+        override fun checkMethodCall(
+            context: GradleContext,
+            statement: String,
+            parent: String?,
+            namedArguments: Map<String, String>,
+            unnamedArguments: List<String>,
+            cookie: Any
+        ) {
+            if (statement != "legacyDependency") return
+            LegacyGradleRegistry.calls.incrementAndGet()
+            context.report(Incident(LegacyGradleRegistry.ISSUE, "Legacy dependency", context.getLocation(cookie)))
+        }
+
+        override fun checkDslPropertyAssignment(
+            context: GradleContext,
+            property: String,
+            value: String,
+            parent: String,
+            parentParent: String?,
+            propertyCookie: Any,
+            valueCookie: Any,
+            statementCookie: Any
+        ) {
+            if (property != "versionCode") return
+            context.report(
+                Incident(
+                    LegacyGradleRegistry.ISSUE,
+                    "Version property",
+                    context.getLocation(propertyCookie)
+                )
+            )
+        }
+    }
+
+    class LegacyGradleRegistry : IssueRegistry() {
+        override val api: Int = CURRENT_API
+        override val issues: List<Issue> = listOf(ISSUE)
+
+        companion object {
+            val calls = AtomicInteger()
+            val ISSUE = Issue.create(
+                "LegacyGradleDependency", "Legacy dependency", "Use the supported dependency declaration.",
+                Category.CORRECTNESS, 5, Severity.WARNING,
+                Implementation(LegacyGradleDetector::class.java, Scope.GRADLE_SCOPE)
+            )
         }
     }
 

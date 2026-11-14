@@ -13,6 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+@file:Suppress("UnstableApiUsage")
+
 package org.jetbrains.android.lint
 
 import com.android.ide.common.rendering.api.ResourceNamespace
@@ -535,7 +538,7 @@ class AndroidLintXmlParserTest {
         // 1. Value-based resource item
         val valueItem: ResourceItem = AndroidLintResources.LintResourceItem(
             "app_title", ResourceType.STRING, ResourceNamespace.RES_AUTO, null,
-            FolderConfiguration.createDefault(), null, PathString(valuesFile), false, true
+            FolderConfiguration.createDefault(), null, PathString(valuesFile), fileBased = false, isPublic = true
         )
 
         val wholeLoc = parser.getLocation(client, valueItem)
@@ -556,7 +559,7 @@ class AndroidLintXmlParserTest {
         // 2. File-based resource item
         val fileItem: ResourceItem = AndroidLintResources.LintResourceItem(
             "main", ResourceType.LAYOUT, ResourceNamespace.RES_AUTO, null,
-            FolderConfiguration.createDefault(), null, PathString(layoutFile), true, true
+            FolderConfiguration.createDefault(), null, PathString(layoutFile), fileBased = true, isPublic = true
         )
 
         val layoutLoc = parser.getLocation(client, fileItem)

@@ -146,11 +146,11 @@ class AndroidDomPsiConverter private constructor() {
                 if (node.nodeType == Node.ELEMENT_NODE) {
                     val tag = node.nodeName
                     val start = range.startOffset + 1
-                    return TextRange(start, start + (tag?.length ?: 0))
+                    return TextRange(start, start + tag.length)
                 } else if (node.nodeType == Node.ATTRIBUTE_NODE) {
                     val name = node.nodeName
                     val start = range.startOffset
-                    return TextRange(start, start + (name?.length ?: 0))
+                    return TextRange(start, start + name.length)
                 }
                 return range
             }
@@ -635,7 +635,7 @@ class AndroidDomPsiConverter private constructor() {
                 val vf = myFile.virtualFile
                 return if (vf != null) VfsUtilCore.virtualToIoFile(vf) else null
             }
-            if (PositionXmlParser.CONTENT_KEY == key || "contents" == key) {
+            if (PositionXmlParser.CONTENT_KEY == key) {
                 return readAction { myFile.text }
             }
             return null
