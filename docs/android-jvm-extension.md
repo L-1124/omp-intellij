@@ -11,17 +11,17 @@
 
 `org.jetbrains.android` 根包仅保留 SPI 入口 `AndroidExtension`，其余实现按职责分包：
 
-| 子包         | 职责                                          |
-| ------------ | --------------------------------------------- |
-| `context`    | 模块环境、文件角色、请求上下文与查询异常      |
-| `xml`        | XML 属性解析与文档大纲                        |
-| `navigation` | 定义、引用、Manifest 目标与资源直达导航       |
-| `resource`   | 资源解析、源集目录、布局与源码读取            |
-| `compose`    | Compose 命名检查抑制                          |
-| `lint`       | 官方源码级 Lint、模块模型、依赖规则与诊断缓存 |
+| 子包         | 职责                                                    |
+| ------------ | ------------------------------------------------------- |
+| `context`    | 模块环境、文件角色、请求上下文与查询异常                |
+| `xml`        | XML 属性解析与文档大纲                                  |
+| `navigation` | 定义、引用、Manifest 目标与资源直达导航                 |
+| `resource`   | 资源解析、源集目录、布局与源码读取                      |
+| `compose`    | Compose 命名检查抑制                                    |
+| `lint`       | 官方源码级 Lint、模块模型、依赖规则与诊断缓存           |
 | `debug`      | 核心 JDWP 资源、监听器与字段过滤；可选模块中的 DAP 会话 |
-| `dap`        | 可选 Run/DAP SPI 入口 |
-| `run`        | 参数、AGP 模型、产物、安装与应用所有权 |
+| `dap`        | 可选 Run/DAP SPI 入口                                   |
+| `run`        | 参数、AGP 模型、产物、安装与应用所有权                  |
 
 类和成员按调用边界使用 `public`、`internal` 或 `private`，不依赖 Java 的包级可见性。核心 SPI 为 `org.jetbrains.android.AndroidExtension`，可选 Run/DAP SPI 为 `org.jetbrains.android.dap.AndroidDapExtension`，各自发布自己的服务声明。
 
@@ -178,8 +178,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 | ----------------- | ------------------------------------------------------------------------ |
 | 插件描述符        | `lib/language-server-plugins-android-lsp.jar`                            |
 | 实现模块          | `lib/modules/language-server.api.features.impl.android.jar`              |
-| 可选 Run/DAP 模块 | `lib/modules/language-server.api.features.impl.android.dap.jar` |
-| AGP 模型 | `builder-model-9.4.1.jar` |
+| 可选 Run/DAP 模块 | `lib/modules/language-server.api.features.impl.android.dap.jar`          |
+| AGP 模型          | `builder-model-9.4.1.jar`                                                |
 | ADB               | `adblib-9.4.1.jar`、`adblib-tools-9.4.1.jar`                             |
 | Lint              | `lint-api-32.4.1.jar`、`lint-checks-32.4.1.jar`、`lint-model-32.4.1.jar` |
 | Manifest 来源映射 | `manifest-merger-32.4.1.jar`                                             |
@@ -207,6 +207,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 - `AndroidRequests.diagnosticQuery` 在分析前记录打开文档版本，在挂起读操作内读取快照；发布前重新进入分析上下文，逐字符核对当前未保存内容，并复核版本与关联磁盘输入。缓存只在复核通过后写入。过期返回 `-32801`，取消传播为 `-32800`。
 - `AndroidLintModelResolver` 先读取当前变体的官方 LintModel XML，再回退到 Gradle 脚本字面量与主 Manifest：优先 `build.gradle.kts` 的 Kotlin PSI，不存在时读取 `build.gradle` 的 Groovy AST。动态 `minSdk`、flavor 或 buildType 覆盖保持前提缺失，不虚构 `minSdk=1`；此时只跳过 `ApiDetector`，其余规则继续运行。
+- 模块根优先从内容根定位构建脚本；无内容根时从当前 `WorkspaceModel` 的模块实体读取 `exModuleOptions.linkedProjectPath`。该路径保留真实导入信息，核心查询不依赖可选的外部系统 IDE 工厂服务。
 - `AndroidLintIssueRegistry` 按官方 `Implementation.isAdequate` 选择单文件规则，并保留 `NewApi`。`AndroidLintClient` 将编辑器 PSI 转换为 UAST，使用真实模块解析作用域与语言级别；资源查询按当前变体和仓库范围解析，仍不等同于 Gradle 全项目 Lint。
 - AAR 规则跟随当前模块已导入依赖：发现同级 `jars/lint.jar`，按内容摘要复制到缓存后加载。不设 Maven 前缀白名单，不扫描全局规则目录，不联网获取规则。加载失败跳过单个 JAR；复合执行故障时按 Registry 隔离重试，每次使用独立的 Lint 项目状态，失败批次不进入结果。
 - Lint 32.4.1 会吞下 Detector 异常，累计崩溃超过 20 次后连 `client.log` 也会跳过。客户端在官方 `runReadAction` 回调入口记录本次运行的异常，并在 `analyze` 返回后复核，确保日志限流后仍触发 Registry 隔离；取消直接传播，不读写全局崩溃计数。
@@ -247,6 +248,28 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 - 资源、关联 Gradle 脚本及配置读取保存态；指纹覆盖依赖文件内容、中间层 `lint.xml`，以及合并清单/merger 日志的存在性、内容和时间戳。生成合并产物后，即使主文档未改动，也会重新运行检查。
 - 资源字符串解码复用 `ValueXmlHelper.unescapeResourceString`，attr 格式与 enum/flag 元数据复用 `AttributeFormat`；资源引用复用 `ResourceUrl.parse` 和官方名称校验。只将无 namespace 的模块自有 `@+id` 收入声明表，避免 `@+android:id` 污染 framework 或模块资源。
 
+### 9. 原生批量检查与规则目录
+
+`AndroidLintProvider` 同时实现 `LSDiagnosticProvider` 和 `LSBatchInspectionProvider`，通过原生 `intellij/inspections` 和 `intellij/inspectCode` 暴露规则与逐文件检查。批量入口复用单文件的模型、诊断映射和发布前快照复核；结果流与 `partialResultToken` 由原生 SDK 编排。检查范围仍是请求中的单文件集合。
+
+- 目录使用 `AndroidLint.<IssueId>` 作为主 ID，保留原始 Issue ID 短别名。完整主 ID 精确选择 Android Lint 规则；短别名允许与其他原生 Provider 同名。诊断中的 `code` 保持原始 Issue ID。
+- `null` 选择全部适用规则，空集合产生适用但无诊断的结果。非空选择先裁剪 Registry，再通过请求级官方 Configuration override 关闭未选 Issue；同一 Detector 的其他 Issue 也受此门控。已选规则继续遵循项目、Gradle、子目录及文件级配置和抑制。
+- 规则目录通过官方 nullable-driver JAR 装载路径枚举，复用同一模型的 Java、资源 XML 和 Manifest 规则装载结果；枚举不创建分析 Driver，也不执行 Detector。AAR 故障保持单 JAR 隔离，部分目录可返回但不写缓存。
+- 跨模型目录按模块根、变体及模块名稳定合并，同一主 ID 合并语言集合，元数据采用最后一个模型的代表规则。条目保留官方描述、类别、默认严重级别和默认启用状态。
+- 诊断缓存键包含去重排序后的规则选择，区分全部、子集和空集合。目录使用独立有界缓存，仅保存不可变模型指纹与规则元数据；发布和命中均复核项目根、模块身份及关联输入。取消或输入变化传播原生错误，未完成结果不写缓存。
+
+### 10. XML 相关测试候选
+
+XML 专用 `AndroidXmlRelatedTestsProvider` 接入原生 `intellij/relatedTests`，复用官方 `TestFinderHelper` 返回候选测试位置。Java/Kotlin 保持宿主已有 Provider；查询仅发现关联，不执行测试。
+
+请求使用宿主当前文件树中的 XML。SDK 271 对未导入的 `res/` 文件要求先按标准 LSP 生命周期 `didOpen` 并等待分析水位；查询后可 `didClose`。Provider 不自动打开文件、不构造替代 VirtualFile，也不扩展宿主资源索引。
+
+- Manifest 仅解析组件类属性值及 alias 的 `targetActivity`，复用导航的类名解析与模块归属。属性外位置、合法但未解析的类返回空候选。
+- Layout/Menu 先确认所属模块、已编译 `R` 字段及 AGP 资源来源，再处理根节点 `tools:context`。有效 context 独占候选选择，即使没有关联测试也保留空结果；缺失或无法解析 context 时才搜索资源字段引用。
+- 引用搜索限制在资源所属模块。最近调用名为 `setContentView` 或 `inflate`，且最近宿主类属于 Activity、平台/support/AndroidX Fragment 或 Adapter 时，交给原生 TestFinder；Java 与 Kotlin 共用这条官方候选启发式。
+- 同一 URI 与 Range 只返回一次。缺失编译 R 或未引用资源可返回空结果；来源不完整、过期、歧义和分析模型错误保留原生失败。发布前复核 XML 文档、访问过的源码/测试文档及关联磁盘输入，取消与快照变化传播错误。
+- 核心实现显式依赖 TestFinder、Kotlin PSI 和 light-class 公共模块；可选 DAP 与 Kotlin 语言服务 feature 保持独立装载边界。
+
 ---
 
 ## 最佳实践与操作指引
@@ -284,6 +307,14 @@ cd jvm/intellij-android
 集成测试同时隔离原生索引：共享 LSP 测试驱动默认将 `initialize.initializationOptions.indexDir` 设置为沙箱的 `index/<project-id>/`，保留显式初始化选项；CLI/DAP 创建的会话从沙箱工程配置中读取相同的 `rawInitializationOptions`。不同工程使用独立索引目录，索引随沙箱统一回收。仅设置服务端 `systemPath` 不会改变原生索引位置。Gradle 分发包与依赖缓存从已有缓存复制到沙箱，排除锁与未完成下载；构建、导入和清理始终使用沙箱拥有的 Gradle User Home。
 
 沙箱统一将现有 `OMP_ANDROID_LS_EXTENSION_DIR` 指向本仓库当前暂存的扩展资产，同时覆盖进程内模型查询与 Bridge/DAP 子进程，避免 `dist-test/src` 的相对路径误用 `dist-test/resources`。
+
+精简装载门禁先在独占沙箱中完成真实 AGP 构建与原生导入，按 `shutdown`、`exit`、关闭 Bridge 的顺序释放客户端，再停止该沙箱的 ILS 并保留导入结果。随后使用官方 JBR 启动参数、公开 Analyzer 测试模式及 `workspaceManager`/`session` 生命周期运行精简宿主，排除可选 DAP 和 Kotlin feature，调用核心批量检查与 XML relatedTests。基础 Java/Kotlin PSI 保留，测试进程的完整 classpath 不作为插件可见性证明。
+
+测试启动器先通过 SDK 的公开 `pluginSet` 工厂组装原始描述符的源集合并配置真实 classloader，再安装 `originalDescriptorSupplierForMakePlugin`，最后首次初始化原生 Java/Kotlin/XML Analyzer 描述符与最终分析集合。该顺序避免静态初始化提前固化空来源及类路径；源集合只提供描述符与 loader，不注册其扩展。最终集合保留来源 loader，调用方独立装入隔离 JAR，并校验 core 为 ENABLED、DAP/Kotlin feature 缺席、XML PSI 类可解析。启动器还通过 SDK 公开入口加载安装目录内的 FileWatcher JNI 库，并使用沙箱日志保留原生初始化失败原因。
+
+该测试保留真实 `JUnit` 描述符，为原生 `TestFinderHelper` 提供测试框架识别；只有 Java/Kotlin finder 而缺少框架时，源码与测试 PSI 均可解析，但测试类不会被识别。它不启用依赖 Kotlin feature 的 JVM testing feature，也不替换 finder 或注册模拟框架。Windows 目标 URI 经标准文件路径归一化后比较，保留真实 URI 编码与大小写差异。
+
+原生索引版本取决于已注册的索引扩展；精简集合不能直接复用完整宿主的 RocksDB 索引。启动器只通过公开 `Workspace.readWorkspaceModelCache` 读取真实持久化实体，再用原生反序列化、去重合并及工作区更新 API 导入独立精简索引。源库不创建、不清理版本；不改索引版本号、不复制不兼容的索引数据，所有最终插件集合均保持精简。
 
 ### 3. 反编译器选型横评与技术适用边界
 
