@@ -836,40 +836,38 @@ async function ensureApkBuilt(
   }
 
   const started = performance.now();
-  console.error(`[integration ${sandbox.sandboxDir}] apk-build (native DAP gradle launch): start`);
-  const native = await startNativeClient(targetDir, sandbox);
-  let dap: NativePeer | undefined;
+  console.error(`[integration ${sandbox.sandboxDir}] apk-build (Gradle assembleDebug): start`);
   try {
-    const launched = await launchNativeAndroidDap(native, {
-      clientID: 'native-android-apk-producer',
-      noDebug: true,
-      android: {
-        deviceId,
-        target: { kind: 'gradle', module: ':app', variant: 'debug', build: true },
-        restartApp: true,
-      },
-    });
-    dap = launched.dap;
-    const discResp = await dap.request('disconnect', { terminateDebuggee: true });
-    assert.equal(discResp.success, true, JSON.stringify(discResp));
-    await dap.waitFor(
-      (message) => message.type === 'event' && message.event === 'terminated',
+    const java = join(
+      sandbox.prerequisites.jdk21Path,
+      'bin',
+      process.platform === 'win32' ? 'java.exe' : 'java',
+    );
+    const build = spawnSync(
+      java,
+      [
+        '-cp',
+        join(targetDir, 'gradle', 'wrapper', 'gradle-wrapper.jar'),
+        'org.gradle.wrapper.GradleWrapperMain',
+        ':app:assembleDebug',
+        '--offline',
+        '--daemon',
+      ],
+      { cwd: targetDir, env: sandbox.env, encoding: 'utf8', timeout: 180000, windowsHide: true },
+    );
+    assert.equal(
+      build.status,
       0,
-      15000,
+      `Fixture APK build failed: ${build.error ?? ''}\n${build.stdout}\n${build.stderr}`,
     );
     await captureDebugArtifacts(targetDir, sandbox, apkPath);
     console.error(
-      `[integration ${sandbox.sandboxDir}] apk-build (native DAP gradle launch): ok ${Math.round(performance.now() - started)}ms`,
+      `[integration ${sandbox.sandboxDir}] apk-build (Gradle assembleDebug): ok ${Math.round(performance.now() - started)}ms`,
     );
     return apkPath;
   } catch (error) {
     realBuilds.push({ sandboxDir: sandbox.sandboxDir, status: 1 });
-    await reportNativeLogs(native);
     throw error;
-  } finally {
-    if (dap) await closeNativePeerAndWait(dap);
-    await native.close();
-    stopFixture(deviceId);
   }
 }
 
