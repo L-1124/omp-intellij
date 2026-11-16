@@ -156,6 +156,7 @@ export interface ConnectionRecord extends StateRecord {
   canonicalPath: string | null;
   closed: boolean;
   isAlive?: boolean;
+  workspaceImportOptions?: Record<string, string>;
 }
 
 export interface ProjectStateResult {
@@ -595,6 +596,7 @@ export function createConnectionState(options: {
         progress?: ProgressPayload | null;
         failure?: FailureDetail | null;
         license?: LicenseSummary;
+        workspaceImportOptions?: Record<string, string>;
       } = {},
     ) {
       if (closed) return;
@@ -628,6 +630,8 @@ export function createConnectionState(options: {
         canonicalPath,
         failure,
         license: updateOpts.license !== undefined ? updateOpts.license : currentRecord.license,
+        workspaceImportOptions:
+          updateOpts.workspaceImportOptions ?? currentRecord.workspaceImportOptions,
       };
 
       const snapshot = { ...currentRecord };
@@ -681,6 +685,7 @@ export function createConnectionState(options: {
 export async function readProjectState(
   systemPath: string,
   projectPath?: string,
+  onConnection?: (connection: ConnectionRecord) => void,
 ): Promise<ProjectStateResult> {
   if (!projectPath) {
     const emptyResult: ProjectStateResult = {
@@ -944,6 +949,10 @@ export async function readProjectState(
           matches = true;
         }
       }
+    }
+
+    if (matches || record.workspaceImportOptions?.[targetId] !== undefined) {
+      onConnection?.(record);
     }
 
     if (matches) {

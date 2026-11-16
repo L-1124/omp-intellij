@@ -23,7 +23,7 @@ import {
   recordReadiness,
 } from '../project/metadata.js';
 import { findProjectRoot } from '../project/readiness.js';
-import { applyWorkspaceOptions } from '../project/workspace.js';
+import { applyWorkspaceOptions, workspaceImportOptions } from '../project/workspace.js';
 import { connectWithLease, settings } from '../server/service.js';
 import { encode, frameParser } from '../shared/protocol.js';
 import {
@@ -698,6 +698,12 @@ export async function createLspSession(
       (initParams.initializationOptions as Record<string, unknown>) || {},
       { systemPath, configDir },
     );
+    await connState.update({
+      workspaceImportOptions: workspaceImportOptions(
+        [nativePath, ...(folders?.flatMap((folder) => (folder.uri ? [folder.uri] : [])) ?? [])],
+        initParams.initializationOptions as Record<string, unknown>,
+      ),
+    });
 
     function request(
       method: string,
@@ -780,6 +786,7 @@ export async function createLspSession(
       }
 
       applyState({ method: 'intellij/reloadWorkspace' }, 'client');
+      const deadline = Date.now() + opTimeout;
       const waitPromise = waitForReady(opTimeout, effectiveSignal);
 
       await Promise.all([
@@ -787,9 +794,19 @@ export async function createLspSession(
           'intellij/reloadWorkspace',
           { initializationOptions: reloadOpts.initializationOptions },
           opTimeout,
+          effectiveSignal,
         ),
         waitPromise,
       ]);
+      await request(
+        'workspace/executeCommand',
+        { command: 'wait-for-highwatermark', arguments: [] },
+        Math.max(1, deadline - Date.now()),
+        effectiveSignal,
+      );
+      const error = readinessError();
+      if (error) throw error;
+      applyState({ method: 'intellij/ready-for-test' }, 'server');
       await connState.flush();
       return { ready: true };
     }

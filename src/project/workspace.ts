@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -969,6 +969,54 @@ async function knownWorktreeSource(
     console.error('intellij: ignoring invalid source-workspace metadata; using a cold index');
   }
   return undefined;
+}
+
+export function workspaceImportOptions(
+  projectRoots: readonly string[],
+  initializationOptions: Record<string, unknown>,
+): Record<string, string> {
+  const projects = Array.isArray(initializationOptions.projects)
+    ? initializationOptions.projects.filter((project): project is Record<string, unknown> =>
+        Boolean(project && typeof project === 'object' && typeof project.path === 'string'),
+      )
+    : [];
+  const byId = new Map(
+    projects.map((project) => {
+      const canonical = canonicalizeProject(project.path as string);
+      return [canonical.id, { ...project, path: canonical.canonicalPath }] as const;
+    }),
+  );
+  const roots = new Set([
+    ...projectRoots.map((root) => canonicalizeProject(root).id),
+    ...byId.keys(),
+  ]);
+  function ordered(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(ordered);
+    if (value && typeof value === 'object') {
+      const object = value as Record<string, unknown>;
+      return Object.fromEntries(
+        Object.keys(object)
+          .sort()
+          .map((key) => [key, ordered(object[key])]),
+      );
+    }
+    return value;
+  }
+  return Object.fromEntries(
+    [...roots].map((id) => [
+      id,
+      createHash('sha256')
+        .update(
+          JSON.stringify(
+            ordered({
+              project: byId.get(id) ?? null,
+              defaultSdk: initializationOptions.defaultSdk ?? null,
+            }),
+          ),
+        )
+        .digest('hex'),
+    ]),
+  );
 }
 
 export async function applyWorkspaceOptions(

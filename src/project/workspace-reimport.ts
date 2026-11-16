@@ -4,6 +4,7 @@ import { createLspSession, type LspSession, toLspFileUri } from '../debug/run-co
 import { settings } from '../server/service.js';
 import { sanitizeString } from '../shared/runtime-status.js';
 import { getHostInitializationOptions } from './configuration.js';
+import { readProjectState } from './connection-state.js';
 import { canonicalizeProject, recordReadiness } from './metadata.js';
 import { queryNativeBuildTool } from './native-build-tool.js';
 import {
@@ -14,6 +15,7 @@ import {
   maskConfiguredSecrets,
   readWorkspaceConfig,
   registerSystemPath,
+  workspaceImportOptions,
   writeAtomicJson,
 } from './workspace.js';
 
@@ -93,6 +95,26 @@ export async function reimportWorkspace(
   let session: LspSession | null = null;
   try {
     try {
+      const expectedOptions = workspaceImportOptions([nativePath], fullInitOptions)[id];
+      const conflicts: string[] = [];
+      await readProjectState(systemPath, nativePath, (connection) => {
+        if (
+          connection.isAlive &&
+          !connection.closed &&
+          connection.phase !== 'disconnected' &&
+          connection.workspaceImportOptions?.[id] !== expectedOptions
+        ) {
+          conflicts.push(`${connection.kind} ${connection.connectionId} (PID ${connection.pid})`);
+        }
+      });
+      if (conflicts.length > 0) {
+        throw Object.assign(
+          new Error(
+            `Reconnect this project's LSP clients with the saved import configuration, then reload again: ${conflicts.join(', ')}. Shared ILS and debug sessions remain running; finish or detach debugging before reconnecting its owning client.`,
+          ),
+          { code: 'PROJECT_LSP_RECONNECT_REQUIRED' },
+        );
+      }
       session = await createLspSession(nativePath, {
         signal: options.signal,
         requestWaitTimeoutMs: waitTimeout,

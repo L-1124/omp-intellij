@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { createConnectionState } from '../src/project/connection-state.js';
 import {
   canonicalizeProject,
   getProjectLedger,
@@ -27,6 +28,7 @@ import {
   unsetWorkspaceEnvVar,
   validateEnvMap,
   validateJdk,
+  workspaceImportOptions,
 } from '../src/project/workspace.js';
 import { reimportWorkspace } from '../src/project/workspace-reimport.js';
 import { asyncFramedStream, encode } from '../src/shared/protocol.js';
@@ -1159,6 +1161,91 @@ test('workspace operations register systemPath for child process exit cleanup', 
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('import configuration comparison ignores transport options and object key order', () => {
+  const root = join(tmpdir(), 'import-options-project');
+  const { id } = canonicalizeProject(root);
+  const first = workspaceImportOptions([root], {
+    indexDir: 'first-index',
+    projects: [{ path: root, type: 'gradle', env: { FIRST: '1', SECOND: '2' } }],
+  });
+  const second = workspaceImportOptions([root], {
+    runMainCodeLens: true,
+    indexDir: 'second-index',
+    projects: [
+      { env: { SECOND: '2', FIRST: '1' }, type: 'gradle', path: pathToFileURL(root).href },
+    ],
+  });
+  assert.equal(first[id], second[id]);
+});
+
+test('import configuration comparison is project-specific and detects JDK and environment changes', () => {
+  const root = join(tmpdir(), 'import-options-project');
+  const sibling = join(tmpdir(), 'import-options-sibling');
+  const { id } = canonicalizeProject(root);
+  const original = { path: root, type: 'gradle', 'java-home': '/jdk21', env: { TOKEN: 'old' } };
+  const baseline = workspaceImportOptions([root], { projects: [original] })[id];
+  assert.equal(
+    workspaceImportOptions([root], {
+      projects: [original, { path: sibling, type: 'gradle', 'java-home': '/jdk17' }],
+    })[id],
+    baseline,
+  );
+  for (const project of [
+    { ...original, 'java-home': '/jdk17' },
+    { ...original, env: { TOKEN: 'new' } },
+    { ...original, env: {} },
+  ]) {
+    assert.notEqual(workspaceImportOptions([root], { projects: [project] })[id], baseline);
+  }
+});
+
+test('reimport blocks unknown and multi-root owners while excluding independent sibling connections', async (t) => {
+  for (const ownership of ['unknown', 'multi-root']) {
+    await t.test(ownership, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'omp-import-owner-'));
+      const project = join(root, 'project');
+      const sibling = join(root, 'sibling');
+      const systemPath = join(root, 'system');
+      const configDir = join(root, 'workspaces');
+      await mkdir(project);
+      await mkdir(sibling);
+      await writeFile(join(project, 'build.gradle'), "plugins { id 'java' }\n");
+      await setWorkspaceEnvVar(project, 'IMPORT_MODE', 'changed', { configDir });
+      const owner = createConnectionState({
+        systemPath,
+        kind: 'bridge',
+        root: ownership === 'multi-root' ? sibling : project,
+      });
+      const independent = createConnectionState({ systemPath, kind: 'runner', root: sibling });
+      try {
+        await owner.update({
+          phase: 'ready',
+          workspaceImportOptions:
+            ownership === 'multi-root' ? workspaceImportOptions([project], {}) : undefined,
+        });
+        await independent.update({
+          phase: 'ready',
+          workspaceImportOptions: workspaceImportOptions([sibling], {}),
+        });
+        await assert.rejects(
+          reimportWorkspace(project, { systemPath, configDir, timeoutMs: 500 }),
+          (error: unknown) => {
+            assert.equal((error as NodeJS.ErrnoException).code, 'PROJECT_LSP_RECONNECT_REQUIRED');
+            assert.ok((error as Error).message.includes(owner.connectionId));
+            assert.equal((error as Error).message.includes(independent.connectionId), false);
+            return true;
+          },
+        );
+        assert.equal(owner.getState().closed, false);
+        assert.equal(independent.getState().closed, false);
+      } finally {
+        await Promise.all([owner.close(), independent.close()]);
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   }
 });
 

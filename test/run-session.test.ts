@@ -8,6 +8,8 @@ import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { createLspSession } from '../src/debug/run-core.js';
 import { canonicalizeProject } from '../src/project/metadata.js';
+import { setWorkspaceEnvVar } from '../src/project/workspace.js';
+import { reimportWorkspace } from '../src/project/workspace-reimport.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
 import { RpcResponseError } from '../src/shared/runtime-status.js';
 
@@ -314,8 +316,10 @@ test('recorded initialize replay is skipped when canonical root does not match',
   await session.close();
 });
 
-test('reloadWorkspace does not prematurely resolve on unrelated task end and waits for indexing token', async (t) => {
+test('reloadWorkspace waits for native indexing after import progress completes', async (t) => {
   const { promise: reloadReqPromise, resolve: resolveReloadReq } = Promise.withResolvers<number>();
+  const { promise: readinessReqPromise, resolve: resolveReadinessReq } =
+    Promise.withResolvers<number>();
 
   const fake = await createFakeLspServer(t, {
     onRequest: (method, _params, reqId, socket) => {
@@ -326,6 +330,8 @@ test('reloadWorkspace does not prematurely resolve on unrelated task end and wai
         });
       } else if (method === 'intellij/reloadWorkspace') {
         resolveReloadReq(reqId);
+      } else if (method === 'workspace/executeCommand') {
+        resolveReadinessReq(reqId);
       }
     },
   });
@@ -374,11 +380,105 @@ test('reloadWorkspace does not prematurely resolve on unrelated task end and wai
     value: { kind: 'end' },
   });
 
-  // Now reloadPromise should resolve
+  assert.equal(
+    await Promise.race([
+      readinessReqPromise.then(() => 'native-indexing'),
+      reloadPromise.then(() => 'prematurely-resolved'),
+    ]),
+    'native-indexing',
+    'Import progress must not complete reload before the native indexing fence',
+  );
+  const readinessReqId = await readinessReqPromise;
+  const { promise: pendingTurn, resolve: resolvePendingTurn } = Promise.withResolvers<string>();
+  setImmediate(() => resolvePendingTurn('waiting'));
+  assert.equal(
+    await Promise.race([reloadPromise.then(() => 'prematurely-resolved'), pendingTurn]),
+    'waiting',
+  );
+  fake.sendResponse(readinessReqId, null);
   const reloadResult = await reloadPromise;
   assert.deepEqual(reloadResult, { ready: true });
 
   await session.close();
+});
+
+test('reloadWorkspace propagates native indexing failure and cancellation', async (t) => {
+  for (const outcome of ['error', 'cancel'] as const) {
+    await t.test(outcome, async (t) => {
+      const { promise: fenceRequested, resolve: resolveFence } = Promise.withResolvers<number>();
+      const fake = await createFakeLspServer(t, {
+        onRequest: (method, _params, id, socket) => {
+          if (method === 'initialize' || method === 'intellij/reloadWorkspace') {
+            socket.write(encode({ jsonrpc: '2.0', id, result: { capabilities: {} } }));
+            socket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
+          } else if (method === 'workspace/executeCommand') {
+            resolveFence(id);
+          }
+        },
+      });
+      const session = await createLspSession(process.cwd(), {
+        socket: fake.clientSocket,
+        systemPath: fake.systemPath,
+      });
+      try {
+        const abort = new AbortController();
+        const reload = session.reloadWorkspace({ timeoutMs: 5000, signal: abort.signal });
+        const fenceId = await Promise.race([
+          fenceRequested,
+          reload.then(() => assert.fail('Reload completed before native indexing')),
+        ]);
+        const failure = assert.rejects(reload, /Native indexing (failed|cancelled)/);
+        if (outcome === 'error') {
+          fake.sendResponse(fenceId, undefined, {
+            code: -32803,
+            message: 'Native indexing failed',
+          });
+        } else {
+          abort.abort(new Error('Native indexing cancelled'));
+        }
+        await failure;
+      } finally {
+        await session.close();
+      }
+    });
+  }
+});
+
+test('reimport rejects changed initialization settings while preserving the live project session', async (t) => {
+  const fake = await createFakeLspServer(t);
+  const project = join(fake.systemPath, 'project');
+  const configDir = join(fake.systemPath, 'workspaces');
+  await mkdir(project);
+  await writeFile(join(project, 'build.gradle'), "plugins { id 'java' }\n");
+  await setWorkspaceEnvVar(project, 'IMPORT_TOKEN', 'initial-secret', { configDir });
+  const session = await createLspSession(project, {
+    socket: fake.clientSocket,
+    systemPath: fake.systemPath,
+    configDir,
+  });
+  try {
+    await setWorkspaceEnvVar(project, 'IMPORT_TOKEN', 'changed-secret', { configDir });
+    await assert.rejects(
+      reimportWorkspace(project, { systemPath: fake.systemPath, configDir, timeoutMs: 500 }),
+      { code: 'PROJECT_LSP_RECONNECT_REQUIRED' },
+    );
+    assert.equal(session.isReady(), true);
+    assert.equal(fake.clientSocket.destroyed, false);
+    const { id } = canonicalizeProject(project);
+    const receipt = JSON.parse(
+      await readFile(
+        join(fake.systemPath, 'plugin-metadata', 'receipts', `${id}.import-status.json`),
+        'utf8',
+      ),
+    );
+    assert.equal(receipt.status, 'failed');
+    assert.equal(receipt.stage, 'connect');
+    assert.equal(receipt.appliedJdk, null);
+    assert.equal(JSON.stringify(receipt).includes('changed-secret'), false);
+    assert.equal(JSON.stringify(receipt).includes('initial-secret'), false);
+  } finally {
+    await session.close();
+  }
 });
 
 test('reloadWorkspace validates timeoutMs and cancellation signal', async (t) => {

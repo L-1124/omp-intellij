@@ -25,7 +25,7 @@ import {
   recordReadiness,
 } from './project/metadata.js';
 import { findBuildRoot } from './project/readiness.js';
-import { applyWorkspaceOptions } from './project/workspace.js';
+import { applyWorkspaceOptions, workspaceImportOptions } from './project/workspace.js';
 import { connectWithLease, settings } from './server/service.js';
 import { DocumentSymbolAdapter } from './shared/document-symbols.js';
 import { asyncFramedStream, encode } from './shared/protocol.js';
@@ -166,6 +166,12 @@ export async function startBridge(): Promise<void> {
           initializationOptions,
           { systemPath: settings.systemPath },
         );
+        await connState.update({
+          workspaceImportOptions: workspaceImportOptions(
+            [projectPath, ...(p?.workspaceFolders?.map((folder) => folder.uri) ?? [])],
+            paramsObj.initializationOptions as Record<string, unknown>,
+          ),
+        });
       } catch (err: unknown) {
         close(err instanceof Error ? err : new Error(String(err)), {
           kind: 'import',
