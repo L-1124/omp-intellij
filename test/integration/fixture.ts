@@ -187,14 +187,12 @@ export async function createIntegrationSandbox(
   const logDir = join(sandboxDir, 'log');
   const gradleUserHome = join(sandboxDir, 'gradle-home');
   const workspacesDir = join(sandboxDir, 'workspaces');
-  const workspaceConfigPath = join(configDir, 'workspaces');
 
   await mkdir(systemPath, { recursive: true });
   await mkdir(configDir, { recursive: true });
   await mkdir(logDir, { recursive: true });
   await mkdir(gradleUserHome, { recursive: true });
   await mkdir(workspacesDir, { recursive: true });
-  await mkdir(workspaceConfigPath, { recursive: true });
 
   const configFile = join(configDir, 'intellij.json');
   const settingsFile = join(configDir, 'settings.json');
@@ -218,7 +216,7 @@ export async function createIntegrationSandbox(
         host: '127.0.0.1',
         startupTimeoutMs: 60000,
         idleTimeout: '10m',
-        workspaceConfigPath,
+        workspaceConfigPath: configDir,
         cachePolicy: {
           retentionDays: 7,
           warnAboveGiB: 10,

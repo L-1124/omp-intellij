@@ -446,14 +446,16 @@ application {
   }
 });
 
-test('workspace reload: adding dependency jar and switching project JDK updates index, classpath, and runtime JVM', async () => {
+test('workspace reload: reconnecting project LSP after a JDK switch updates index, classpath, and runtime JVM', async () => {
   const sandbox = await createIntegrationSandbox(prerequisites);
 
   try {
     const projectDir = await copyWorkspaceFixture('jdk21', sandbox);
     const appSource = join(projectDir, 'src', 'main', 'java', 'com', 'example', 'App.java');
 
-    const bridge = createLspClientDriver(projectDir, sandbox);
+    const configDir = sandbox.configDir;
+    await setWorkspaceJdk(projectDir, prerequisites.jdk21Path, { configDir });
+    let bridge = createLspClientDriver(projectDir, sandbox);
     await bridge.request('initialize', {
       processId: process.pid,
       rootUri: pathToFileURL(projectDir).href,
@@ -467,7 +469,7 @@ test('workspace reload: adding dependency jar and switching project JDK updates 
       undefined,
       undefined,
       { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath, configDir: sandbox.configDir },
+      { systemPath: sandbox.systemPath, configDir },
     );
     assert.equal(initialWait.details?.phase, 'ready');
 
@@ -476,7 +478,7 @@ test('workspace reload: adding dependency jar and switching project JDK updates 
       undefined,
       undefined,
       { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath, configDir: sandbox.configDir },
+      { systemPath: sandbox.systemPath, configDir },
     );
     assert.equal(initialModel.isError, false);
     const initialModelReport = initialModel.details?.model;
@@ -581,15 +583,35 @@ public class App {
     await writeFile(appSource, updatedAppText, 'utf8');
 
     await setWorkspaceJdk(projectDir, prerequisites.jdk17Path, {
-      configDir: join(sandbox.configDir, 'workspaces'),
+      configDir,
     });
+
+    const blockedReload = await executeIntellij(
+      { action: 'reload', project: projectDir, timeout: 120 },
+      undefined,
+      undefined,
+      { cwd: projectDir } as ExtensionContext,
+      { systemPath: sandbox.systemPath, configDir },
+    );
+    assert.equal(blockedReload.isError, true);
+    assert.equal(blockedReload.details?.failure?.code, 'PROJECT_LSP_RECONNECT_REQUIRED');
+    assert.equal(blockedReload.details?.reloaded, false);
+    await bridge.close();
+    bridge = createLspClientDriver(projectDir, sandbox);
+    await bridge.request('initialize', {
+      processId: process.pid,
+      rootUri: pathToFileURL(projectDir).href,
+      rootPath: projectDir,
+      capabilities: { window: { workDoneProgress: true }, experimental: { licensingUi: true } },
+    });
+    bridge.notify('initialized', {});
 
     const reloadResult = await executeIntellij(
       { action: 'reload', project: projectDir, timeout: 120 },
       undefined,
       undefined,
       { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath, configDir: join(sandbox.configDir, 'workspaces') },
+      { systemPath: sandbox.systemPath, configDir },
     );
     assert.equal(reloadResult.isError, false, reloadResult.content[0]?.text);
     assert.equal(reloadResult.details?.reloaded, true);
@@ -618,7 +640,7 @@ public class App {
       undefined,
       undefined,
       { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath, configDir: join(sandbox.configDir, 'workspaces') },
+      { systemPath: sandbox.systemPath, configDir },
     );
     assert.equal(reloadedModel.isError, false, reloadedModel.content[0]?.text);
     const reloadedModelReport = reloadedModel.details?.model;
