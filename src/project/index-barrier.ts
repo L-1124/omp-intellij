@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { encode } from '../shared/protocol.js';
 import { type FailureDetail, sanitizeStatus, sanitizeString } from '../shared/runtime-status.js';
 import { reduceConnectionState, type StateRecord } from './connection-state.js';
@@ -51,6 +52,9 @@ export class IndexBarrier {
   root: string | null;
   initializeRequestId: unknown;
   state: StateRecord;
+  private readonly readinessPrefix = `omp-index-${randomUUID()}:`;
+  private readinessSequence = 0;
+  private readinessRequest: string | null = null;
 
   constructor(options: {
     sendServer: (frame: Buffer) => void;
@@ -97,6 +101,9 @@ export class IndexBarrier {
     const prev = this.state;
     const next = reduceConnectionState(prev, message, direction);
     this.state = next;
+    if (prev.generation !== next.generation || next.phase === 'failed' || next.phase === 'ready') {
+      this.cancelReadinessRequest();
+    }
 
     if (next.phase === 'ready') {
       this.ready = true;
@@ -183,6 +190,7 @@ export class IndexBarrier {
   }
 
   fail(reason: string, failure?: FailureDetail): void {
+    this.cancelReadinessRequest();
     this.ready = false;
     this.failure = reason;
     const effectiveFailure = failure ?? this.state.failure;
@@ -210,6 +218,18 @@ export class IndexBarrier {
         this.reject(entry.message, REQUEST_FAILED, reason, effectiveFailure);
       }
     }
+  }
+
+  private cancelReadinessRequest(): void {
+    if (this.readinessRequest === null) return;
+    this.sendServer(
+      encode({
+        jsonrpc: '2.0',
+        method: '$/cancelRequest',
+        params: { id: this.readinessRequest },
+      }),
+    );
+    this.readinessRequest = null;
   }
 
   fromClient(message: Record<string, unknown>, frame: Buffer): void {
@@ -302,8 +322,33 @@ export class IndexBarrier {
   }
 
   fromServer(message: Record<string, unknown>, frame: Buffer, forward = true): void {
-    if (forward) this.sendClient(frame);
-    this._applyState(message, 'server');
+    if (
+      !message.method &&
+      typeof message.id === 'string' &&
+      message.id.startsWith(this.readinessPrefix)
+    ) {
+      if (message.id !== this.readinessRequest) return;
+      this.readinessRequest = null;
+      if (message.error) {
+        const error = message.error as { message?: unknown; code?: string | number };
+        const detail = `Native indexing readiness check failed: ${sanitizeString(String(error.message ?? 'unknown error'))}`;
+        this.fail(detail, {
+          kind: 'rpc',
+          stage: 'index',
+          message: detail,
+          code: error.code,
+        });
+        return;
+      }
+      // Reimports do not always repeat ready-for-test or emit indexing progress.
+      this._applyState({ method: 'intellij/ready-for-test' }, 'server');
+    } else {
+      if (message.method === 'intellij/workspaceImportState') {
+        this.cancelReadinessRequest();
+      }
+      if (forward) this.sendClient(frame);
+      this._applyState(message, 'server');
+    }
 
     const isInitResponse =
       this.initializeRequestId !== undefined &&
@@ -331,6 +376,18 @@ export class IndexBarrier {
           this.failure = null;
           this.failureKind = undefined;
         }
+      }
+      if (this.state.phase === 'indexing' && this.state.indexReadySeen) {
+        const id = `${this.readinessPrefix}${++this.readinessSequence}`;
+        this.readinessRequest = id;
+        this.sendServer(
+          encode({
+            jsonrpc: '2.0',
+            id,
+            method: 'workspace/executeCommand',
+            params: { command: 'wait-for-highwatermark', arguments: [] },
+          }),
+        );
       }
     }
 
@@ -373,6 +430,7 @@ export class IndexBarrier {
   }
 
   dispose(): void {
+    this.cancelReadinessRequest();
     for (const entry of this.pending.values()) clearTimeout(entry.timer);
     this.pending.clear();
     this.queuedBytes = 0;

@@ -145,6 +145,90 @@ test('initialize and import completion do not release queries before indexing re
   h.barrier.dispose();
 });
 
+test('reimport without indexing progress waits for native highwatermark before releasing queries', () => {
+  const h = harness();
+  try {
+    h.server(ready);
+    h.server({
+      method: 'intellij/workspaceImportState',
+      params: { phase: 'FINISHED', folders: [] },
+    });
+    h.client(query(20));
+    assert.equal(
+      h.upstream.some((m) => m.id === 20),
+      false,
+    );
+    const probe = h.upstream.find((m) => m.params?.command === 'wait-for-highwatermark');
+    assert.ok(probe);
+    h.server({ jsonrpc: '2.0', id: probe.id, result: null });
+    assert.equal(h.barrier.getState().phase, 'ready');
+    assert.equal(h.upstream.filter((m) => m.id === 20).length, 1);
+    assert.equal(
+      h.downstream.some((m) => m.id === probe.id),
+      false,
+    );
+  } finally {
+    h.barrier.dispose();
+  }
+});
+
+test('stale native highwatermark completion cannot release queries from a newer import', () => {
+  const h = harness();
+  try {
+    h.server(ready);
+    h.server({
+      method: 'intellij/workspaceImportState',
+      params: { phase: 'FINISHED', folders: [] },
+    });
+    const oldProbe = h.upstream.at(-1);
+    assert.ok(oldProbe?.id);
+    h.server({
+      method: 'intellij/workspaceImportState',
+      params: { phase: 'STARTED', folders: [] },
+    });
+    h.client(query(20));
+    h.server({ jsonrpc: '2.0', id: oldProbe.id, result: null });
+    assert.equal(
+      h.upstream.some((m) => m.id === 20),
+      false,
+    );
+    h.server({
+      method: 'intellij/workspaceImportState',
+      params: { phase: 'FINISHED', folders: [] },
+    });
+    const currentProbe = h.upstream.at(-1);
+    assert.ok(currentProbe?.id);
+    assert.notEqual(currentProbe.id, oldProbe.id);
+    h.server({ jsonrpc: '2.0', id: currentProbe.id, result: null });
+    assert.equal(h.upstream.filter((m) => m.id === 20).length, 1);
+  } finally {
+    h.barrier.dispose();
+  }
+});
+
+test('native highwatermark failure rejects waiting queries instead of claiming readiness', () => {
+  const h = harness();
+  try {
+    h.server(ready);
+    h.server({
+      method: 'intellij/workspaceImportState',
+      params: { phase: 'FINISHED', folders: [] },
+    });
+    const probe = h.upstream.at(-1);
+    assert.ok(probe?.id);
+    h.client(query(20));
+    h.server({ jsonrpc: '2.0', id: probe.id, error: { code: -32603, message: 'Index failed' } });
+    assert.equal(h.barrier.getState().phase, 'failed');
+    assert.equal(
+      h.upstream.some((m) => m.id === 20),
+      false,
+    );
+    assert.equal(h.downstream.find((m) => m.id === 20)?.error?.code, -32803);
+  } finally {
+    h.barrier.dispose();
+  }
+});
+
 test('client responses and document notifications are not trapped behind semantic queries', () => {
   const h = harness();
   h.client(query(2));
