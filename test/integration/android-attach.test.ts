@@ -10,7 +10,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DEFAULT_SERVER_VERSION } from '../../src/server/bundle-metadata.js';
 import {
-  copyCachedDependencies,
   copyWorkspaceFixture,
   createDapClientDriver,
   createIntegrationSandbox,
@@ -687,8 +686,6 @@ async function copyAndroidAttachFixture(sandbox: IntegrationSandbox): Promise<{
   await writeFile(join(targetDir, 'gradle.properties'), gradleProps, 'utf8');
   await writeFile(join(targetDir, 'included', 'gradle.properties'), gradleProps, 'utf8');
 
-  await copyCachedDependencies(sandbox);
-
   const wrapperJarSrc = resolve(
     'test-fixtures',
     'android-attach',
@@ -935,16 +932,44 @@ async function waitForStartupProgressEnd(dap: NativePeer): Promise<void> {
   );
 }
 
-test('native Android DAP without OMP: Gradle launch builds once, targets query, build=false, and owned stop vs keep', async () => {
-  assert.ok(isDeviceOnline(deviceId));
-  const sandbox = await createIntegrationSandbox(prerequisites);
-  let native: NativeAndroidClient | undefined;
+test.describe('native Android DAP without OMP: Gradle launch builds once, targets query, build=false, and owned stop vs keep', {
+  timeout: Infinity,
+}, () => {
+  let sandbox: IntegrationSandbox;
+  let native: NativeAndroidClient;
+  let fixture: Awaited<ReturnType<typeof copyAndroidAttachFixture>>;
+  let forwardBefore: string;
+  let breakLine: number;
 
-  try {
-    const { targetDir, apkPath, mainActivityPath } = await copyAndroidAttachFixture(sandbox);
-    stopFixture(deviceId);
-    native = await startNativeClient(targetDir, sandbox);
+  test.before(
+    async () => {
+      assert.ok(isDeviceOnline(deviceId));
+      sandbox = await createIntegrationSandbox(prerequisites);
+      fixture = await copyAndroidAttachFixture(sandbox);
+      stopFixture(deviceId);
+      native = await startNativeClient(fixture.targetDir, sandbox);
+      forwardBefore = getAdbForwardList(deviceId);
+      breakLine = findSourceLine(fixture.mainActivityPath, 'counter = after;');
+    },
+    { timeout: 180000 },
+  );
 
+  test.after(
+    async () => {
+      try {
+        await native?.close();
+      } finally {
+        stopFixture(deviceId);
+        await sandbox?.cleanup();
+      }
+    },
+    { timeout: 180000 },
+  );
+
+  test('targets query leaves artifacts unbuilt and build=false rejects a missing APK', {
+    timeout: 180000,
+  }, async () => {
+    const { targetDir, apkPath } = fixture;
     const targetsResult = (await native.lsp.lspRequest('workspace/executeCommand', {
       command: 'org.intellij.android.run.targets',
       arguments: [{}],
@@ -969,7 +994,8 @@ test('native Android DAP without OMP: Gradle launch builds once, targets query, 
     assert.ok(
       Array.isArray(targetsResult.includedBuilds) &&
         targetsResult.includedBuilds.some(
-          (p) => normalizePathForCompare(p) === normalizePathForCompare(join(targetDir, 'included')),
+          (p) =>
+            normalizePathForCompare(p) === normalizePathForCompare(join(targetDir, 'included')),
         ),
       `targets must include includedBuilds: ${JSON.stringify(targetsResult)}`,
     );
@@ -1006,9 +1032,12 @@ test('native Android DAP without OMP: Gradle launch builds once, targets query, 
     } finally {
       await closeNativePeerAndWait(noBuildDap);
     }
+  });
 
-    const forwardBefore = getAdbForwardList(deviceId);
-    const breakLine = findSourceLine(mainActivityPath, 'counter = after;');
+  test('Gradle build emits startup progress and disconnect stops the owned process', {
+    timeout: 180000,
+  }, async () => {
+    const { targetDir, apkPath, mainActivityPath } = fixture;
     const { dap } = await launchNativeAndroidDap(native, {
       clientID: 'neutral-gradle-launch-client',
       android: {
@@ -1068,6 +1097,12 @@ test('native Android DAP without OMP: Gradle launch builds once, targets query, 
 
     await waitForProcessGone(deviceId, TEST_PACKAGE);
     assert.equal(getAdbForwardList(deviceId), forwardBefore);
+  });
+
+  test('build=false reuses the APK and terminateDebuggee=false preserves a reattachable process', {
+    timeout: 180000,
+  }, async () => {
+    const { mainActivityPath } = fixture;
 
     const { dap: buildFalseDap } = await launchNativeAndroidDap(native, {
       clientID: 'neutral-gradle-build-false',
@@ -1105,11 +1140,7 @@ test('native Android DAP without OMP: Gradle launch builds once, targets query, 
       await closeNativePeerAndWait(reattachDap);
     }
     assert.equal(getAdbForwardList(deviceId), forwardBefore);
-  } finally {
-    await native?.close();
-    stopFixture(deviceId);
-    await sandbox.cleanup();
-  }
+  });
 });
 
 test('native Android DAP without OMP: Scenario 1: normal launch -> startServer -> standard DAP attach -> tick breakpoint -> frame variables (after = before + 1) -> step counter -> detach (original PID survives, terminateDebuggee=true rejected) -> re-attach & adb forward unchanged [smoke]', async () => {
@@ -1809,84 +1840,114 @@ test('native Android DAP without OMP: apks, installed, artifact validation, rest
   }
 });
 
-test('native Android DAP without OMP: noDebug debuggable and non-debuggable release, capability whitelist, and stale identity preserve', async () => {
-  assert.ok(isDeviceOnline(deviceId));
-  const sandbox = await createIntegrationSandbox(prerequisites);
-  let native: NativeAndroidClient | undefined;
+test.describe('native Android DAP without OMP: noDebug debuggable and non-debuggable release, capability whitelist, and stale identity preserve', {
+  timeout: Infinity,
+}, () => {
+  let sandbox: IntegrationSandbox;
+  let native: NativeAndroidClient;
+  let apkPath: string;
+  let releaseApkPath: string;
+  let mainActivityPath: string;
+  test.after(
+    async () => {
+      try {
+        await native?.close();
+      } finally {
+        if (sandbox) {
+          stopFixture(deviceId);
+          await sandbox.cleanup();
+        }
+      }
+    },
+    { timeout: 180000 },
+  );
 
-  try {
-    const { targetDir, apkPath, releaseApkPath, mainActivityPath } =
-      await copyAndroidAttachFixture(sandbox);
-    await ensureApkBuilt(targetDir, sandbox, apkPath);
-    stopFixture(deviceId);
+  test.before(
+    async () => {
+      assert.ok(isDeviceOnline(deviceId));
+      sandbox = await createIntegrationSandbox(prerequisites);
+      const fixture = await copyAndroidAttachFixture(sandbox);
+      ({ apkPath, releaseApkPath, mainActivityPath } = fixture);
+      await ensureApkBuilt(fixture.targetDir, sandbox, apkPath);
+      stopFixture(deviceId);
+      native = await startNativeClient(fixture.targetDir, sandbox);
+    },
+    { timeout: 180000 },
+  );
 
-    native = await startNativeClient(targetDir, sandbox);
+  test('debuggable noDebug launch enforces capabilities and stops its owned process', {
+    timeout: 180000,
+  }, async () => {
     const forwardBefore = getAdbForwardList(deviceId);
     const breakLine = findSourceLine(mainActivityPath, 'counter = after;');
-
-    const noDebugDap = await native.connectDap();
     try {
-      const initResp = await noDebugDap.request('initialize', {
-        clientID: 'android-nodebug-debuggable',
-        adapterID: 'android',
-        linesStartAt1: true,
-        columnsStartAt1: true,
-        pathFormat: 'path',
-        supportsProgressReporting: true,
-      });
-      assert.equal(initResp.success, true, JSON.stringify(initResp));
+      const noDebugDap = await native.connectDap();
+      try {
+        const initResp = await noDebugDap.request('initialize', {
+          clientID: 'android-nodebug-debuggable',
+          adapterID: 'android',
+          linesStartAt1: true,
+          columnsStartAt1: true,
+          pathFormat: 'path',
+          supportsProgressReporting: true,
+        });
+        assert.equal(initResp.success, true, JSON.stringify(initResp));
 
-      const launchReq = noDebugDap.sendRequest('launch', {
-        noDebug: true,
-        android: {
-          deviceId,
-          target: { kind: 'apks', files: [apkPath] },
-        },
-      });
-      await noDebugDap.waitFor(
-        (m) => m.type === 'event' && m.event === 'initialized',
-        0,
-        120000,
-      );
-      const bpResp = await noDebugDap.request('setBreakpoints', {
-        source: { path: mainActivityPath },
-        breakpoints: [{ line: breakLine }],
-      });
-      assert.equal(bpResp.success, true, JSON.stringify(bpResp));
-      const bpEntry = (asRecord(bpResp.body) as SetBreakpointsResponse).breakpoints?.[0];
-      assert.equal(bpEntry?.verified, false);
-      assert.match(bpEntry?.message ?? '', /noDebug/i);
+        const launchReq = noDebugDap.sendRequest('launch', {
+          noDebug: true,
+          android: {
+            deviceId,
+            target: { kind: 'apks', files: [apkPath] },
+          },
+        });
+        await noDebugDap.waitFor((m) => m.type === 'event' && m.event === 'initialized', 0, 120000);
+        const bpResp = await noDebugDap.request('setBreakpoints', {
+          source: { path: mainActivityPath },
+          breakpoints: [{ line: breakLine }],
+        });
+        assert.equal(bpResp.success, true, JSON.stringify(bpResp));
+        const bpEntry = (asRecord(bpResp.body) as SetBreakpointsResponse).breakpoints?.[0];
+        assert.equal(bpEntry?.verified, false);
+        assert.match(bpEntry?.message ?? '', /noDebug/i);
 
-      const excResp = await noDebugDap.request('setExceptionBreakpoints', { filters: [] });
-      assert.equal(excResp.success, true, JSON.stringify(excResp));
-      const cfgResp = await noDebugDap.request('configurationDone', {});
-      assert.equal(cfgResp.success, true, JSON.stringify(cfgResp));
+        const excResp = await noDebugDap.request('setExceptionBreakpoints', { filters: [] });
+        assert.equal(excResp.success, true, JSON.stringify(excResp));
+        const cfgResp = await noDebugDap.request('configurationDone', {});
+        assert.equal(cfgResp.success, true, JSON.stringify(cfgResp));
 
-      const launchResp = await launchReq.response;
-      assert.equal(launchResp.success, true, JSON.stringify(launchResp));
-      assert.equal(getAdbForwardList(deviceId), forwardBefore, 'noDebug must not prepare JDWP');
-      await getFixturePid(deviceId);
+        const launchResp = await launchReq.response;
+        assert.equal(launchResp.success, true, JSON.stringify(launchResp));
+        assert.equal(getAdbForwardList(deviceId), forwardBefore, 'noDebug must not prepare JDWP');
+        await getFixturePid(deviceId);
 
-      for (const [blockedCmd, args] of [
-        ['threads', {}],
-        ['stackTrace', { threadId: 1 }],
-        ['evaluate', { expression: '1' }],
-      ] as const) {
-        const blockedResp = await noDebugDap.request(blockedCmd, args);
-        assert.equal(blockedResp.success, false, JSON.stringify(blockedResp));
-        assert.match(blockedResp.message ?? '', /^\[invalid_params\]/);
+        for (const [blockedCmd, args] of [
+          ['threads', {}],
+          ['stackTrace', { threadId: 1 }],
+          ['evaluate', { expression: '1' }],
+        ] as const) {
+          const blockedResp = await noDebugDap.request(blockedCmd, args);
+          assert.equal(blockedResp.success, false, JSON.stringify(blockedResp));
+          assert.match(blockedResp.message ?? '', /^\[invalid_params\]/);
+        }
+        const termResp = await noDebugDap.request('terminate', {});
+        assert.equal(termResp.success, false, JSON.stringify(termResp));
+
+        const discResp = await noDebugDap.request('disconnect', {});
+        assert.equal(discResp.success, true, JSON.stringify(discResp));
+        await noDebugDap.waitFor((m) => m.type === 'event' && m.event === 'terminated', 0, 15000);
+      } finally {
+        await closeNativePeerAndWait(noDebugDap);
       }
-      const termResp = await noDebugDap.request('terminate', {});
-      assert.equal(termResp.success, false, JSON.stringify(termResp));
-
-      const discResp = await noDebugDap.request('disconnect', {});
-      assert.equal(discResp.success, true, JSON.stringify(discResp));
-      await noDebugDap.waitFor((m) => m.type === 'event' && m.event === 'terminated', 0, 15000);
-    } finally {
-      await closeNativePeerAndWait(noDebugDap);
+      await waitForProcessGone(deviceId, TEST_PACKAGE);
+    } catch (error) {
+      if (native) await reportNativeLogs(native);
+      throw error;
     }
-    await waitForProcessGone(deviceId, TEST_PACKAGE);
+  });
 
+  test('non-debuggable release build preserves an externally restarted process', {
+    timeout: 180000,
+  }, async () => {
     const { dap: releaseGradleDap } = await launchNativeAndroidDap(native, {
       clientID: 'android-nodebug-release-build',
       noDebug: true,
@@ -1958,7 +2019,9 @@ test('native Android DAP without OMP: noDebug debuggable and non-debuggable rele
 
     stopFixture(deviceId);
     await waitForProcessGone(deviceId, TEST_PACKAGE);
+  });
 
+  test('debug launch refuses a non-debuggable release APK', { timeout: 180000 }, async () => {
     const notDebuggableDap = await native.connectDap();
     try {
       await notDebuggableDap.request('initialize', {
@@ -1981,11 +2044,7 @@ test('native Android DAP without OMP: noDebug debuggable and non-debuggable rele
     } finally {
       await closeNativePeerAndWait(notDebuggableDap);
     }
-  } finally {
-    await native?.close();
-    stopFixture(deviceId);
-    await sandbox.cleanup();
-  }
+  });
 });
 
 test('native Android DAP without OMP: explicit userId, activity-alias, custom activity process, and ambiguous_process attach', async () => {
@@ -2700,21 +2759,46 @@ test('native Android DAP without OMP: install cancel inspects PM state and block
   }
 });
 
-test('OMP host DapSessionManager: Android owned launch, external attach, and startup cancellation', async () => {
-  assert.ok(isDeviceOnline(deviceId));
-  const sandbox = await createIntegrationSandbox(prerequisites);
+test.describe('OMP host DapSessionManager: Android owned launch, external attach, and startup cancellation', {
+  timeout: Infinity,
+}, () => {
+  let sandbox: IntegrationSandbox;
+  let fixture: Awaited<ReturnType<typeof copyAndroidAttachFixture>>;
+  let forwardBefore: string;
+  let breakLine: number;
   let hostLaunch: OmpHostDriver | undefined;
   let hostAttach: OmpHostDriver | undefined;
   let hostCancel: OmpHostDriver | undefined;
 
-  try {
-    const { targetDir, apkPath, mainActivityPath } = await copyAndroidAttachFixture(sandbox);
-    await ensureApkBuilt(targetDir, sandbox, apkPath);
-    stopFixture(deviceId);
+  test.before(
+    async () => {
+      assert.ok(isDeviceOnline(deviceId));
+      sandbox = await createIntegrationSandbox(prerequisites);
+      fixture = await copyAndroidAttachFixture(sandbox);
+      await ensureApkBuilt(fixture.targetDir, sandbox, fixture.apkPath);
+      stopFixture(deviceId);
+      forwardBefore = getAdbForwardList(deviceId);
+      breakLine = findSourceLine(fixture.mainActivityPath, 'counter = after;');
+    },
+    { timeout: 180000 },
+  );
 
-    const forwardBefore = getAdbForwardList(deviceId);
-    const breakLine = findSourceLine(mainActivityPath, 'counter = after;');
+  test.after(
+    async () => {
+      try {
+        await hostLaunch?.close().catch(() => {});
+        await hostAttach?.close().catch(() => {});
+        await hostCancel?.close().catch(() => {});
+      } finally {
+        stopFixture(deviceId);
+        await sandbox?.cleanup();
+      }
+    },
+    { timeout: 180000 },
+  );
 
+  test('owned launch closes its session, process and forward', { timeout: 180000 }, async () => {
+    const { targetDir, apkPath, mainActivityPath } = fixture;
     hostLaunch = createOmpHostDriver(
       {
         mode: 'launch',
@@ -2745,6 +2829,12 @@ test('OMP host DapSessionManager: Android owned launch, external attach, and sta
 
     await waitForProcessGone(deviceId, TEST_PACKAGE);
     assert.equal(getAdbForwardList(deviceId), forwardBefore);
+  });
+
+  test('external attach closes its session and preserves the target PID', {
+    timeout: 180000,
+  }, async () => {
+    const { targetDir, mainActivityPath } = fixture;
 
     startFixture(deviceId, false);
     const originalPid = await getFixturePid(deviceId);
@@ -2781,6 +2871,12 @@ test('OMP host DapSessionManager: Android owned launch, external attach, and sta
     );
     stopFixture(deviceId);
     await waitForProcessGone(deviceId, TEST_PACKAGE);
+  });
+
+  test('startup cancellation kills the build child and preserves its Gradle daemon', {
+    timeout: 180000,
+  }, async () => {
+    const { targetDir, apkPath, mainActivityPath } = fixture;
 
     await rm(apkPath, { force: true });
     const appBuildGradlePath = join(targetDir, 'app', 'build.gradle.kts');
@@ -2834,30 +2930,61 @@ test('OMP host DapSessionManager: Android owned launch, external attach, and sta
     assert.equal(isProcessAlive(daemonPid), true);
     assert.equal(getPidOfProcess(deviceId, TEST_PACKAGE), null);
     assert.equal(getAdbForwardList(deviceId), forwardBefore);
-  } finally {
-    await hostLaunch?.close().catch(() => {});
-    await hostAttach?.close().catch(() => {});
-    await hostCancel?.close().catch(() => {});
-    stopFixture(deviceId);
-    await sandbox.cleanup();
-  }
+  });
 });
 
-test('OMP dap-proxy Android attach: standard attach({ android }) over dap-proxy -> breakpoint hit -> proxy SIGKILL EOF releases JDWP -> sibling LSP unaffected -> re-attach succeeds', async () => {
-  assert.ok(
-    isDeviceOnline(deviceId),
-    `Android device ${deviceId} must remain online during acceptance`,
-  );
-  const sandbox = await createIntegrationSandbox(prerequisites);
+test.describe('OMP dap-proxy Android attach: standard attach({ android }) over dap-proxy -> breakpoint hit -> proxy SIGKILL EOF releases JDWP -> sibling LSP unaffected -> re-attach succeeds', {
+  timeout: Infinity,
+}, () => {
+  let sandbox: IntegrationSandbox;
+  let targetDir: string;
+  let apkPath: string;
+  let mainActivityPath: string;
+  let warmProjectLsp: LspClientDriver | undefined;
   let dap: DapClientDriver | undefined;
   let followUpDap: DapClientDriver | undefined;
   let siblingLsp: LspClientDriver | undefined;
-  try {
-    const { targetDir, apkPath, mainActivityPath } = await copyAndroidAttachFixture(sandbox);
-    await ensureApkBuilt(targetDir, sandbox, apkPath);
+  test.after(
+    async () => {
+      try {
+        await followUpDap?.close();
+        await dap?.close();
+        await siblingLsp?.close();
+        await warmProjectLsp?.close();
+      } finally {
+        if (sandbox) {
+          stopFixture(deviceId);
+          await sandbox.cleanup();
+        }
+      }
+    },
+    { timeout: 180000 },
+  );
+  test.before(
+    async () => {
+      assert.ok(isDeviceOnline(deviceId));
+      sandbox = await createIntegrationSandbox(prerequisites);
+      ({ targetDir, apkPath, mainActivityPath } = await copyAndroidAttachFixture(sandbox));
+      await ensureApkBuilt(targetDir, sandbox, apkPath);
+      warmProjectLsp = createLspClientDriver(targetDir, sandbox);
+      await warmProjectLsp.request('initialize', {
+        processId: process.pid,
+        rootUri: pathToFileURL(targetDir).href,
+        capabilities: {},
+      });
+      warmProjectLsp.notify('initialized', {});
+      await warmProjectLsp.waitFor(
+        (message) => message.method === 'intellij/ready-for-test',
+        120000,
+      );
+      installFixture(deviceId, apkPath);
+    },
+    { timeout: 180000 },
+  );
 
-    installFixture(deviceId, apkPath);
-
+  test('proxy EOF releases JDWP, preserves a sibling project and permits re-attach', {
+    timeout: 180000,
+  }, async () => {
     stopFixture(deviceId);
     startFixture(deviceId, false);
     const originalPid = await getFixturePid(deviceId);
@@ -2876,16 +3003,16 @@ test('OMP dap-proxy Android attach: standard attach({ android }) over dap-proxy 
     });
 
     await Promise.all([
-      dap.request(
-        'attach',
-        { android: { deviceId, packageName: TEST_PACKAGE } },
-        60000,
-      ),
-      initialDap.waitForEvent('initialized', 60000).then(() => initialDap.request('configurationDone')),
+      dap.request('attach', { android: { deviceId, packageName: TEST_PACKAGE } }, 60000),
+      initialDap
+        .waitForEvent('initialized', 60000)
+        .then(() => initialDap.request('configurationDone')),
     ]);
 
     const stopped = await dap.waitForEvent('stopped', 30000);
     assert.equal(parseStoppedBody(stopped.body).reason, 'breakpoint');
+    await warmProjectLsp?.close();
+    warmProjectLsp = undefined;
 
     const jdk21Dir = await copyWorkspaceFixture('jdk21', sandbox);
     siblingLsp = createLspClientDriver(jdk21Dir, sandbox);
@@ -2925,11 +3052,5 @@ test('OMP dap-proxy Android attach: standard attach({ android }) over dap-proxy 
     await followUpDap.waitForExit(15000);
 
     assert.equal(await getFixturePid(deviceId), originalPid);
-  } finally {
-    await followUpDap?.close();
-    await dap?.close();
-    await siblingLsp?.close();
-    stopFixture(deviceId);
-    await sandbox.cleanup();
-  }
+  });
 });

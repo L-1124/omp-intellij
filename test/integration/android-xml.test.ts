@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, readdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,18 +12,51 @@ import type { ExtensionContext } from '../../src/shared/extension-types.js';
 import { encode } from '../../src/shared/protocol.js';
 import { runSlimAndroidAnalysis } from './android-slim.js';
 import {
-  copyCachedDependencies,
   createIntegrationSandbox,
   createLspClientDriver,
+  findGradleArtifact,
   type IntegrationSandbox,
   type LspClientDriver,
   seedSandboxProjectConfig,
   stopSandboxServer,
   verifyPrerequisites,
 } from './fixture.js';
+import { createRunArtifactStore } from './run-artifact.js';
 
-const INITIAL_GRADLE_USER_HOME = process.env.GRADLE_USER_HOME;
 const prereqs = await verifyPrerequisites();
+const xmlArtifacts = await createRunArtifactStore('omp-intellij-xml-artifacts-');
+test.after(() => xmlArtifacts.dispose());
+
+async function xmlArtifactKey(
+  kind: string,
+  inputs: readonly string[],
+  options?: readonly string[],
+): Promise<string> {
+  const hash = createHash('sha256').update(JSON.stringify([kind, prereqs.jdk21Path, options]));
+  for (const input of inputs) {
+    hash.update(
+      createHash('sha256')
+        .update(await readFile(input))
+        .digest(),
+    );
+  }
+  return `${kind}-${hash.digest('hex')}`;
+}
+
+async function reuseXmlArtifact(key: string, target: string, started: number): Promise<boolean> {
+  if (!(await xmlArtifacts.materialize(key, target))) return false;
+  console.error(
+    `[integration xml] fixture-cache: ${key} hit ${Math.round(performance.now() - started)}ms`,
+  );
+  return true;
+}
+
+async function captureXmlArtifact(key: string, target: string, started: number): Promise<void> {
+  await xmlArtifacts.capture(key, target);
+  console.error(
+    `[integration xml] fixture-cache: ${key} built ${Math.round(performance.now() - started)}ms`,
+  );
+}
 
 interface LspPosition {
   line: number;
@@ -187,8 +220,6 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
   ].join('\n');
   await writeFile(join(targetDir, 'gradle.properties'), gradleProps, 'utf8');
 
-  await copyCachedDependencies(sandbox);
-
   const wrapperJarSrc = resolve(
     'test-fixtures',
     'gradle-execution',
@@ -318,6 +349,7 @@ async function startLspClient(
   })) as LspInitializeResult;
   driver.initResult = initResult;
   driver.notify('initialized', {});
+  await waitForHighWatermark(driver, 120000);
   return driver;
 }
 
@@ -332,13 +364,14 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
     const client = await startLspClient(projectDir, sandbox);
     driver = client;
 
-    await executeIntellij(
+    const waitResult = await executeIntellij(
       { action: 'wait', project: projectDir, timeout: 180 },
       undefined,
       undefined,
       { cwd: projectDir } as ExtensionContext,
       { systemPath: sandbox.systemPath },
     );
+    assert.equal(waitResult.details?.phase, 'ready');
 
     const modelDir = join(sandbox.sandboxDir, 'resource-workspace-model');
     await mkdir(modelDir);
@@ -2299,11 +2332,6 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
   }
 });
 
-const GLOBAL_GRADLE_USER_HOME =
-  process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE ||
-  INITIAL_GRADLE_USER_HOME ||
-  join(homedir(), '.gradle');
-
 async function pullDiagnostics(
   client: LspClientDriver,
   uri: string,
@@ -2317,120 +2345,34 @@ async function pullDiagnostics(
   return report;
 }
 
-async function findComposeRuntimeAar(gradleCacheDir: string): Promise<string> {
-  const dir = join(
-    gradleCacheDir,
-    'caches',
-    'modules-2',
-    'files-2.1',
+async function findComposeRuntimeAar(sandbox: IntegrationSandbox): Promise<string> {
+  return findGradleArtifact(
+    sandbox,
     'androidx.compose.runtime',
     'runtime-android',
     '1.13.0-alpha01',
+    'runtime.aar',
   );
-  if (existsSync(dir)) {
-    const subdirs = await readdir(dir);
-    for (const sub of subdirs) {
-      const aarPath = join(dir, sub, 'runtime.aar');
-      if (existsSync(aarPath)) return aarPath;
-    }
-  }
-  throw new Error(`Prerequisite Compose runtime.aar (1.13.0-alpha01) not found under ${dir}`);
 }
 
-async function findLintApiJar(gradleCacheDir: string): Promise<string> {
-  const dir = join(
-    gradleCacheDir,
-    'caches',
-    'modules-2',
-    'files-2.1',
-    'com.android.tools.lint',
-    'lint-api',
-    '32.4.1',
-  );
-  if (existsSync(dir)) {
-    const subdirs = await readdir(dir);
-    for (const sub of subdirs) {
-      const jarPath = join(dir, sub, 'lint-api-32.4.1.jar');
-      if (existsSync(jarPath)) return jarPath;
-    }
-  }
-  throw new Error(`Prerequisite lint-api-32.4.1.jar not found under ${dir}`);
+async function findLintApiJar(sandbox: IntegrationSandbox): Promise<string> {
+  return findGradleArtifact(sandbox, 'com.android.tools.lint', 'lint-api', '32.4.1');
 }
 
-async function findCommonJar(gradleCacheDir: string): Promise<string> {
-  const dir = join(
-    gradleCacheDir,
-    'caches',
-    'modules-2',
-    'files-2.1',
-    'com.android.tools',
-    'common',
-    '32.4.1',
-  );
-  if (existsSync(dir)) {
-    const subdirs = await readdir(dir);
-    for (const sub of subdirs) {
-      const jarPath = join(dir, sub, 'common-32.4.1.jar');
-      if (existsSync(jarPath)) return jarPath;
-    }
-  }
-  throw new Error(`Prerequisite common-32.4.1.jar not found under ${dir}`);
+async function findCommonJar(sandbox: IntegrationSandbox): Promise<string> {
+  return findGradleArtifact(sandbox, 'com.android.tools', 'common', '32.4.1');
 }
 
-async function findSdkCommonJar(gradleCacheDir: string): Promise<string> {
-  const dir = join(
-    gradleCacheDir,
-    'caches',
-    'modules-2',
-    'files-2.1',
-    'com.android.tools',
-    'sdk-common',
-    '32.4.1',
-  );
-  if (existsSync(dir)) {
-    const subdirs = await readdir(dir);
-    for (const sub of subdirs) {
-      const jarPath = join(dir, sub, 'sdk-common-32.4.1.jar');
-      if (existsSync(jarPath)) return jarPath;
-    }
-  }
-  throw new Error(`Prerequisite sdk-common-32.4.1.jar not found under ${dir}`);
+async function findSdkCommonJar(sandbox: IntegrationSandbox): Promise<string> {
+  return findGradleArtifact(sandbox, 'com.android.tools', 'sdk-common', '32.4.1');
 }
 
-async function findLayoutlibApiJar(gradleCacheDir: string): Promise<string> {
-  const dir = join(
-    gradleCacheDir,
-    'caches',
-    'modules-2',
-    'files-2.1',
-    'com.android.tools.layoutlib',
-    'layoutlib-api',
-    '32.4.1',
-  );
-  if (existsSync(dir)) {
-    const subdirs = await readdir(dir);
-    for (const sub of subdirs) {
-      const jarPath = join(dir, sub, 'layoutlib-api-32.4.1.jar');
-      if (existsSync(jarPath)) return jarPath;
-    }
-  }
-  throw new Error(`Prerequisite layoutlib-api-32.4.1.jar not found under ${dir}`);
+async function findLayoutlibApiJar(sandbox: IntegrationSandbox): Promise<string> {
+  return findGradleArtifact(sandbox, 'com.android.tools.layoutlib', 'layoutlib-api', '32.4.1');
 }
 
-async function findGuavaJar(gradleCacheDir: string): Promise<string> {
-  const dir = join(gradleCacheDir, 'caches', 'modules-2', 'files-2.1', 'com.google.guava', 'guava');
-  if (existsSync(dir)) {
-    const versions = await readdir(dir);
-    for (const v of versions) {
-      const vDir = join(dir, v);
-      const subdirs = await readdir(vDir);
-      for (const sub of subdirs) {
-        const jarPath = join(vDir, sub, `guava-${v}.jar`);
-        if (existsSync(jarPath)) return jarPath;
-      }
-    }
-  }
-  throw new Error(`Prerequisite guava jar not found under ${dir}`);
+async function findGuavaJar(sandbox: IntegrationSandbox): Promise<string> {
+  return findGradleArtifact(sandbox, 'com.google.guava', 'guava');
 }
 
 async function createCustomExternalAar(
@@ -2442,6 +2384,15 @@ async function createCustomExternalAar(
   guavaJar: string,
   targetAarPath: string,
 ): Promise<void> {
+  const started = performance.now();
+  const cacheKey = await xmlArtifactKey('external', [
+    lintApiJar,
+    commonJar,
+    sdkCommonJar,
+    layoutlibApiJar,
+    guavaJar,
+  ]);
+  if (await reuseXmlArtifact(cacheKey, targetAarPath, started)) return;
   const staging = join(sandbox.sandboxDir, 'custom-external-staging');
   const classesStaging = join(staging, 'classes-staging');
   const lintStaging = join(staging, 'lint-staging');
@@ -2456,11 +2407,6 @@ async function createCustomExternalAar(
     'bin',
     process.platform === 'win32' ? 'javac.exe' : 'javac',
   );
-  const jar = join(
-    sandbox.prerequisites.jdk21Path,
-    'bin',
-    process.platform === 'win32' ? 'jar.exe' : 'jar',
-  );
 
   const dummySrc = join(staging, 'ExternalDummy.java');
   await writeFile(
@@ -2468,11 +2414,9 @@ async function createCustomExternalAar(
     'package com.example.external; public final class ExternalDummy {}\n',
     'utf8',
   );
-  spawnSync(javac, ['-d', classesStaging, dummySrc], { encoding: 'utf8' });
+  runJdkTool(sandbox, 'javac', ['-d', classesStaging, dummySrc]);
   const classesJar = join(aarContent, 'classes.jar');
-  spawnSync(jar, ['--create', '--file', classesJar, '-C', classesStaging, '.'], {
-    encoding: 'utf8',
-  });
+  runJdkTool(sandbox, 'jar', ['--create', '--file', classesJar, '-C', classesStaging, '.']);
 
   const detectorSrc = join(staging, 'CustomExternalDetector.java');
   await writeFile(
@@ -2659,7 +2603,7 @@ async function createCustomExternalAar(
   );
 
   const lintJar = join(aarContent, 'lint.jar');
-  spawnSync(jar, ['--create', '--file', lintJar, '-C', lintStaging, '.'], { encoding: 'utf8' });
+  runJdkTool(sandbox, 'jar', ['--create', '--file', lintJar, '-C', lintStaging, '.']);
 
   await writeFile(
     join(aarContent, 'AndroidManifest.xml'),
@@ -2668,9 +2612,8 @@ async function createCustomExternalAar(
   );
 
   await mkdir(join(targetAarPath, '..'), { recursive: true });
-  spawnSync(jar, ['--create', '--file', targetAarPath, '-C', aarContent, '.'], {
-    encoding: 'utf8',
-  });
+  runJdkTool(sandbox, 'jar', ['--create', '--file', targetAarPath, '-C', aarContent, '.']);
+  await captureXmlArtifact(cacheKey, targetAarPath, started);
 }
 
 async function createCorruptedAar(
@@ -2679,6 +2622,9 @@ async function createCorruptedAar(
   commonJar: string,
   targetAarPath: string,
 ): Promise<void> {
+  const started = performance.now();
+  const cacheKey = await xmlArtifactKey('corrupt', [lintApiJar, commonJar]);
+  if (await reuseXmlArtifact(cacheKey, targetAarPath, started)) return;
   const staging = join(sandbox.sandboxDir, 'corrupt-aar-staging');
   const classesStaging = join(staging, 'classes-staging');
   const lintStaging = join(staging, 'lint-staging');
@@ -2693,19 +2639,12 @@ async function createCorruptedAar(
     'bin',
     process.platform === 'win32' ? 'javac.exe' : 'javac',
   );
-  const jar = join(
-    sandbox.prerequisites.jdk21Path,
-    'bin',
-    process.platform === 'win32' ? 'jar.exe' : 'jar',
-  );
 
   const dummySrc = join(staging, 'Dummy.java');
   await writeFile(dummySrc, 'package com.example.corrupt; public final class Dummy {}\n', 'utf8');
-  spawnSync(javac, ['-d', classesStaging, dummySrc], { encoding: 'utf8' });
+  runJdkTool(sandbox, 'javac', ['-d', classesStaging, dummySrc]);
   const classesJar = join(aarContent, 'classes.jar');
-  spawnSync(jar, ['--create', '--file', classesJar, '-C', classesStaging, '.'], {
-    encoding: 'utf8',
-  });
+  runJdkTool(sandbox, 'jar', ['--create', '--file', classesJar, '-C', classesStaging, '.']);
 
   // 1. CorruptConstructorIssueRegistry (loading phase LinkageError)
   const corruptConstructorSrc = join(staging, 'CorruptConstructorIssueRegistry.java');
@@ -2833,7 +2772,7 @@ async function createCorruptedAar(
   );
 
   const lintJar = join(aarContent, 'lint.jar');
-  spawnSync(jar, ['--create', '--file', lintJar, '-C', lintStaging, '.'], { encoding: 'utf8' });
+  runJdkTool(sandbox, 'jar', ['--create', '--file', lintJar, '-C', lintStaging, '.']);
 
   await writeFile(
     join(aarContent, 'AndroidManifest.xml'),
@@ -2842,9 +2781,8 @@ async function createCorruptedAar(
   );
 
   await mkdir(join(targetAarPath, '..'), { recursive: true });
-  spawnSync(jar, ['--create', '--file', targetAarPath, '-C', aarContent, '.'], {
-    encoding: 'utf8',
-  });
+  runJdkTool(sandbox, 'jar', ['--create', '--file', targetAarPath, '-C', aarContent, '.']);
+  await captureXmlArtifact(cacheKey, targetAarPath, started);
 }
 
 async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<string> {
@@ -2875,8 +2813,6 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
     '',
   ].join('\n');
   await writeFile(join(targetDir, 'gradle.properties'), gradleProps, 'utf8');
-
-  await copyCachedDependencies(sandbox);
 
   const wrapperJarSrc = resolve(
     'test-fixtures',
@@ -2916,14 +2852,14 @@ async function copyAndroidLintFixture(sandbox: IntegrationSandbox): Promise<stri
   }
 
   // Deterministic artifact discovery
-  const composeAarSrc = await findComposeRuntimeAar(GLOBAL_GRADLE_USER_HOME);
+  const composeAarSrc = await findComposeRuntimeAar(sandbox);
   await cp(composeAarSrc, join(targetDir, 'app', 'libs', 'compose-runtime.aar'));
 
-  const lintApiJar = await findLintApiJar(GLOBAL_GRADLE_USER_HOME);
-  const commonJar = await findCommonJar(GLOBAL_GRADLE_USER_HOME);
-  const sdkCommonJar = await findSdkCommonJar(GLOBAL_GRADLE_USER_HOME);
-  const layoutlibApiJar = await findLayoutlibApiJar(GLOBAL_GRADLE_USER_HOME);
-  const guavaJar = await findGuavaJar(GLOBAL_GRADLE_USER_HOME);
+  const lintApiJar = await findLintApiJar(sandbox);
+  const commonJar = await findCommonJar(sandbox);
+  const sdkCommonJar = await findSdkCommonJar(sandbox);
+  const layoutlibApiJar = await findLayoutlibApiJar(sandbox);
+  const guavaJar = await findGuavaJar(sandbox);
 
   // Real non-AndroidX custom rule AAR
   await createCustomExternalAar(
@@ -3259,14 +3195,6 @@ test('Android Lint diagnostics integration', async (t) => {
     projectDir = await copyAndroidLintFixture(sandbox);
     const client = await startLspClient(projectDir, sandbox);
     driver = client;
-
-    await executeIntellij(
-      { action: 'wait', project: projectDir, timeout: 180 },
-      undefined,
-      undefined,
-      { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath },
-    );
 
     // 1. Verify diagnosticProvider declared in server initialize capabilities
     const initCapabilities = client.initResult?.capabilities;
@@ -4554,14 +4482,6 @@ test('Android XML and Manifest Lint diagnostics integration', {
     const client = await startLspClient(projectDir, sandbox);
     driver = client;
 
-    await executeIntellij(
-      { action: 'wait', project: projectDir, timeout: 180 },
-      undefined,
-      undefined,
-      { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath },
-    );
-
     const initCapabilities = client.initResult?.capabilities;
     assert.ok(
       Boolean(initCapabilities?.diagnosticProvider),
@@ -5627,13 +5547,6 @@ test('Android XML and Manifest Lint diagnostics integration', {
       let client2: InitializedLspClientDriver | null = null;
       try {
         client2 = await startLspClient(workspace2Dir, workspace2);
-        await executeIntellij(
-          { action: 'wait', project: workspace2Dir, timeout: 180 },
-          undefined,
-          undefined,
-          { cwd: workspace2Dir } as ExtensionContext,
-          { systemPath: workspace2.systemPath },
-        );
         const ws1ProbeUri = pathToFileURL(
           join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'),
         ).href;
@@ -5849,6 +5762,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
         // Invalidate the built snapshot without exposing a truncated source to VFS.
         const touchedAt = Date.now() / 1000;
         await utimes(path, touchedAt, touchedAt);
+        await waitForHighWatermark(client);
         client.notify('textDocument/didOpen', {
           textDocument: { uri, languageId: 'xml', version: 1, text },
         });
@@ -5857,8 +5771,11 @@ test('Android XML and Manifest Lint diagnostics integration', {
           const cleanSnapshot = (clean.items ?? []).find(
             (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
           );
-          assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=true; mode=live;/);
+          assert.match(
+            cleanSnapshot?.message ?? '',
+            /ManifestSnapshot: merged=true; mode=live;/,
             JSON.stringify(clean),
+          );
           const build = spawnSync(
             java,
             [
@@ -6140,6 +6057,15 @@ async function createAnalysisBatchAar(
   guavaJar: string,
   targetAarPath: string,
 ): Promise<void> {
+  const started = performance.now();
+  const cacheKey = await xmlArtifactKey('batch', [
+    lintApiJar,
+    commonJar,
+    sdkCommonJar,
+    layoutlibApiJar,
+    guavaJar,
+  ]);
+  if (await reuseXmlArtifact(cacheKey, targetAarPath, started)) return;
   const staging = join(sandbox.sandboxDir, 'analysis-batch-staging');
   const classesStaging = join(staging, 'classes-staging');
   const lintStaging = join(staging, 'lint-staging');
@@ -6316,6 +6242,7 @@ async function createAnalysisBatchAar(
   );
   await mkdir(dirname(targetAarPath), { recursive: true });
   runJdkTool(sandbox, 'jar', ['--create', '--file', targetAarPath, '-C', aarContent, '.']);
+  await captureXmlArtifact(cacheKey, targetAarPath, started);
 }
 
 async function createSingleJavaRuleAar(
@@ -6332,6 +6259,19 @@ async function createSingleJavaRuleAar(
     targetAarPath: string;
   },
 ): Promise<void> {
+  const started = performance.now();
+  const cacheKey = await xmlArtifactKey(
+    'single-rule',
+    [lintApiJar, commonJar],
+    [
+      options.pkg,
+      options.issueId,
+      options.detectorName,
+      options.triggerText,
+      options.reportMessage,
+    ],
+  );
+  if (await reuseXmlArtifact(cacheKey, options.targetAarPath, started)) return;
   const staging = join(sandbox.sandboxDir, options.stagingName);
   await rm(staging, { recursive: true, force: true });
   const classesStaging = join(staging, 'classes-staging');
@@ -6416,12 +6356,16 @@ async function createSingleJavaRuleAar(
   );
   await mkdir(dirname(options.targetAarPath), { recursive: true });
   runJdkTool(sandbox, 'jar', ['--create', '--file', options.targetAarPath, '-C', aarContent, '.']);
+  await captureXmlArtifact(cacheKey, options.targetAarPath, started);
 }
 
 async function createAndroidxFragmentStubJar(
   sandbox: IntegrationSandbox,
   targetJarPath: string,
 ): Promise<void> {
+  const started = performance.now();
+  const cacheKey = await xmlArtifactKey('fragment-stub', []);
+  if (await reuseXmlArtifact(cacheKey, targetJarPath, started)) return;
   const staging = join(sandbox.sandboxDir, 'androidx-fragment-stub');
   const classesDir = join(staging, 'classes');
   await mkdir(classesDir, { recursive: true });
@@ -6430,6 +6374,7 @@ async function createAndroidxFragmentStubJar(
   runJdkTool(sandbox, 'javac', ['--release', '21', '-d', classesDir, src]);
   await mkdir(dirname(targetJarPath), { recursive: true });
   runJdkTool(sandbox, 'jar', ['--create', '--file', targetJarPath, '-C', classesDir, '.']);
+  await captureXmlArtifact(cacheKey, targetJarPath, started);
 }
 
 async function copyNativeAnalysisFixture(
@@ -6465,7 +6410,6 @@ async function copyNativeAnalysisFixture(
     'utf8',
   );
 
-  await copyCachedDependencies(sandbox);
   const wrapperJar = join(targetDir, 'gradle', 'wrapper', 'gradle-wrapper.jar');
   await cp(
     resolve('test-fixtures', 'gradle-execution', 'gradle', 'wrapper', 'gradle-wrapper.jar'),
@@ -6520,14 +6464,14 @@ async function copyNativeAnalysisFixture(
   );
 
   if (options.includeBatchAars ?? true) {
-    const composeAarSrc = await findComposeRuntimeAar(GLOBAL_GRADLE_USER_HOME);
+    const composeAarSrc = await findComposeRuntimeAar(sandbox);
     await cp(composeAarSrc, join(targetDir, 'app', 'libs', 'compose-runtime.aar'));
 
-    const lintApiJar = await findLintApiJar(GLOBAL_GRADLE_USER_HOME);
-    const commonJar = await findCommonJar(GLOBAL_GRADLE_USER_HOME);
-    const sdkCommonJar = await findSdkCommonJar(GLOBAL_GRADLE_USER_HOME);
-    const layoutlibApiJar = await findLayoutlibApiJar(GLOBAL_GRADLE_USER_HOME);
-    const guavaJar = await findGuavaJar(GLOBAL_GRADLE_USER_HOME);
+    const lintApiJar = await findLintApiJar(sandbox);
+    const commonJar = await findCommonJar(sandbox);
+    const sdkCommonJar = await findSdkCommonJar(sandbox);
+    const layoutlibApiJar = await findLayoutlibApiJar(sandbox);
+    const guavaJar = await findGuavaJar(sandbox);
 
     await createCustomExternalAar(
       sandbox,
@@ -6767,15 +6711,6 @@ test('native Android analysis: inspections catalog, inspectCode partialResultTok
     projectDir = await copyNativeAnalysisFixture(sandbox, { includeBatchAars: true });
     const client = await startLspClient(projectDir, sandbox);
     driver = client;
-
-    await executeIntellij(
-      { action: 'wait', project: projectDir, timeout: 180 },
-      undefined,
-      undefined,
-      { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath },
-    );
-    await waitForHighWatermark(client);
 
     const appJavaDir = join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app');
     const batchJavaPath = join(appJavaDir, 'BatchJavaProbe.java');
@@ -7245,504 +7180,510 @@ test('native Android analysis: inspections catalog, inspectCode partialResultTok
   }
 });
 
-test('native Android analysis: AAR replacement, multi-module language union, model/variant/minSdk invalidation, and cancel safety', async (t) => {
-  const sandbox = await createIntegrationSandbox(prereqs);
+test.describe('native Android analysis: AAR replacement, multi-module language union, model/variant/minSdk invalidation, and cancel safety', {
+  timeout: Infinity,
+}, () => {
+  let sandbox: IntegrationSandbox;
   let projectDir = '';
-  let driver: InitializedLspClientDriver | null = null;
+  let client: InitializedLspClientDriver;
+  let coreJavaUri: string;
+  let batchLayoutPath: string;
+  let batchLayoutUri: string;
+  let replaceableUri: string;
+  let batchJavaUri: string;
+  let batchJavaText: string;
 
-  try {
-    projectDir = await copyNativeAnalysisFixture(sandbox, { includeBatchAars: true });
-    const client = await startLspClient(projectDir, sandbox);
-    driver = client;
+  test.before(
+    async () => {
+      sandbox = await createIntegrationSandbox(prereqs);
+      projectDir = await copyNativeAnalysisFixture(sandbox, { includeBatchAars: true });
+      client = await startLspClient(projectDir, sandbox);
 
-    await executeIntellij(
-      { action: 'wait', project: projectDir, timeout: 180 },
-      undefined,
-      undefined,
-      { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath },
+      const appJavaDir = join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app');
+      const coreJavaPath = join(
+        projectDir,
+        'core',
+        'src',
+        'main',
+        'java',
+        'com',
+        'example',
+        'core',
+        'CoreCrossModuleProbe.java',
+      );
+      coreJavaUri = pathToFileURL(coreJavaPath).href;
+      batchLayoutPath = join(
+        projectDir,
+        'app',
+        'src',
+        'main',
+        'res',
+        'layout',
+        'layout_batch_probe.xml',
+      );
+      batchLayoutUri = pathToFileURL(batchLayoutPath).href;
+      const replaceablePath = join(appJavaDir, 'ReplaceableProbe.java');
+      replaceableUri = pathToFileURL(replaceablePath).href;
+      const batchJavaPath = join(appJavaDir, 'BatchJavaProbe.java');
+      batchJavaUri = pathToFileURL(batchJavaPath).href;
+      batchJavaText = await readFile(batchJavaPath, 'utf8');
+    },
+    { timeout: 180000 },
+  );
+
+  test.after(
+    async () => {
+      try {
+        await client?.close();
+      } finally {
+        await sandbox?.cleanup();
+      }
+    },
+    { timeout: 180000 },
+  );
+
+  test('multi-module same-ID catalog merge and language union dispatch', {
+    timeout: 180000,
+  }, async () => {
+    const inspections = await getInspections(client);
+    const crossEntries = inspections.filter((i) => i.id === 'AndroidLint.SharedCrossModuleRule');
+    assert.equal(
+      crossEntries.length,
+      1,
+      'Multi-module same issue ID must produce exactly one catalog entry',
     );
+
+    client.notify('textDocument/didOpen', {
+      textDocument: {
+        uri: batchLayoutUri,
+        languageId: 'xml',
+        version: 1,
+        text: await readFile(batchLayoutPath, 'utf8'),
+      },
+    });
+    try {
+      const res = await runInspectCode(client, {
+        uris: [coreJavaUri, batchLayoutUri],
+        inspections: ['AndroidLint.SharedCrossModuleRule'],
+      });
+      assert.equal(
+        res.reports.length,
+        2,
+        `Expected reports for both :core Java and :app XML (${JSON.stringify(crossEntries)}): ${JSON.stringify(res)}`,
+      );
+      const coreReport = res.reports.find((r) => normalizeUri(r.uri) === normalizeUri(coreJavaUri));
+      const xmlReport = res.reports.find(
+        (r) => normalizeUri(r.uri) === normalizeUri(batchLayoutUri),
+      );
+      assert.ok(coreReport && xmlReport);
+      assert.ok(
+        coreReport.diagnostics.some(
+          (d) =>
+            d.source === 'android-lint' &&
+            d.code === 'SharedCrossModuleRule' &&
+            d.message?.includes('Shared cross-module Java rule triggered'),
+        ),
+        `Expected SharedCrossModuleRule on :core Java: ${JSON.stringify(coreReport.diagnostics)}`,
+      );
+      assert.ok(
+        xmlReport.diagnostics.some(
+          (d) =>
+            d.source === 'android-lint' &&
+            d.code === 'SharedCrossModuleRule' &&
+            d.message?.includes('Shared cross-module XML rule triggered'),
+        ),
+        `Expected SharedCrossModuleRule on :app XML: ${JSON.stringify(xmlReport.diagnostics)}`,
+      );
+    } finally {
+      client.notify('textDocument/didClose', { textDocument: { uri: batchLayoutUri } });
+    }
+  });
+
+  test('AAR replacement updates inspections catalog and inspectCode diagnostics', {
+    timeout: 180000,
+  }, async () => {
+    const initialCatalog = await getInspections(client);
+    assert.ok(initialCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleA'));
+    assert.equal(
+      initialCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleB'),
+      false,
+    );
+
+    const v1Batch = await runInspectCode(client, {
+      uris: [replaceableUri],
+      inspections: ['AndroidLint.ReplaceableRuleA'],
+    });
+    assert.ok(
+      v1Batch.reports[0].diagnostics.some(
+        (d) =>
+          d.source === 'android-lint' &&
+          d.code === 'ReplaceableRuleA' &&
+          d.message?.includes('Replaceable v1 triggered'),
+      ),
+    );
+
+    const lintApiJar = await findLintApiJar(sandbox);
+    const commonJar = await findCommonJar(sandbox);
+    await createSingleJavaRuleAar(sandbox, lintApiJar, commonJar, {
+      stagingName: 'replaceable-v2-staging',
+      pkg: 'com.example.replaceable',
+      issueId: 'ReplaceableRuleB',
+      detectorName: 'ReplaceableIssueRegistryV2',
+      triggerText: 'triggerReplaceableRule',
+      reportMessage: 'Replaceable v2 triggered (updated)',
+      targetAarPath: join(projectDir, 'app', 'libs', 'replaceable-rule.aar'),
+    });
+    await reimportWorkspace(projectDir, {
+      systemPath: sandbox.systemPath,
+      configDir: sandbox.configDir,
+      timeoutMs: 120000,
+    });
     await waitForHighWatermark(client);
 
-    const appJavaDir = join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app');
-    const coreJavaPath = join(
-      projectDir,
-      'core',
-      'src',
-      'main',
-      'java',
-      'com',
-      'example',
-      'core',
-      'CoreCrossModuleProbe.java',
+    const updatedCatalog = await getInspections(client);
+    assert.equal(
+      updatedCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleA'),
+      false,
+      'Removed issue ReplaceableRuleA must disappear after AAR replacement',
     );
-    const coreJavaUri = pathToFileURL(coreJavaPath).href;
-    const batchLayoutPath = join(
-      projectDir,
-      'app',
-      'src',
-      'main',
-      'res',
-      'layout',
-      'layout_batch_probe.xml',
+    assert.ok(
+      updatedCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleB'),
+      'New issue ReplaceableRuleB must appear after AAR replacement',
     );
-    const batchLayoutUri = pathToFileURL(batchLayoutPath).href;
-    const replaceablePath = join(appJavaDir, 'ReplaceableProbe.java');
-    const replaceableUri = pathToFileURL(replaceablePath).href;
-    const batchJavaPath = join(appJavaDir, 'BatchJavaProbe.java');
-    const batchJavaUri = pathToFileURL(batchJavaPath).href;
-    const batchJavaText = await readFile(batchJavaPath, 'utf8');
 
-    await t.test('multi-module same-ID catalog merge and language union dispatch', async () => {
-      const inspections = await getInspections(client);
-      const crossEntries = inspections.filter((i) => i.id === 'AndroidLint.SharedCrossModuleRule');
-      assert.equal(
-        crossEntries.length,
-        1,
-        'Multi-module same issue ID must produce exactly one catalog entry',
-      );
+    const v2Batch = await runInspectCode(client, {
+      uris: [replaceableUri],
+      inspections: ['AndroidLint.ReplaceableRuleB'],
+    });
+    assert.ok(
+      v2Batch.reports[0].diagnostics.some(
+        (d) =>
+          d.source === 'android-lint' &&
+          d.code === 'ReplaceableRuleB' &&
+          d.message?.includes('Replaceable v2 triggered (updated)'),
+      ),
+    );
+  });
 
-      client.notify('textDocument/didOpen', {
-        textDocument: {
-          uri: batchLayoutUri,
-          languageId: 'xml',
-          version: 1,
-          text: await readFile(batchLayoutPath, 'utf8'),
-        },
-      });
-      try {
-        const res = await runInspectCode(client, {
-          uris: [coreJavaUri, batchLayoutUri],
-          inspections: ['AndroidLint.SharedCrossModuleRule'],
-        });
-        assert.equal(
-          res.reports.length,
-          2,
-          `Expected reports for both :core Java and :app XML (${JSON.stringify(crossEntries)}): ${JSON.stringify(res)}`,
-        );
-        const coreReport = res.reports.find(
-          (r) => normalizeUri(r.uri) === normalizeUri(coreJavaUri),
-        );
-        const xmlReport = res.reports.find(
-          (r) => normalizeUri(r.uri) === normalizeUri(batchLayoutUri),
-        );
-        assert.ok(coreReport && xmlReport);
-        assert.ok(
-          coreReport.diagnostics.some(
-            (d) =>
-              d.source === 'android-lint' &&
-              d.code === 'SharedCrossModuleRule' &&
-              d.message?.includes('Shared cross-module Java rule triggered'),
-          ),
-          `Expected SharedCrossModuleRule on :core Java: ${JSON.stringify(coreReport.diagnostics)}`,
-        );
-        assert.ok(
-          xmlReport.diagnostics.some(
-            (d) =>
-              d.source === 'android-lint' &&
-              d.code === 'SharedCrossModuleRule' &&
-              d.message?.includes('Shared cross-module XML rule triggered'),
-          ),
-          `Expected SharedCrossModuleRule on :app XML: ${JSON.stringify(xmlReport.diagnostics)}`,
-        );
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: batchLayoutUri } });
-      }
+  test('module add/remove reimport invalidates inspections catalog', {
+    timeout: 180000,
+  }, async () => {
+    const lintApiJar = await findLintApiJar(sandbox);
+    const commonJar = await findCommonJar(sandbox);
+    const extraDir = join(projectDir, 'extra');
+    await mkdir(join(extraDir, 'src', 'main', 'java', 'com', 'example', 'extra'), {
+      recursive: true,
+    });
+    await writeFile(
+      join(extraDir, 'src', 'main', 'AndroidManifest.xml'),
+      '<?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" />\n',
+      'utf8',
+    );
+    await writeFile(
+      join(extraDir, 'build.gradle.kts'),
+      [
+        'plugins { id("com.android.library") }',
+        'android {',
+        '    namespace = "com.example.extra"',
+        '    compileSdk = 37',
+        '    defaultConfig { minSdk = 21 }',
+        '    compileOptions { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }',
+        '}',
+        'dependencies {',
+        '    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await createSingleJavaRuleAar(sandbox, lintApiJar, commonJar, {
+      stagingName: 'extra-module-aar-staging',
+      pkg: 'com.example.extra',
+      issueId: 'ExtraModuleOnlyRule',
+      detectorName: 'ExtraModuleIssueRegistry',
+      triggerText: 'triggerExtraModuleRule',
+      reportMessage: 'Extra module rule triggered',
+      targetAarPath: join(extraDir, 'libs', 'extra-only.aar'),
     });
 
-    await t.test(
-      'AAR replacement updates inspections catalog and inspectCode diagnostics',
-      async () => {
-        const initialCatalog = await getInspections(client);
-        assert.ok(initialCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleA'));
-        assert.equal(
-          initialCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleB'),
-          false,
-        );
-
-        const v1Batch = await runInspectCode(client, {
-          uris: [replaceableUri],
-          inspections: ['AndroidLint.ReplaceableRuleA'],
-        });
-        assert.ok(
-          v1Batch.reports[0].diagnostics.some(
-            (d) =>
-              d.source === 'android-lint' &&
-              d.code === 'ReplaceableRuleA' &&
-              d.message?.includes('Replaceable v1 triggered'),
-          ),
-        );
-
-        const lintApiJar = await findLintApiJar(GLOBAL_GRADLE_USER_HOME);
-        const commonJar = await findCommonJar(GLOBAL_GRADLE_USER_HOME);
-        await createSingleJavaRuleAar(sandbox, lintApiJar, commonJar, {
-          stagingName: 'replaceable-v2-staging',
-          pkg: 'com.example.replaceable',
-          issueId: 'ReplaceableRuleB',
-          detectorName: 'ReplaceableIssueRegistryV2',
-          triggerText: 'triggerReplaceableRule',
-          reportMessage: 'Replaceable v2 triggered (updated)',
-          targetAarPath: join(projectDir, 'app', 'libs', 'replaceable-rule.aar'),
-        });
-        await reimportWorkspace(projectDir, {
-          systemPath: sandbox.systemPath,
-          configDir: sandbox.configDir,
-          timeoutMs: 120000,
-        });
-        await waitForHighWatermark(client);
-
-        const updatedCatalog = await getInspections(client);
-        assert.equal(
-          updatedCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleA'),
-          false,
-          'Removed issue ReplaceableRuleA must disappear after AAR replacement',
-        );
-        assert.ok(
-          updatedCatalog.some((i) => i.id === 'AndroidLint.ReplaceableRuleB'),
-          'New issue ReplaceableRuleB must appear after AAR replacement',
-        );
-
-        const v2Batch = await runInspectCode(client, {
-          uris: [replaceableUri],
-          inspections: ['AndroidLint.ReplaceableRuleB'],
-        });
-        assert.ok(
-          v2Batch.reports[0].diagnostics.some(
-            (d) =>
-              d.source === 'android-lint' &&
-              d.code === 'ReplaceableRuleB' &&
-              d.message?.includes('Replaceable v2 triggered (updated)'),
-          ),
-        );
-      },
-    );
-
-    await t.test('module add/remove reimport invalidates inspections catalog', async () => {
-      const lintApiJar = await findLintApiJar(GLOBAL_GRADLE_USER_HOME);
-      const commonJar = await findCommonJar(GLOBAL_GRADLE_USER_HOME);
-      const extraDir = join(projectDir, 'extra');
-      await mkdir(join(extraDir, 'src', 'main', 'java', 'com', 'example', 'extra'), {
-        recursive: true,
+    const settingsPath = join(projectDir, 'settings.gradle.kts');
+    const originalSettings = await readFile(settingsPath, 'utf8');
+    try {
+      await writeFile(settingsPath, `${originalSettings}\ninclude(":extra")\n`, 'utf8');
+      await reimportWorkspace(projectDir, {
+        systemPath: sandbox.systemPath,
+        configDir: sandbox.configDir,
+        timeoutMs: 120000,
       });
-      await writeFile(
-        join(extraDir, 'src', 'main', 'AndroidManifest.xml'),
-        '<?xml version="1.0" encoding="utf-8"?><manifest xmlns:android="http://schemas.android.com/apk/res/android" />\n',
-        'utf8',
+      await waitForHighWatermark(client);
+      const withExtraCatalog = await getInspections(client);
+      assert.ok(
+        withExtraCatalog.some((i) => i.id === 'AndroidLint.ExtraModuleOnlyRule'),
+        'Added Android module AAR inspection must appear after reimport',
       );
+
+      await writeFile(settingsPath, originalSettings, 'utf8');
+      await reimportWorkspace(projectDir, {
+        systemPath: sandbox.systemPath,
+        configDir: sandbox.configDir,
+        timeoutMs: 120000,
+      });
+      await waitForHighWatermark(client);
+      const withoutExtraCatalog = await getInspections(client);
+      assert.equal(
+        withoutExtraCatalog.some((i) => i.id === 'AndroidLint.ExtraModuleOnlyRule'),
+        false,
+        'Removed Android module AAR inspection must be evicted after reimport',
+      );
+    } finally {
+      await writeFile(settingsPath, originalSettings, 'utf8');
+    }
+  });
+
+  test('minSdk and built variant model invalidation for inspectCode and inspections', {
+    timeout: 180000,
+  }, async () => {
+    const buildFiles = ['app', 'lib', 'core', 'independent'].map((m) =>
+      join(projectDir, m, 'build.gradle.kts'),
+    );
+    const originals = await Promise.all(buildFiles.map((f) => readFile(f, 'utf8')));
+    const modelDir = join(
+      projectDir,
+      'app',
+      'build',
+      'intermediates',
+      'lint_report_lint_model',
+      'debug',
+      'generateDebugLintReportModel',
+    );
+    try {
+      await rm(join(projectDir, 'app', 'build'), { recursive: true, force: true });
+      const initialBatch = await runInspectCode(client, {
+        uris: [batchJavaUri],
+        inspections: ['AndroidLint.NewApi'],
+      });
+      assert.equal(
+        initialBatch.reports[0].diagnostics.filter(
+          (d) => d.source === 'android-lint' && d.code === 'NewApi',
+        ).length,
+        1,
+      );
+
+      // Missing minSdk premise across all modules (valid Gradle DSL, non-literal) removes ApiDetector/NewApi
+      for (let i = 0; i < buildFiles.length; i++) {
+        await writeFile(
+          buildFiles[i],
+          originals[i].replace(
+            /minSdk = \d+/,
+            'minSdk = Integer.getInteger("omp.test.minSdk", 21)',
+          ),
+          'utf8',
+        );
+      }
+      const missingPremiseCatalog = await getInspections(client);
+      assert.equal(
+        missingPremiseCatalog.some((i) => i.id === 'AndroidLint.NewApi'),
+        false,
+        'Catalog must drop NewApi when all modules lack a valid minSdk premise',
+      );
+      const missingPremiseBatch = await runInspectCode(client, {
+        uris: [batchJavaUri],
+        inspections: ['AndroidLint.NewApi'],
+      });
+      assert.equal(missingPremiseBatch.summary.files, 0);
+      assert.equal(missingPremiseBatch.summary.problems, 0);
+      assert.equal(missingPremiseBatch.summary.skipped ?? 0, 0);
+      assert.equal(missingPremiseBatch.reports.length, 0);
+
+      // Official built lint model restores variant minSdk=21, then minSdk=26 clears NewApi
+      await mkdir(modelDir, { recursive: true });
       await writeFile(
-        join(extraDir, 'build.gradle.kts'),
+        join(modelDir, 'module.xml'),
         [
-          'plugins { id("com.android.library") }',
-          'android {',
-          '    namespace = "com.example.extra"',
-          '    compileSdk = 37',
-          '    defaultConfig { minSdk = 21 }',
-          '    compileOptions { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }',
-          '}',
-          'dependencies {',
-          '    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))',
-          '}',
+          '<lint-module format="1" dir="." name="app" type="APP" buildFolder="build" javaSourceLevel="21" compileTarget="android-37">',
+          '  <lintOptions />',
+          '  <variant name="debug"/>',
+          '</lint-module>',
           '',
         ].join('\n'),
         'utf8',
       );
-      await createSingleJavaRuleAar(sandbox, lintApiJar, commonJar, {
-        stagingName: 'extra-module-aar-staging',
-        pkg: 'com.example.extra',
-        issueId: 'ExtraModuleOnlyRule',
-        detectorName: 'ExtraModuleIssueRegistry',
-        triggerText: 'triggerExtraModuleRule',
-        reportMessage: 'Extra module rule triggered',
-        targetAarPath: join(extraDir, 'libs', 'extra-only.aar'),
-      });
-
-      const settingsPath = join(projectDir, 'settings.gradle.kts');
-      const originalSettings = await readFile(settingsPath, 'utf8');
-      try {
-        await writeFile(settingsPath, `${originalSettings}\ninclude(":extra")\n`, 'utf8');
-        await reimportWorkspace(projectDir, {
-          systemPath: sandbox.systemPath,
-          configDir: sandbox.configDir,
-          timeoutMs: 120000,
-        });
-        await waitForHighWatermark(client);
-        const withExtraCatalog = await getInspections(client);
-        assert.ok(
-          withExtraCatalog.some((i) => i.id === 'AndroidLint.ExtraModuleOnlyRule'),
-          'Added Android module AAR inspection must appear after reimport',
-        );
-
-        await writeFile(settingsPath, originalSettings, 'utf8');
-        await reimportWorkspace(projectDir, {
-          systemPath: sandbox.systemPath,
-          configDir: sandbox.configDir,
-          timeoutMs: 120000,
-        });
-        await waitForHighWatermark(client);
-        const withoutExtraCatalog = await getInspections(client);
-        assert.equal(
-          withoutExtraCatalog.some((i) => i.id === 'AndroidLint.ExtraModuleOnlyRule'),
-          false,
-          'Removed Android module AAR inspection must be evicted after reimport',
-        );
-      } finally {
-        await writeFile(settingsPath, originalSettings, 'utf8');
-      }
-    });
-
-    await t.test(
-      'minSdk and built variant model invalidation for inspectCode and inspections',
-      async () => {
-        const buildFiles = ['app', 'lib', 'core', 'independent'].map((m) =>
-          join(projectDir, m, 'build.gradle.kts'),
-        );
-        const originals = await Promise.all(buildFiles.map((f) => readFile(f, 'utf8')));
-        const modelDir = join(
-          projectDir,
-          'app',
-          'build',
-          'intermediates',
-          'lint_report_lint_model',
-          'debug',
-          'generateDebugLintReportModel',
-        );
-        try {
-          await rm(join(projectDir, 'app', 'build'), { recursive: true, force: true });
-          const initialBatch = await runInspectCode(client, {
-            uris: [batchJavaUri],
-            inspections: ['AndroidLint.NewApi'],
-          });
-          assert.equal(
-            initialBatch.reports[0].diagnostics.filter(
-              (d) => d.source === 'android-lint' && d.code === 'NewApi',
-            ).length,
-            1,
-          );
-
-          // Missing minSdk premise across all modules (valid Gradle DSL, non-literal) removes ApiDetector/NewApi
-          for (let i = 0; i < buildFiles.length; i++) {
-            await writeFile(
-              buildFiles[i],
-              originals[i].replace(
-                /minSdk = \d+/,
-                'minSdk = Integer.getInteger("omp.test.minSdk", 21)',
-              ),
-              'utf8',
-            );
-          }
-          const missingPremiseCatalog = await getInspections(client);
-          assert.equal(
-            missingPremiseCatalog.some((i) => i.id === 'AndroidLint.NewApi'),
-            false,
-            'Catalog must drop NewApi when all modules lack a valid minSdk premise',
-          );
-          const missingPremiseBatch = await runInspectCode(client, {
-            uris: [batchJavaUri],
-            inspections: ['AndroidLint.NewApi'],
-          });
-          assert.equal(missingPremiseBatch.summary.files, 0);
-          assert.equal(missingPremiseBatch.summary.problems, 0);
-          assert.equal(missingPremiseBatch.summary.skipped ?? 0, 0);
-          assert.equal(missingPremiseBatch.reports.length, 0);
-
-          // Official built lint model restores variant minSdk=21, then minSdk=26 clears NewApi
-          await mkdir(modelDir, { recursive: true });
-          await writeFile(
-            join(modelDir, 'module.xml'),
-            [
-              '<lint-module format="1" dir="." name="app" type="APP" buildFolder="build" javaSourceLevel="21" compileTarget="android-37">',
-              '  <lintOptions />',
-              '  <variant name="debug"/>',
-              '</lint-module>',
-              '',
-            ].join('\n'),
-            'utf8',
-          );
-          const variantXml = (minSdkVal: number) =>
-            [
-              `<variant name="debug" package="com.example.app" minSdkVersion="${minSdkVal}" targetSdkVersion="37" debuggable="true">`,
-              '  <buildFeatures />',
-              '  <sourceProviders />',
-              '  <resValues />',
-              '  <manifestPlaceholders />',
-              '  <mainArtifact applicationId="com.example.app" />',
-              '</variant>',
-              '',
-            ].join('\n');
-          await writeFile(join(modelDir, 'debug.xml'), variantXml(21), 'utf8');
-          await writeFile(
-            join(modelDir, 'debug-mainArtifact-libraries.xml'),
-            '<libraries>\n</libraries>\n',
-            'utf8',
-          );
-          await writeFile(
-            join(modelDir, 'debug-mainArtifact-dependencies.xml'),
-            '<dependencies>\n</dependencies>\n',
-            'utf8',
-          );
-
-          const restoredCatalog = await getInspections(client);
-          assert.ok(restoredCatalog.some((i) => i.id === 'AndroidLint.NewApi'));
-          const restoredBatch = await runInspectCode(client, {
-            uris: [batchJavaUri],
-            inspections: ['AndroidLint.NewApi'],
-          });
-          assert.equal(
-            restoredBatch.reports[0].diagnostics.filter(
-              (d) => d.source === 'android-lint' && d.code === 'NewApi',
-            ).length,
-            1,
-          );
-
-          await writeFile(join(modelDir, 'debug.xml'), variantXml(26), 'utf8');
-          const raisedMinSdkBatch = await runInspectCode(client, {
-            uris: [batchJavaUri],
-            inspections: ['AndroidLint.NewApi'],
-          });
-          assert.equal(raisedMinSdkBatch.summary.files, 1);
-          assert.equal(raisedMinSdkBatch.summary.problems, 0);
-          assert.equal(raisedMinSdkBatch.summary.skipped ?? 0, 0);
-          assert.equal(
-            raisedMinSdkBatch.reports.length,
-            0,
-            'Variant model update to minSdkVersion=26 must invalidate batch cache and clear NewApi',
-          );
-        } finally {
-          for (let i = 0; i < buildFiles.length; i++) {
-            await writeFile(buildFiles[i], originals[i], 'utf8');
-          }
-          await rm(join(projectDir, 'app', 'build', 'intermediates', 'lint_report_lint_model'), {
-            recursive: true,
-            force: true,
-          });
-          await waitForHighWatermark(client);
-        }
-      },
-    );
-
-    await t.test('cancellation and concurrent edit prevent stale cache publication', async () => {
-      const busyJavaText = batchJavaText.replace(
-        '        new android.app.NotificationChannel("batch_chan", "Batch Channel", 3);\n',
-        '        new android.app.NotificationChannel("batch_chan", "Batch Channel", 3);\n'.repeat(
-          1000,
-        ),
+      const variantXml = (minSdkVal: number) =>
+        [
+          `<variant name="debug" package="com.example.app" minSdkVersion="${minSdkVal}" targetSdkVersion="37" debuggable="true">`,
+          '  <buildFeatures />',
+          '  <sourceProviders />',
+          '  <resValues />',
+          '  <manifestPlaceholders />',
+          '  <mainArtifact applicationId="com.example.app" />',
+          '</variant>',
+          '',
+        ].join('\n');
+      await writeFile(join(modelDir, 'debug.xml'), variantXml(21), 'utf8');
+      await writeFile(
+        join(modelDir, 'debug-mainArtifact-libraries.xml'),
+        '<libraries>\n</libraries>\n',
+        'utf8',
       );
-      client.notify('textDocument/didOpen', {
-        textDocument: { uri: batchJavaUri, languageId: 'java', version: 1, text: busyJavaText },
+      await writeFile(
+        join(modelDir, 'debug-mainArtifact-dependencies.xml'),
+        '<dependencies>\n</dependencies>\n',
+        'utf8',
+      );
+
+      const restoredCatalog = await getInspections(client);
+      assert.ok(restoredCatalog.some((i) => i.id === 'AndroidLint.NewApi'));
+      const restoredBatch = await runInspectCode(client, {
+        uris: [batchJavaUri],
+        inspections: ['AndroidLint.NewApi'],
       });
-      try {
-        const cancelInspectId = nextNativeAnalysisRequestId++;
-        const cancelToken = `cancel-inspect-${cancelInspectId}`;
-        client.process.stdin?.write(
-          encode({
-            jsonrpc: '2.0',
-            id: cancelInspectId,
-            method: 'intellij/inspectCode',
-            params: {
-              scope: { uris: [batchJavaUri] },
-              inspections: ['AndroidLint.NewApi'],
-              partialResultToken: cancelToken,
-            },
-          }),
-        );
-        client.notify('$/cancelRequest', { id: cancelInspectId });
-        const cancelMsg = await client.waitFor((m) => m.id === cancelInspectId && !m.method, 30000);
-        if (cancelMsg.error) {
-          assert.equal(cancelMsg.error.code, -32800, JSON.stringify(cancelMsg));
-        }
+      assert.equal(
+        restoredBatch.reports[0].diagnostics.filter(
+          (d) => d.source === 'android-lint' && d.code === 'NewApi',
+        ).length,
+        1,
+      );
 
-        const fixedJavaText = batchJavaText.replace(
-          'new android.app.NotificationChannel("batch_chan", "Batch Channel", 3);',
-          '// NotificationChannel removed',
-        );
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: batchJavaUri, version: 2 },
-          contentChanges: [{ text: busyJavaText }],
-        });
-        const concurrentInspectId = nextNativeAnalysisRequestId++;
-        client.process.stdin?.write(
-          encode({
-            jsonrpc: '2.0',
-            id: concurrentInspectId,
-            method: 'intellij/inspectCode',
-            params: {
-              scope: { uris: [batchJavaUri] },
-              inspections: ['AndroidLint.NewApi'],
-              partialResultToken: `concurrent-${concurrentInspectId}`,
-            },
-          }),
-        );
-        client.notify('textDocument/didChange', {
-          textDocument: { uri: batchJavaUri, version: 3 },
-          contentChanges: [{ text: fixedJavaText }],
-        });
-        const concurrentMsg = await client.waitFor(
-          (m) => m.id === concurrentInspectId && !m.method,
-          30000,
-        );
-        if (concurrentMsg.error) {
-          assert.equal(concurrentMsg.error.code, -32801, JSON.stringify(concurrentMsg));
-        }
-
-        const postInspect = await runInspectCode(client, {
-          uris: [batchJavaUri],
-          inspections: ['AndroidLint.NewApi'],
-        });
-        assert.equal(postInspect.summary.files, 1);
-        assert.equal(postInspect.summary.problems, 0);
-        assert.equal(
-          postInspect.reports.length,
-          0,
-          `Subsequent inspectCode must reflect updated buffer without stale NewApi cache: ${JSON.stringify(postInspect)}`,
-        );
-        const postCustom = await runInspectCode(client, {
-          uris: [batchJavaUri],
-          inspections: ['AndroidLint.CustomExternalRule'],
-        });
-        assert.equal(postCustom.reports.length, 1);
-        assert.deepEqual(
-          postCustom.reports[0].diagnostics
-            .filter((d) => d.source === 'android-lint')
-            .map((d) => d.code),
-          ['CustomExternalRule'],
-        );
-
-        const cancelCatalogId = nextNativeAnalysisRequestId++;
-        client.process.stdin?.write(
-          encode({
-            jsonrpc: '2.0',
-            id: cancelCatalogId,
-            method: 'intellij/inspections',
-            params: {},
-          }),
-        );
-        client.notify('$/cancelRequest', { id: cancelCatalogId });
-        const catalogCancelMsg = await client.waitFor(
-          (m) => m.id === cancelCatalogId && !m.method,
-          30000,
-        );
-        if (catalogCancelMsg.error) {
-          assert.equal(catalogCancelMsg.error.code, -32800, JSON.stringify(catalogCancelMsg));
-        }
-        const recoveredCatalog = await getInspections(client);
-        assert.ok(
-          recoveredCatalog.some((i) => i.id === 'AndroidLint.NewApi'),
-          'Catalog query after cancellation must return full current inspections',
-        );
-      } finally {
-        client.notify('textDocument/didClose', { textDocument: { uri: batchJavaUri } });
+      await writeFile(join(modelDir, 'debug.xml'), variantXml(26), 'utf8');
+      const raisedMinSdkBatch = await runInspectCode(client, {
+        uris: [batchJavaUri],
+        inspections: ['AndroidLint.NewApi'],
+      });
+      assert.equal(raisedMinSdkBatch.summary.files, 1);
+      assert.equal(raisedMinSdkBatch.summary.problems, 0);
+      assert.equal(raisedMinSdkBatch.summary.skipped ?? 0, 0);
+      assert.equal(
+        raisedMinSdkBatch.reports.length,
+        0,
+        'Variant model update to minSdkVersion=26 must invalidate batch cache and clear NewApi',
+      );
+    } finally {
+      for (let i = 0; i < buildFiles.length; i++) {
+        await writeFile(buildFiles[i], originals[i], 'utf8');
       }
-    });
-  } finally {
-    if (driver) {
-      try {
-        await driver.close();
-      } catch {
-        // Ignore close failure
-      }
+      await rm(join(projectDir, 'app', 'build', 'intermediates', 'lint_report_lint_model'), {
+        recursive: true,
+        force: true,
+      });
+      await waitForHighWatermark(client);
     }
-    await sandbox.cleanup();
-  }
+  });
+
+  test('cancellation and concurrent edit prevent stale cache publication', {
+    timeout: 180000,
+  }, async () => {
+    const busyJavaText = batchJavaText.replace(
+      '        new android.app.NotificationChannel("batch_chan", "Batch Channel", 3);\n',
+      '        new android.app.NotificationChannel("batch_chan", "Batch Channel", 3);\n'.repeat(
+        1000,
+      ),
+    );
+    client.notify('textDocument/didOpen', {
+      textDocument: { uri: batchJavaUri, languageId: 'java', version: 1, text: busyJavaText },
+    });
+    try {
+      const cancelInspectId = nextNativeAnalysisRequestId++;
+      const cancelToken = `cancel-inspect-${cancelInspectId}`;
+      client.process.stdin?.write(
+        encode({
+          jsonrpc: '2.0',
+          id: cancelInspectId,
+          method: 'intellij/inspectCode',
+          params: {
+            scope: { uris: [batchJavaUri] },
+            inspections: ['AndroidLint.NewApi'],
+            partialResultToken: cancelToken,
+          },
+        }),
+      );
+      client.notify('$/cancelRequest', { id: cancelInspectId });
+      const cancelMsg = await client.waitFor((m) => m.id === cancelInspectId && !m.method, 30000);
+      if (cancelMsg.error) {
+        assert.equal(cancelMsg.error.code, -32800, JSON.stringify(cancelMsg));
+      }
+
+      const fixedJavaText = batchJavaText.replace(
+        'new android.app.NotificationChannel("batch_chan", "Batch Channel", 3);',
+        '// NotificationChannel removed',
+      );
+      client.notify('textDocument/didChange', {
+        textDocument: { uri: batchJavaUri, version: 2 },
+        contentChanges: [{ text: busyJavaText }],
+      });
+      const concurrentInspectId = nextNativeAnalysisRequestId++;
+      client.process.stdin?.write(
+        encode({
+          jsonrpc: '2.0',
+          id: concurrentInspectId,
+          method: 'intellij/inspectCode',
+          params: {
+            scope: { uris: [batchJavaUri] },
+            inspections: ['AndroidLint.NewApi'],
+            partialResultToken: `concurrent-${concurrentInspectId}`,
+          },
+        }),
+      );
+      client.notify('textDocument/didChange', {
+        textDocument: { uri: batchJavaUri, version: 3 },
+        contentChanges: [{ text: fixedJavaText }],
+      });
+      const concurrentMsg = await client.waitFor(
+        (m) => m.id === concurrentInspectId && !m.method,
+        30000,
+      );
+      if (concurrentMsg.error) {
+        assert.equal(concurrentMsg.error.code, -32801, JSON.stringify(concurrentMsg));
+      }
+
+      const postInspect = await runInspectCode(client, {
+        uris: [batchJavaUri],
+        inspections: ['AndroidLint.NewApi'],
+      });
+      assert.equal(postInspect.summary.files, 1);
+      assert.equal(postInspect.summary.problems, 0);
+      assert.equal(
+        postInspect.reports.length,
+        0,
+        `Subsequent inspectCode must reflect updated buffer without stale NewApi cache: ${JSON.stringify(postInspect)}`,
+      );
+      const postCustom = await runInspectCode(client, {
+        uris: [batchJavaUri],
+        inspections: ['AndroidLint.CustomExternalRule'],
+      });
+      assert.equal(postCustom.reports.length, 1);
+      assert.deepEqual(
+        postCustom.reports[0].diagnostics
+          .filter((d) => d.source === 'android-lint')
+          .map((d) => d.code),
+        ['CustomExternalRule'],
+      );
+
+      const cancelCatalogId = nextNativeAnalysisRequestId++;
+      client.process.stdin?.write(
+        encode({
+          jsonrpc: '2.0',
+          id: cancelCatalogId,
+          method: 'intellij/inspections',
+          params: {},
+        }),
+      );
+      client.notify('$/cancelRequest', { id: cancelCatalogId });
+      const catalogCancelMsg = await client.waitFor(
+        (m) => m.id === cancelCatalogId && !m.method,
+        30000,
+      );
+      if (catalogCancelMsg.error) {
+        assert.equal(catalogCancelMsg.error.code, -32800, JSON.stringify(catalogCancelMsg));
+      }
+      const recoveredCatalog = await getInspections(client);
+      assert.ok(
+        recoveredCatalog.some((i) => i.id === 'AndroidLint.NewApi'),
+        'Catalog query after cancellation must return full current inspections',
+      );
+    } finally {
+      client.notify('textDocument/didClose', { textDocument: { uri: batchJavaUri } });
+    }
+  });
 });
 
 test('native Android analysis: XML and Java/Kotlin relatedTests bidirectional associations', async (t) => {
@@ -7755,15 +7696,6 @@ test('native Android analysis: XML and Java/Kotlin relatedTests bidirectional as
     projectDir = await copyNativeAnalysisFixture(sandbox, { includeBatchAars: false });
     const client = await startLspClient(projectDir, sandbox);
     driver = client;
-
-    await executeIntellij(
-      { action: 'wait', project: projectDir, timeout: 180 },
-      undefined,
-      undefined,
-      { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath },
-    );
-    await waitForHighWatermark(client);
 
     const appMainJava = join(projectDir, 'app', 'src', 'main', 'java', 'com', 'example', 'app');
     const appMainKt = join(projectDir, 'app', 'src', 'main', 'kotlin', 'com', 'example', 'app');
@@ -8245,14 +8177,6 @@ test('native Android analysis: slim core batch and XML relatedTests without DAP 
   try {
     const projectDir = await copyNativeAnalysisFixture(sandbox, { includeBatchAars: false });
     driver = await startLspClient(projectDir, sandbox);
-    await executeIntellij(
-      { action: 'wait', project: projectDir, timeout: 180 },
-      undefined,
-      undefined,
-      { cwd: projectDir } as ExtensionContext,
-      { systemPath: sandbox.systemPath },
-    );
-    await waitForHighWatermark(driver);
     await driver.request('shutdown', null);
     driver.notify('exit');
     await driver.close();

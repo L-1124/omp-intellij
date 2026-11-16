@@ -4,10 +4,12 @@ import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import {
   createIntegrationSandbox,
+  createRunDependencyCache,
+  findGradleArtifact,
   type IntegrationPrerequisites,
   readServerEula,
 } from './integration/fixture.js';
@@ -17,6 +19,7 @@ const environmentKeys = [
   'OMP_INTELLIJ_SETTINGS',
   'OMP_ANDROID_LS_EXTENSION_DIR',
   'GRADLE_USER_HOME',
+  'GRADLE_RO_DEP_CACHE',
   'JAVA_HOME',
   'IJ_JAVA_OPTIONS',
 ] as const;
@@ -112,3 +115,60 @@ for (const failure of [false, true]) {
     );
   });
 }
+
+test('dependency seeds isolate local Gradle writes and survive consumer cleanup', async (t) => {
+  const source = await mkdtemp(join(tmpdir(), 'omp-dependency-source-'));
+  t.after(() => rm(source, { recursive: true, force: true }));
+  const relativeArtifact = join(
+    'files-2.1',
+    'example',
+    'library',
+    '1.0',
+    'hash',
+    'library-1.0.jar',
+  );
+  const modules = join(source, 'caches', 'modules-2');
+  await mkdir(join(modules, dirname(relativeArtifact)), { recursive: true });
+  await writeFile(join(modules, relativeArtifact), 'seeded artifact');
+  await writeFile(join(modules, 'modules-2.lock'), 'volatile lock');
+  await writeFile(join(modules, 'gc.properties'), 'volatile GC state');
+  const seed = await createRunDependencyCache(source);
+  assert.ok(seed);
+  t.after(() => seed.dispose());
+  const seededArtifact = join(seed.dir, 'modules-2', relativeArtifact);
+  assert.equal((await stat(seededArtifact)).mode & 0o222, 0);
+  await assert.rejects(stat(join(seed.dir, 'modules-2', 'modules-2.lock')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(seed.dir, 'modules-2', 'gc.properties')), { code: 'ENOENT' });
+  await writeFile(join(modules, relativeArtifact), 'later source mutation');
+
+  const first = await createIntegrationSandbox(await prerequisites(t));
+  t.after(() => first.cleanup());
+  first.env.GRADLE_RO_DEP_CACHE = seed.dir;
+  assert.equal(await findGradleArtifact(first, 'example', 'library', '1.0'), seededArtifact);
+  const localArtifact = join(first.gradleUserHome, 'caches', 'modules-2', relativeArtifact);
+  await mkdir(dirname(localArtifact), { recursive: true });
+  await writeFile(localArtifact, 'consumer-local artifact');
+  assert.equal(await findGradleArtifact(first, 'example', 'library', '1.0'), localArtifact);
+  await first.cleanup();
+
+  const second = await createIntegrationSandbox(await prerequisites(t));
+  t.after(() => second.cleanup());
+  second.env.GRADLE_RO_DEP_CACHE = seed.dir;
+  const reused = await findGradleArtifact(second, 'example', 'library', '1.0');
+  assert.equal(await readFile(reused, 'utf8'), 'seeded artifact');
+  await assert.rejects(findGradleArtifact(second, 'example', 'missing', '1.0'), /not found/);
+  assert.equal(await readFile(join(modules, relativeArtifact), 'utf8'), 'later source mutation');
+  await second.cleanup();
+  await seed.dispose();
+  await assert.rejects(stat(seed.dir), { code: 'ENOENT' });
+});
+
+test('dependency seed creation rejects an invalid source without changing it', async (t) => {
+  const source = await mkdtemp(join(tmpdir(), 'omp-dependency-invalid-'));
+  t.after(() => rm(source, { recursive: true, force: true }));
+  await mkdir(join(source, 'caches'));
+  const invalid = join(source, 'caches', 'modules-2');
+  await writeFile(invalid, 'invalid cache input');
+  await assert.rejects(createRunDependencyCache(source), { code: 'ENOTDIR' });
+  assert.equal(await readFile(invalid, 'utf8'), 'invalid cache input');
+});

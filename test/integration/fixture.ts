@@ -1,7 +1,17 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
-import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -493,11 +503,12 @@ export function killProcessSafely(pid: number, sandbox: IntegrationSandbox): voi
   }
 }
 
-async function copyGradleCache(source: string, target: string): Promise<void> {
+async function copyGradleCache(source: string, target: string, readOnly = false): Promise<void> {
   const entries = await readdir(source, { recursive: true, withFileTypes: true });
+  await mkdir(target, { recursive: true });
   let next = 0;
   // Bound disk concurrency while avoiding serial copies of every cached artifact.
-  await Promise.all(
+  const results = await Promise.allSettled(
     Array.from({ length: 32 }, async () => {
       while (next < entries.length) {
         const entry = entries[next++];
@@ -508,30 +519,79 @@ async function copyGradleCache(source: string, target: string): Promise<void> {
           await mkdir(output, { recursive: true });
         } else {
           await mkdir(dirname(output), { recursive: true });
-          if (entry.isFile()) await copyFile(input, output);
-          else await cp(input, output);
+          if (entry.isFile()) {
+            await copyFile(input, output);
+            if (readOnly) await chmod(output, 0o444);
+          } else {
+            await cp(input, output, { dereference: true });
+          }
         }
       }
     }),
   );
+  const errors = results.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
+  if (errors.length) throw new AggregateError(errors, `Failed to copy Gradle cache from ${source}`);
 }
 
-export async function copyCachedDependencies(sandbox: IntegrationSandbox): Promise<void> {
-  const candidates = [
-    process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE,
-    initialGradleUserHome,
-    join(homedir(), '.gradle'),
-  ].filter((dir): dir is string => typeof dir === 'string' && dir.length > 0);
-  const relativePath = join('caches', 'modules-2');
-  const cache = candidates.find(
-    (dir) =>
-      resolve(dir) !== resolve(sandbox.gradleUserHome) && existsSync(join(dir, relativePath)),
-  );
-  if (cache) {
-    await integrationPhase(sandbox.sandboxDir, 'dependency-cache', () =>
-      copyGradleCache(join(cache, relativePath), join(sandbox.gradleUserHome, relativePath)),
-    );
+export async function createRunDependencyCache(sourceHome?: string): Promise<
+  | {
+      dir: string;
+      dispose(): Promise<void>;
+    }
+  | undefined
+> {
+  const candidates = sourceHome
+    ? [join(sourceHome, 'caches', 'modules-2')]
+    : [
+        process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE &&
+          join(process.env.OMP_INTELLIJ_TEST_GRADLE_CACHE, 'caches', 'modules-2'),
+        process.env.GRADLE_RO_DEP_CACHE && join(process.env.GRADLE_RO_DEP_CACHE, 'modules-2'),
+        initialGradleUserHome && join(initialGradleUserHome, 'caches', 'modules-2'),
+        join(homedir(), '.gradle', 'caches', 'modules-2'),
+      ];
+  const source = candidates.find((dir): dir is string => !!dir && existsSync(dir));
+  if (!source) {
+    if (sourceHome) throw new Error(`Gradle dependency cache not found under ${sourceHome}`);
+    return undefined;
   }
+  const dir = await mkdtemp(join(tmpdir(), 'omp-intellij-dependency-seed-'));
+  try {
+    await integrationPhase(dir, 'dependency-seed', () =>
+      copyGradleCache(source, join(dir, 'modules-2'), true),
+    );
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
+  return { dir, dispose: () => rm(dir, { recursive: true, force: true }) };
+}
+
+export async function findGradleArtifact(
+  sandbox: IntegrationSandbox,
+  group: string,
+  module: string,
+  version?: string,
+  fileName?: string,
+): Promise<string> {
+  const roots = [join(sandbox.gradleUserHome, 'caches', 'modules-2')];
+  const seed = sandbox.env.GRADLE_RO_DEP_CACHE;
+  if (seed) roots.push(join(seed, 'modules-2'));
+  for (const root of roots) {
+    const moduleDir = join(root, 'files-2.1', group, module);
+    if (!existsSync(moduleDir)) continue;
+    const versions = version ? [version] : await readdir(moduleDir);
+    for (const selected of versions) {
+      const versionDir = join(moduleDir, selected);
+      if (!existsSync(versionDir)) continue;
+      for (const hash of await readdir(versionDir)) {
+        const artifact = join(versionDir, hash, fileName ?? `${module}-${selected}.jar`);
+        if (existsSync(artifact)) return artifact;
+      }
+    }
+  }
+  throw new Error(
+    `Gradle artifact ${group}:${module}:${version ?? '*'} (${fileName ?? '*.jar'}) not found in ${roots.join(', ')}`,
+  );
 }
 
 async function copyCachedWrapper(sandbox: IntegrationSandbox): Promise<void> {
@@ -751,16 +811,27 @@ export function createLspClientDriver(
     }
     const id = nextId++;
     child.stdin?.write(encode({ jsonrpc: '2.0', id, method, params: finalParams }));
-    const response = waitFor((message) => message.id === id && !message.method, timeoutMs).then(
-      (resp) => {
+    const response = waitFor((message) => message.id === id && !message.method, timeoutMs)
+      .then((resp) => {
         if (resp.error) {
           throw new Error(
             `RPC Error [${resp.error.code}]: ${sanitizeString(resp.error.message || '')}`,
           );
         }
         return resp.result;
-      },
-    );
+      })
+      .catch((error: unknown) => {
+        const stateMessages = messages
+          .filter(
+            (message) =>
+              message.method === 'intellij/workspaceImportState' ||
+              message.method === 'intellij/ready-for-test',
+          )
+          .slice(-8);
+        throw new Error(`LSP ${method}: ${String(error)}; state=${JSON.stringify(stateMessages)}`, {
+          cause: error,
+        });
+      });
     return method === 'initialize'
       ? integrationPhase(sandbox.sandboxDir, 'lsp-initialize', () => response)
       : response;
@@ -885,7 +956,9 @@ export function createDapClientDriver(
         }
         return resp;
       },
-    );
+    ).catch((error: unknown) => {
+      throw new Error(`DAP ${command}: ${String(error)}`, { cause: error });
+    });
     return command === 'initialize' || command === 'launch' || command === 'attach'
       ? integrationPhase(sandbox.sandboxDir, `dap-${command}`, () => response)
       : response;

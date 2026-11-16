@@ -83,19 +83,32 @@ async function main() {
     ]);
     if (stageStatus !== 0) return stageStatus;
   }
-  if (smoke) return runSmokeTests(files);
-  const result = spawnSync(
-    process.execPath,
-    ['--test', '--test-concurrency=1', '--test-timeout=180000', ...args, ...files],
-    { cwd: REPO_ROOT, stdio: 'inherit' },
-  );
-  if (result.error) throw result.error;
-  if (result.status === null) {
-    throw new Error(
-      `Node test runner terminated without an exit code (${result.signal ?? 'unknown signal'})`,
+  const previousReadOnlyCache = process.env.GRADLE_RO_DEP_CACHE;
+  let dependencyCache;
+  try {
+    if (suites.includes('android') || suites.includes('xml')) {
+      const { createRunDependencyCache } = await import('../dist-test/test/integration/fixture.js');
+      dependencyCache = await createRunDependencyCache();
+      if (dependencyCache) process.env.GRADLE_RO_DEP_CACHE = dependencyCache.dir;
+    }
+    if (smoke) return await runSmokeTests(files);
+    const result = spawnSync(
+      process.execPath,
+      ['--test', '--test-concurrency=1', '--test-timeout=180000', ...args, ...files],
+      { cwd: REPO_ROOT, stdio: 'inherit' },
     );
+    if (result.error) throw result.error;
+    if (result.status === null) {
+      throw new Error(
+        `Node test runner terminated without an exit code (${result.signal ?? 'unknown signal'})`,
+      );
+    }
+    return result.status;
+  } finally {
+    if (previousReadOnlyCache === undefined) delete process.env.GRADLE_RO_DEP_CACHE;
+    else process.env.GRADLE_RO_DEP_CACHE = previousReadOnlyCache;
+    await dependencyCache?.dispose();
   }
-  return result.status;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

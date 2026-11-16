@@ -69,6 +69,19 @@ Use `test:smoke` for the standard native JVM path, adding the Android or XML smo
 
 Full integration retains the complete JDK concurrency, cancellation, ownership, Waiting for Debugger, recovery, XML/Lint and model/reload matrices. Keep protocol combinations and deterministic timer boundaries in Node components, PSI/UAST semantics in JVM tests, and native loading/transport/device behavior in real integration. Add a full-only real case when it exercises a host-specific risk, rather than repeating a component matrix.
 
+### Test boundaries and runtime
+
+- JVM tests own PSI/UAST semantics, LintDriver behavior, resource and manifest models, merge provenance and internal state transitions.
+- Node component tests own protocol combinations, framing, client orchestration, error mapping, cancellation timers and OS adaptation. Keep validation on both sides of RPC boundaries.
+- Real LSP integration owns plugin visibility, language registration, indexing, cache invalidation and reimport. A test written in TypeScript that starts native ILS belongs to this layer.
+- Native Android DAP integration owns device/JDWP behavior, breakpoints, variables, stepping, process identity and target ownership. Host and proxy integration retain their entry-specific session ownership, cancellation, EOF and sibling-client checks; reuse native coverage for the full debugger operation matrix.
+- Before removing a real case, identify the failure it catches, the authoritative lower-layer test and the remaining real-host check. Retain cheap assertions with observable value. Remove source-text, import, mock-echo and incidental-default tests instead of preserving them under another name.
+- Share a sandbox only for a common baseline or an intentional sequence of state changes. Give each case a separate 180-second budget and explicit setup/cleanup hook budgets. A suite groups cases; it does not put all cases under one 180-second parent test.
+- Keep fresh sandboxes for crash, lifecycle isolation, cross-project behavior and JDK/SDK switching. Run tests that mutate `process.env` serially. Await resource cleanup before the next case can use the same device application.
+- Cache only successfully built, run-owned artifacts outside disposable sandboxes. Copy artifacts into each consumer; retain independent writable Gradle homes and index directories. XML fixture keys include JDK selection, classpath contents and rule-generation options, so replacement AARs remain distinct. Dispose shared artifacts at run end.
+- The integration runner freezes one dependency seed per invocation and exposes it through `GRADLE_RO_DEP_CACHE`. Sandboxes keep separate writable Gradle homes; direct fixture artifact lookup checks the local cache before the seed. Never expose a live user cache as the shared seed, and dispose the seed after all test files finish.
+- XML setup waits for the native high watermark through its existing LSP connection. Keep one real `intellij wait` check in the XML smoke case, and retain barriers after reimport and edits that require fresh resource state.
+
 Choose the narrowest real suite and pass Node filters after `--`:
 
 ```sh
