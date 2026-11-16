@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -5846,7 +5846,9 @@ test('Android XML and Manifest Lint diagnostics integration', {
         const path = join(projectDir, 'app', 'config', 'manifest-main.xml');
         const text = await readFile(path, 'utf8');
         const uri = pathToFileURL(path).href;
-        await writeFile(path, text, 'utf8');
+        // Invalidate the built snapshot without exposing a truncated source to VFS.
+        const touchedAt = Date.now() / 1000;
+        await utimes(path, touchedAt, touchedAt);
         client.notify('textDocument/didOpen', {
           textDocument: { uri, languageId: 'xml', version: 1, text },
         });
@@ -5856,6 +5858,7 @@ test('Android XML and Manifest Lint diagnostics integration', {
             (d) => d.source === 'android-lint' && d.code === 'CustomManifestRule',
           );
           assert.match(cleanSnapshot?.message ?? '', /ManifestSnapshot: merged=true; mode=live;/);
+            JSON.stringify(clean),
           const build = spawnSync(
             java,
             [
