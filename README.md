@@ -72,6 +72,8 @@ omp plugin install --force omp-intellij@omp-intellij
 
    JDK 自动发现复用已保存的工程配置、`JAVA_HOME`、`JDK_HOME`、`PATH` 和系统标准安装位置。
 
+   已连接工程切换 JDK 或环境变量后，先重启该工程的 LSP 客户端连接，再执行 `/intellij workspace reload`。旧配置连接仍在线时会返回 `PROJECT_LSP_RECONNECT_REQUIRED`；共享 ILS 服务无需重启。调试所有者先结束或 detach 当前会话，再重连其客户端。
+
 ---
 
 ## 日常使用

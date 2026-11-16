@@ -348,7 +348,10 @@ graph TD
 2. **JDK 与环境参数合成**（`applyWorkspaceOptions`）：
    - 在客户端发起 `initialize` 请求时，Bridge 拦截该请求，自 `<hash>.json` 读取该工程绑定的 `javaHome` 与 `env`；
    - 动态合成进入 `initializationOptions.projects[i]`，为该工程注入隔离的 SDK 路径，不同工程并发编译绝不串扰。
+   - 原生客户端的初始化配置只读，`reloadWorkspace` 的覆盖选项仅属于一次导入事件。Bridge 与 runner 在连接记录中保存各工程导入选项的 SHA-256 指纹，忽略索引目录和客户端能力等非导入选项，不写入环境变量明文。
+   - 保存 JDK 或环境变量后，若该工程仍有导入选项不同或未知的存活 LSP 连接，`reload` 返回 `PROJECT_LSP_RECONNECT_REQUIRED` 并记录失败回执。显式重连这些客户端后再重导入；插件保持共享 ILS 进程、其他工程的独立连接和 DAP 会话。多根连接须整体重连，调试所有者由调用方先结束或 detach。
    - 重导入回执的 `importedJavaHome` 校验原生构建工具返回的 `JAVA_HOME`，只证明导入配置已应用；实际运行 JDK 仍由原生启动解析，需要通过运行结果单独验证。
+   - `reload` 完成须同时满足重导入 RPC 与就绪状态，并在同一连接上完成原生 `wait-for-highwatermark`，再校验导入环境、记录成功回执；进度结束或 RPC 确认不单独代表索引与文件失效队列已清空。这三个等待共享超时预算与取消信号。
 3. **租约控制**（`LeaseRecord`）：
    - 每次连接在 `systemPath/plugin-metadata/leases/<uuid>.json` 注册租约；
    - 服务端停止操作（`/intellij stop`）必须核查租约与调试会话活跃列表，若存在未释放租约则拒绝停止，保障并发客户端安全。
