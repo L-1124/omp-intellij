@@ -89,6 +89,8 @@ Android 端点拒绝非空 DAP `args`。Gradle 模型与构建必须使用含 `j
 
 应用句柄保存设备、用户、包、UID 与真实进程实例。已观察到外部重启或 PID 重用时，stale handle 保留新实例。Android 包级 force-stop 不支持原子 expected-PID 条件，身份复核与停止之间仍有平台固有的极窄竞态。
 
+停止自有应用时，先核对 AMS 中的进程实例，再执行包级 force-stop。JDWP VM.Exit 会让 Android 重启前台应用，因此不用它停止应用。已被外部重启替换的实例保留；身份复核与 force-stop 之间仍有上文所述的平台竞态。
+
 `terminate` 请求不受支持且保留会话；所有权通过 `disconnect` 表达。未知退出码不伪造 `exited(0)`。设备离线只释放本地资源，不自动重连或启动应用。
 
 ## 普通运行、进度与取消

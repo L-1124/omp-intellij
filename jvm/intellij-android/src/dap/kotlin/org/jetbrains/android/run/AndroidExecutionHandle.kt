@@ -5,8 +5,6 @@ import com.android.adblib.DeviceState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -184,18 +182,8 @@ class AndroidExecutionHandle internal constructor(
             return
         }
 
-        var cleanlyExited = false
-        if (isDebuggable) {
-            try {
-                cleanlyExited = deviceOps.terminateJdwpProcess(device, identity.pid, stopTimeoutMs)
-            } catch (_: Throwable) {
-                currentCoroutineContext().ensureActive()
-                cleanlyExited = false
-            }
-        }
-        if (!cleanlyExited) {
-            deviceOps.forceStopPackage(device, userId, packageName, stopTimeoutMs)
-        }
+        // VM.Exit can make Android restart a foreground app instead of stopping its package.
+        deviceOps.forceStopPackage(device, userId, packageName, stopTimeoutMs)
     }
 
     suspend fun getProcessDiagnostics(): AndroidProcessDiagnostics? {

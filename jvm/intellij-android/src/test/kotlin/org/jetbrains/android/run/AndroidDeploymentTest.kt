@@ -180,7 +180,6 @@ class AndroidDeploymentTest {
         var forceStopFailure: Throwable? = null
         var nextExitResult: CompletableDeferred<AndroidProcessExit>? = null
         var nextIdentityOnStart: ((Int, String) -> AndroidDebugHandles.ProcessInstanceIdentity)? = null
-
         override suspend fun getCurrentUser(device: ConnectedDevice, timeoutMs: Long): Int {
             getCurrentUserCalls.incrementAndGet()
             return currentUser

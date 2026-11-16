@@ -175,7 +175,7 @@ class AndroidProcessInspectorTest {
     }
 
     @Test
-    fun testTerminateAndInspectNonExistentJdwpProcessSafelyReturns() = runBlocking {
+    fun testInspectNonExistentJdwpProcessSafelyReturns() = runBlocking {
         FakeAdbSession().use { fakeSession ->
             fakeSession.hostServices.devices = DeviceList(
                 listOf(DeviceInfo("emulator-5580", DeviceState.ONLINE)),
@@ -183,9 +183,6 @@ class AndroidProcessInspectorTest {
             )
             val device = fakeSession.connectedDevicesTracker.connectedDevices.first { it.isNotEmpty() }.first()
             val inspector = AndroidProcessInspector()
-
-            val terminated = inspector.terminateJdwpProcess(device, pid = 99999, timeoutMs = 1000L)
-            assertFalse(terminated)
 
             val diag = inspector.inspectProcessDiagnostics(device, pid = 99999)
             assertNull(diag)

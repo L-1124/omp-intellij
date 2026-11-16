@@ -12,10 +12,7 @@ import com.android.adblib.tools.debugging.appProcessTracker
 import com.android.adblib.tools.debugging.getOrNull
 import com.android.adblib.tools.debugging.jdwpProcessTracker
 import com.android.adblib.tools.debugging.properties
-import com.android.adblib.tools.debugging.resumeProcess
 import com.android.adblib.tools.debugging.scope
-import com.android.adblib.tools.debugging.sendDdmsExit
-import com.android.adblib.tools.debugging.sendVmExit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -71,7 +68,6 @@ interface AndroidDeviceOperations {
     )
 
     suspend fun forceStopPackage(device: ConnectedDevice, userId: Int, packageName: String, timeoutMs: Long)
-    suspend fun terminateJdwpProcess(device: ConnectedDevice, pid: Int, timeoutMs: Long): Boolean = false
     suspend fun inspectProcessDiagnostics(device: ConnectedDevice, pid: Int): AndroidProcessDiagnostics? = null
     suspend fun awaitProcessIdentity(
         device: ConnectedDevice,
@@ -322,57 +318,6 @@ class AndroidProcessInspector(
                     )
                 )
             }
-        }
-    }
-
-    override suspend fun terminateJdwpProcess(
-        device: ConnectedDevice,
-        pid: Int,
-        timeoutMs: Long,
-    ): Boolean {
-        if (device.deviceInfoFlow.value.deviceState != DeviceState.ONLINE) {
-            return false
-        }
-        val jdwpProc = try {
-            device.jdwpProcessTracker.processesFlow.value.firstOrNull { it.pid == pid }
-        } catch (_: Throwable) {
-            null
-        } ?: return false
-
-        try {
-            if (jdwpProc.properties.isWaitingForDebugger.getOrNull() == true) {
-                jdwpProc.resumeProcess()
-            }
-        } catch (_: Throwable) {
-        }
-
-        val exitSent = try {
-            jdwpProc.sendVmExit(0)
-            true
-        } catch (_: Throwable) {
-            try {
-                jdwpProc.sendDdmsExit(0)
-                true
-            } catch (_: Throwable) {
-                false
-            }
-        }
-
-        if (!exitSent) {
-            return false
-        }
-
-        return try {
-            withTimeout(minOf(timeoutMs, 1_500L).milliseconds) {
-                jdwpProc.scope.coroutineContext.job.join()
-            }
-            true
-        } catch (_: TimeoutCancellationException) {
-            false
-        } catch (ce: CancellationException) {
-            throw ce
-        } catch (_: Throwable) {
-            false
         }
     }
 
@@ -664,22 +609,24 @@ class AndroidProcessInspector(
     }
 
     companion object {
-        val DEFAULT_SHELL_RUNNER: suspend (ConnectedDevice, String, Long) -> ShellCommandOutput = { device, command, timeoutMs ->
-            val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
-            withTimeout(timeoutMs.milliseconds) {
-                device.session.deviceServices.shellAsText(
-                    device = selector,
-                    command = command,
-                    commandTimeout = Duration.ofMillis(timeoutMs),
-                )
+        val DEFAULT_SHELL_RUNNER: suspend (ConnectedDevice, String, Long) -> ShellCommandOutput =
+            { device, command, timeoutMs ->
+                val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+                withTimeout(timeoutMs.milliseconds) {
+                    device.session.deviceServices.shellAsText(
+                        device = selector,
+                        command = command,
+                        commandTimeout = Duration.ofMillis(timeoutMs),
+                    )
+                }
             }
-        }
-        val DEFAULT_FILE_PULLER: suspend (ConnectedDevice, String, Path, Long) -> Unit = { device, remotePath, destination, timeoutMs ->
-            val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
-            withTimeout(timeoutMs.milliseconds) {
-                device.session.deviceServices.syncRecv(selector, remotePath, destination)
+        val DEFAULT_FILE_PULLER: suspend (ConnectedDevice, String, Path, Long) -> Unit =
+            { device, remotePath, destination, timeoutMs ->
+                val selector = DeviceSelector.fromSerialNumber(device.serialNumber)
+                withTimeout(timeoutMs.milliseconds) {
+                    device.session.deviceServices.syncRecv(selector, remotePath, destination)
+                }
             }
-        }
 
         private val SAFE_PACKAGE_REGEX = Regex("^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+$")
         private val SAFE_COMPONENT_REGEX = Regex("^[A-Za-z0-9_.$]+/[A-Za-z0-9_.$]+$")

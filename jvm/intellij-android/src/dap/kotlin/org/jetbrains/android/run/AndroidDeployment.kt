@@ -661,16 +661,7 @@ class AndroidDeployment @JvmOverloads constructor(
         }
         val current = deviceOps.queryAmsProcesses(device, identity.packageName, identity.userId, 5_000L)
         if (current.any { identity.matchesInstance(it) }) {
-            var cleanlyExited = false
-            try {
-                cleanlyExited = deviceOps.terminateJdwpProcess(device, identity.pid, 5_000L)
-            } catch (_: Throwable) {
-                currentCoroutineContext().ensureActive()
-                cleanlyExited = false
-            }
-            if (!cleanlyExited) {
-                deviceOps.forceStopPackage(device, identity.userId, identity.packageName, 5_000L)
-            }
+            deviceOps.forceStopPackage(device, identity.userId, identity.packageName, 5_000L)
         }
     }
 
