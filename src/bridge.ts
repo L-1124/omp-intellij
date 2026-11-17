@@ -84,6 +84,16 @@ export async function startBridge(): Promise<void> {
   const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
   const documentSymbols = new DocumentSymbolAdapter();
 
+  // The request whose applyModCommand the server interrupted to ask for a variant choice.
+  // Map from server request id to the choice title and its entries; the response is rewritten
+  // once the server treats the fix as applied.
+  const pendingChoices = new Map<
+    unknown,
+    { id: unknown; title: string; entries: Array<{ name: string; command: unknown }> }
+  >();
+  // The most recent applyModCommand whose answer may still be in flight, keyed by server id.
+  let activeModCommandId: unknown = null;
+
   let socket: net.Socket | null = null;
 
   const upstream = asyncFramedStream(async (messageRaw: unknown, frame: Buffer) => {
@@ -315,6 +325,16 @@ export async function startBridge(): Promise<void> {
       ) {
         return;
       }
+      if (
+        message.method === 'workspace/executeCommand' &&
+        message.id !== undefined &&
+        params &&
+        typeof params === 'object' &&
+        'command' in params &&
+        (params.command === 'applyModCommand' || params.command === 'resolveModCommand')
+      ) {
+        activeModCommandId = message.id;
+      }
       barrier.fromClient(message, frame);
     }
   });
@@ -332,6 +352,33 @@ export async function startBridge(): Promise<void> {
       pendingInitialize = null;
       clearTimeout(initializeTimer ?? undefined);
       initializeTimer = null;
+    }
+    if (message.method === 'intellij/chooseAction') {
+      // The server asks which variant to apply and then reports success without editing anything.
+      // Record the entries so the response to the triggering request can explain that instead of
+      // claiming the fix was applied.
+      const params = message.params;
+      const record =
+        params && typeof params === 'object' ? (params as Record<string, unknown>) : {};
+      const entries = Array.isArray(record.entries)
+        ? record.entries.flatMap((entry) => {
+            if (!entry || typeof entry !== 'object') return [];
+            const candidate = entry as Record<string, unknown>;
+            if (typeof candidate.name !== 'string' || candidate.name.length === 0) return [];
+            // The command is the variant's handle; it is forwarded untouched because only the
+            // server can interpret its arguments.
+            return [{ name: candidate.name, command: candidate.command }];
+          })
+        : [];
+      const title = typeof record.title === 'string' ? record.title : '';
+      if (activeModCommandId !== null) {
+        pendingChoices.set(activeModCommandId, { id: activeModCommandId, title, entries });
+      } else {
+        console.error(
+          `intellij-bridge: a fix needs a variant choice with no request in flight${title ? ` (${title})` : ''}`,
+        );
+      }
+      return;
     }
     if (message.method === 'intellij/showConflicts' && message.id !== undefined) {
       // The server blocks this request until answered; only a client UI can decide. Removing
@@ -409,9 +456,32 @@ export async function startBridge(): Promise<void> {
         pendingConfigRequests.set(message.id, params.items);
       }
     }
+    // A fix that needed a variant choice never edited anything, yet the server answers success.
+    // Rewrite that answer so the caller does not build on a change that did not happen.
+    let outgoing = frame;
+    const responseId = !message.method && message.id !== undefined ? message.id : undefined;
+    const interrupted = responseId === undefined ? undefined : pendingChoices.get(responseId);
+    if (interrupted !== undefined && responseId !== undefined) {
+      pendingChoices.delete(responseId);
+      if (activeModCommandId === responseId) activeModCommandId = null;
+      const title = interrupted.title.length > 0 ? interrupted.title : 'choose an action';
+      delete message.result;
+      message.error = {
+        code: -32803,
+        message: `Fix was not applied: the server requires a variant choice (${title}). Execute one of data.choices[].command to apply it; a choice can expire, so re-request code actions rather than retrying a rejected handle.`,
+        data: {
+          reason: 'variant-choice',
+          title,
+          choices: interrupted.entries,
+        },
+      };
+      outgoing = encode(message);
+    } else if (responseId !== undefined && activeModCommandId === responseId) {
+      activeModCommandId = null;
+    }
     barrier.fromServer(
       message,
-      documentSymbols.fromServer(message) ? encode(message) : frame,
+      documentSymbols.fromServer(message) ? encode(message) : outgoing,
       !ownedProgress,
     );
   });

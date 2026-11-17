@@ -328,6 +328,54 @@ test('bridge declines refactors that require a conflicts decision', {
   await h.close();
 });
 
+test('bridge reports a fix that needed a variant choice instead of a false success', {
+  timeout: 15000,
+}, async (t) => {
+  const choiceCommand = {
+    title: 'Apply ModCommand',
+    command: 'applyModCommand',
+    arguments: [{ kind: 'LazyAction', sessionId: 42, index: 1 }],
+  };
+  let serverSocket: net.Socket | undefined;
+  const h = await bridgeFixture(t, (message, socket) => {
+    serverSocket = socket;
+    if (message.method === 'initialize') {
+      socket.write(encode({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } }));
+    } else if (message.method === 'workspace/executeCommand') {
+      socket.write(
+        encode({
+          jsonrpc: '2.0',
+          method: 'intellij/chooseAction',
+          params: {
+            title: 'Change visibility',
+            entries: [{ name: 'Make public', command: choiceCommand }, { name: 'Make private' }],
+          },
+        }),
+      );
+      socket.write(encode({ jsonrpc: '2.0', id: message.id, result: true }));
+    }
+  });
+  h.initialize();
+  await h.waitFor((m) => m.id === 1);
+  assert.ok(serverSocket);
+  serverSocket.write(encode({ jsonrpc: '2.0', method: 'intellij/ready-for-test', params: {} }));
+  h.send({
+    jsonrpc: '2.0',
+    id: 7,
+    method: 'workspace/executeCommand',
+    params: { command: 'applyModCommand', arguments: [] },
+  });
+  const response = await h.waitFor((m) => m.id === 7);
+  assert.equal(response.error?.code, -32803);
+  assert.match(String(response.error?.message), /variant choice/);
+  assert.equal('result' in response, false);
+  assert.deepEqual((response.error?.data as Record<string, unknown>)?.choices, [
+    { name: 'Make public', command: choiceCommand },
+    { name: 'Make private' },
+  ]);
+  await h.close();
+});
+
 test('bridge leaves progress negotiation with clients that support it', {
   timeout: 15000,
 }, async (t) => {
