@@ -28,7 +28,7 @@ import java.util.LinkedHashSet
  * The build-output route (merger.xml, blame maps, generated R jars) describes one build snapshot and
  * breaks whenever AGP changes its intermediate layout. Source directories are the input the model is
  * designed for, so the same parsers the IDE uses produce the declarations without depending on any
- * build output: unsaved editors, qualified variants and library resources stay available.
+ * build output. Existing declarations are subsequently checked against current PSI by the resolver.
  */
 class SourceResourceRepository private constructor(
     private val sets: List<ResourceSet>,
@@ -152,31 +152,47 @@ class SourceResourceRepository private constructor(
                         var value = VfsUtilCore.urlToPath(url)
                         val separator = value.indexOf("!/")
                         if (separator >= 0) value = value.substring(0, separator)
-                        val path = try {
-                            Path.of(value).toAbsolutePath().normalize()
-                        } catch (_: InvalidPathException) {
-                            continue
-                        }
-                        val directory = if (Files.isDirectory(path)) path else path.parent ?: continue
-                        var current: Path? = directory
-                        while (current != null && !current.parent.equals(current)) {
-                            val resources = current.resolve("res")
-                            val manifest = current.resolve("AndroidManifest.xml")
-                            if (Files.isDirectory(resources) && Files.isRegularFile(manifest)) {
-                                val namespace = manifestNamespace(manifest) ?: break
-                                result.putIfAbsent(
-                                    current,
-                                    Library(current.fileName.toString(), namespace, resources)
-                                )
-                                break
-                            }
-                            if (current.resolve("build").let { Files.isDirectory(it) }) break
-                            current = current.parent
-                        }
+                        val libraryRoot = explodedAarRoot(value) ?: continue
+                        // Older AARs carry the namespace in the manifest; without one the artifact
+                        // directory name still separates this library from the others.
+                        val namespace = manifestNamespace(libraryRoot.resolve("AndroidManifest.xml"))
+                            ?: libraryRoot.fileName.toString()
+                        result.putIfAbsent(
+                            libraryRoot,
+                            Library(libraryRoot.fileName.toString(), namespace, libraryRoot.resolve("res"))
+                        )
                     }
                 }
             }
             return result.values.toList()
+        }
+
+        /**
+         * The exploded-AAR directory a library root belongs to, or null when it is not one.
+         *
+         * A library class or source URL points inside the unpacked archive (`.../jars/classes.jar`,
+         * `.../sources.jar`), so the walked ancestors are where AGP put `res` next to the manifest.
+         * The walk stops at a `build` directory so it cannot climb out of an unrelated tree.
+         */
+        internal fun explodedAarRoot(rootUrl: String): Path? {
+            val path = try {
+                Path.of(rootUrl).toAbsolutePath().normalize()
+            } catch (_: InvalidPathException) {
+                return null
+            }
+            var current: Path? = if (Files.isDirectory(path)) path else path.parent ?: return null
+            while (current != null) {
+                // A build directory belongs to a module, not to an unpacked archive. It is checked
+                // before `res` so a module root that owns both is never reported as a library.
+                if (Files.isDirectory(current.resolve("build"))) return null
+                if (Files.isDirectory(current.resolve("res")) &&
+                    Files.isRegularFile(current.resolve("AndroidManifest.xml"))
+                ) {
+                    return current
+                }
+                current = current.parent
+            }
+            return null
         }
 
         /** Reads the package attribute; AAR manifests carry the resource namespace there. */

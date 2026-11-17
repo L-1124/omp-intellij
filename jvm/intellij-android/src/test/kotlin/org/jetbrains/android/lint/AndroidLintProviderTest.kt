@@ -360,6 +360,25 @@ class AndroidLintProviderTest {
     }
 
     @Test
+    fun explicitXmlContentsOverrideSourcePsi() {
+        val tempDir = Files.createTempDirectory("lint_explicit_xml")
+        try {
+            val (model, xmlFile, sourceText) = prepareXmlProject(tempDir, emptyList())
+            val client = AndroidLintClient(model, xmlFile, sourceText, Scope.RESOURCE_FILE, null)
+            val merged = "<manifest><application label=\"Merged Label\"/></manifest>"
+            val file = xmlFile.virtualFile.toNioPath().toFile()
+            val document = client.getXmlDocument(file, merged)!!
+            val application = document.getElementsByTagName("application").item(0) as org.w3c.dom.Element
+            assertEquals("Merged Label", application.getAttribute("label"))
+            val location = client.xmlParser.getLocation(file, application.getAttributeNode("label"))
+            assertEquals(merged.indexOf("label="), location.start!!.offset)
+            assertEquals(merged.indexOf("/>"), location.end!!.offset)
+        } finally {
+            deleteRecursively(tempDir)
+        }
+    }
+
+    @Test
     fun differentDetectorsSelectOneDoesNotExecuteOther() {
         val tempDir = Files.createTempDirectory("lint_provider_two_detectors")
         try {

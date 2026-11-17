@@ -119,7 +119,8 @@ open class AndroidLintXmlParser(
         if (client is AndroidLintClient) {
             try {
                 val psi = client.xmlSource(file)
-                if (psi is XmlFile) {
+                // Explicit contents may be a merged document rather than the source file.
+                if (psi is XmlFile && psi.textMatches(xml)) {
                     val doc = AndroidDomPsiConverter.convert(psi)
                     if (doc != null) {
                         return doc

@@ -158,7 +158,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
   - H 的原生无扩展控制组与历史缺口记录见 [协议与生命周期专题](ils-protocol-and-lifecycle.md)。当前扩展通过 `AndroidLintProvider` 增加官方源码规则与工程依赖 AAR 规则，保留原生编译诊断。
 - **`R.*` 资源的 `DirectNavigationProvider` 契约**：
   - 原生缺陷：Kotlin / Java 中跳转 `R.string.xxx` 时，ILS 原生仅返回 AGP 生成的 `R.jar` 字节码反编译类（`R$string.class`）。
-  - 源码优先机制：实现 `com.intellij.navigation.DirectNavigationProvider`（`AndroidResourceNavigation`）。当导航元素为 `*.R` 内的 `PsiField` 且来源为 JAR 时，提取模块资源索引，解析 AGP 资源来源，优先构造指向 XML 源码具体声明的虚拟 PSI 元素（`Declaration extends FakePsiElement`）；若源码映射失效，则返回 `null`，保留原生字节码导航。
+  - 源码优先机制：实现 `com.intellij.navigation.DirectNavigationProvider`（`AndroidResourceNavigation`）。当导航元素为 `*.R` 内的 `PsiField` 且来源为 JAR 时，按模块、依赖关系、namespace 与编译来源限定资源源目录，通过资源 repository 枚举声明，再用当前 PSI 核验声明及范围。首个声明存在于原生 PSI 快照时由直接导航提供；否则 definition provider 保留该声明，并补齐其余限定符。声明定位不依赖变体或 AGP merger/blame 快照；缓冲区改名或文件移走后只返回仍有效的声明，全部消失时保留平台原生字节码导航。尚未落盘的新文件不参与 repository 枚举。资源 references 仍按上节校验编译字段与快照，缺失或过期时明确报错。
 
 ### 5. 基于 K2 Analysis API 的 Compose 命名抑制契约
 
@@ -243,6 +243,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 用户确认的保存边界：当前拉取文件的未保存内容即时参与诊断；关联资源、配置和其他清单按磁盘读取，保存后刷新；新文件首次保存后检查。输出前在新分析上下文中复核当前文档内容，避免上下文外访问快照 Document。
 
 编辑期通过官方 `ManifestMerger2` 合并当前源集与已知依赖，使用模型的 namespace、package 和已知 `minSdk`/`targetSdk` 系统属性；`setNamespace` 只负责类名解析，缺少 `package` 的现代清单还需要 `Document.PACKAGE` 注入。合并不改写源文件，并保留未保存内容与来源范围。Built 态优先使用经输入校验的 AGP 产物；模型缺失或合并失败时回退到源文件检查。
+
+显式传给 XML parser 的文本是解析输入；只有文本与源 PSI 一致时才复用 PSI-backed DOM。合并文本与源文件不同时独立解析，避免以未合并的源节点替代合并结果。
 
 已修复的适配差异：
 - 自定义 Manifest 按同一 Gradle 模块中的实际源集归属选择生产模块，避免用聚合模块解析类及变体。

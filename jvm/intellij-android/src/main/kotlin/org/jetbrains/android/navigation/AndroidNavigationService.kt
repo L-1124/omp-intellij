@@ -139,52 +139,56 @@ class AndroidNavigationService private constructor() {
         val moduleRootVf = AndroidContext.findModuleRoot(ownerModule)
             ?: throw AndroidQueryException.modelUnavailable("Module root unavailable for ${ownerModule.name}")
         val moduleRoot = Path.of(moduleRootVf.path).toAbsolutePath().normalize()
-
-        if (variant == null) {
-            throw AndroidQueryException.ambiguousVariant("Variant ambiguous for ${ownerModule.name}")
-        }
         if (namespace.isNullOrBlank()) {
             throw AndroidQueryException.targetUnresolved("Namespace unresolved for ${ownerModule.name}")
         }
 
-        // Verify AGP build snapshot provenance
-        ResourceResolver.verifyProvenance(project, moduleRoot, variant, namespace, type, name)
-
-        // Verify class origins
-        val verifiedJars = ArrayList(ResourceResolver.findVerifiedRClassOrigins(moduleRoot, variant))
+        // The declarations live in the sources, so a resolved build variant no longer gates finding
+        // them. References still bind through the compiled R class, which is why the snapshot is
+        // verified whenever a variant can be resolved.
+        val compiledVariant = variant ?: AndroidContext.resolveVariant(ownerModule, moduleRootVf)
+        if (compiledVariant != null) {
+            ResourceResolver.verifyProvenance(project, moduleRoot, compiledVariant, namespace, type, name)
+        }
         val intermediatesDir = moduleRoot.resolve("build/intermediates")
+        val verifiedJars = LinkedHashSet<Path>()
+        if (compiledVariant != null) {
+            verifiedJars.addAll(ResourceResolver.findVerifiedRClassOrigins(moduleRoot, compiledVariant))
+        }
         for (entry in ModuleRootManager.getInstance(ownerModule).orderEntries) {
-            if (entry is LibraryOrderEntry && entry.library != null) {
-                for (url in entry.library!!.getUrls(OrderRootType.CLASSES)) {
-                    var cleanPath = VfsUtilCore.urlToPath(url)
-                    val sep = cleanPath.indexOf("!/")
-                    if (sep >= 0) cleanPath = cleanPath.substring(0, sep)
-                    try {
-                        val p = Path.of(cleanPath).toAbsolutePath().normalize()
-                        if (p.startsWith(intermediatesDir) && p.toString().replace('\\', '/')
-                                .contains("/$variant/") && Files.isRegularFile(p)
-                        ) {
-                            if (!verifiedJars.contains(p)) verifiedJars.add(p)
-                        }
-                    } catch (_: Exception) {
-                    }
+            val library = (entry as? LibraryOrderEntry)?.library ?: continue
+            for (url in library.getUrls(OrderRootType.CLASSES)) {
+                var cleanPath = VfsUtilCore.urlToPath(url)
+                val sep = cleanPath.indexOf("!/")
+                if (sep >= 0) cleanPath = cleanPath.substring(0, sep)
+                try {
+                    val p = Path.of(cleanPath).toAbsolutePath().normalize()
+                    if (!p.startsWith(intermediatesDir) || !Files.isRegularFile(p)) continue
+                    if (compiledVariant != null && !p.toString().replace('\\', '/')
+                            .contains("/$compiledVariant/")
+                    ) continue
+                    verifiedJars.add(p)
+                } catch (_: Exception) {
                 }
             }
         }
         if (verifiedJars.isEmpty()) {
-            throw AndroidQueryException.missingSnapshot("Compiled R jar not found for variant $variant")
+            throw AndroidQueryException.missingSnapshot(
+                "Compiled R jar not found for ${compiledVariant ?: ownerModule.name}"
+            )
         }
 
         val allowedOrigins = LinkedHashSet<Path>()
         if (!candidateClassOrigins.isNullOrEmpty()) {
             for (candidate in candidateClassOrigins) {
                 if (!Files.isRegularFile(candidate) || !candidate.startsWith(intermediatesDir)
-                    || !candidate.toString().replace('\\', '/').contains("/$variant/")
+                    || (compiledVariant != null && !candidate.toString().replace('\\', '/')
+                        .contains("/$compiledVariant/"))
                 ) {
                     throw AndroidQueryException.ambiguousTarget("Class origin does not belong to owner module and variant: $candidate")
                 }
                 if (!verifiedJars.contains(candidate)) {
-                    throw AndroidQueryException.missingSnapshot("Class origin is not a verified build artifact for variant $variant: $candidate")
+                    throw AndroidQueryException.missingSnapshot("Class origin is not a verified build artifact: $candidate")
                 }
                 allowedOrigins.add(candidate)
             }
@@ -428,7 +432,9 @@ class AndroidNavigationService private constructor() {
             if (!info.isAndroidFile) return null
             val module = info.module ?: return null
             val namespace = info.namespace ?: return null
-            val variant = info.variant ?: return null
+            // The declaration is in the sources; a resolved build variant is optional context for
+            // the compiled-R lookup that follows, not a precondition.
+            val variant = info.variant
 
             if (info.role == AndroidFileRole.VALUES_XML) {
                 val element = xml.findElementAt(offset)

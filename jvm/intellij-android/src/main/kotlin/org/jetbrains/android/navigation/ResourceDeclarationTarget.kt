@@ -7,7 +7,7 @@ import com.jetbrains.lsp.protocol.Location
 data class ResourceDeclarationTarget(
     val module: Module,
     val namespace: String,
-    val variant: String,
+    val variant: String?,
     val type: String,
     val name: String,
     val declarationLocation: Location

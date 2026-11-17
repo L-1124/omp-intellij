@@ -1049,7 +1049,7 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
       },
     );
 
-    await t.test('Definition: exact source priority and fail-closed AGP provenance', async () => {
+    await t.test('Definition: source-first declarations and native fallback', async () => {
       const start = findPositionInText(mainActivityText, 'R.string.app_name');
       const definition = async () =>
         normalizeLocations(
@@ -1102,6 +1102,7 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
         ].map(locationToKey),
       );
       try {
+        // An edit that the build has not compiled yet is still a disk declaration.
         changeStrings(
           stringsText.replace(
             '</resources>',
@@ -1109,12 +1110,12 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
           ),
         );
         expectSource(await definition());
+
+        // The renamed buffer leaves only the qualified declaration.
+        const expectQualified = (locations: LspLocation[]) =>
+          assert.deepEqual(locations.map(locationToKey), [expectedSource[1]].map(locationToKey));
         changeStrings(stringsText.replace('name="app_name"', 'name="renamed_app_name"'));
-        const nativeTarget = await definition();
-        assert.equal(nativeTarget.length, 1);
-        assert(nativeTarget[0].uri.startsWith('jar:') && nativeTarget[0].uri.includes('/R.jar!/'));
-        const expectNative = (locations: LspLocation[]) =>
-          assert.deepEqual(locations.map(locationToKey), nativeTarget.map(locationToKey));
+        expectQualified(await definition());
         changeStrings(stringsText);
         expectSource(await definition());
 
@@ -1129,19 +1130,42 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
           },
         });
         try {
-          expectNative(await definition());
+          expectSource(await definition());
           assert.equal(existsSync(overridePath), false);
         } finally {
           client.notify('textDocument/didClose', { textDocument: { uri: overrideUri } });
         }
         expectSource(await definition());
 
-        const missingPath = `${stringsPath}.removed`;
+        const missingPath = join(projectDir, 'removed-strings.xml');
         await rename(stringsPath, missingPath);
         try {
-          expectNative(await definition());
+          expectQualified(await definition());
+          const missingQualifiedPath = join(projectDir, 'removed-qualified-strings.xml');
+          await rename(qualifiedStringsPath, missingQualifiedPath);
+          try {
+            const nativeTarget = await definition();
+            assert.equal(nativeTarget.length, 1);
+            assert(
+              nativeTarget[0].uri.startsWith('jar:') && nativeTarget[0].uri.includes('/R.jar!/'),
+            );
+          } finally {
+            await rename(missingQualifiedPath, qualifiedStringsPath);
+          }
         } finally {
           await rename(missingPath, stringsPath);
+        }
+
+        const mergerPath = join(
+          projectDir,
+          'app/build/intermediates/incremental/debug/mergeDebugResources/merger.xml',
+        );
+        const missingMergerPath = `${mergerPath}.missing`;
+        await rename(mergerPath, missingMergerPath);
+        try {
+          expectSource(await definition());
+        } finally {
+          await rename(missingMergerPath, mergerPath);
         }
 
         const blamePath = join(
@@ -1151,12 +1175,12 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
         const blame = await readFile(blamePath);
         try {
           await writeFile(blamePath, JSON.stringify({ logs: {} }));
-          expectNative(await definition());
+          expectSource(await definition());
           const invalid = JSON.parse(blame.toString('utf8'));
           for (const log of invalid.logs)
             for (const mapping of log.map) mapping.source = 'unknown-source:/values/strings.xml';
           await writeFile(blamePath, JSON.stringify(invalid));
-          expectNative(await definition());
+          expectSource(await definition());
         } finally {
           await writeFile(blamePath, blame);
         }
@@ -2050,16 +2074,24 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
             (err.message.includes('stale_snapshot') || err.message.includes('field_not_found')),
         );
 
-        // 2. Definition regression test: definition for app_name cleanly falls back to native R class
+        // The qualified source still declares the old compiled field name.
         const defPos = findPositionInText(mainActivityText, 'R.string.app_name');
-        const nativeDef = normalizeLocations(
+        const defs = normalizeLocations(
           await client.request('textDocument/definition', {
             textDocument: { uri: mainActivityUri },
             position: { line: defPos.line, character: defPos.character + 'R.string.'.length + 1 },
           }),
         );
-        assert.equal(nativeDef.length, 1);
-        assert.ok(nativeDef[0].uri.includes('/R.jar!/'));
+        const qualifiedPath = join(appDir, 'res', 'values-es', 'strings.xml');
+        assert.deepEqual(
+          defs.map(locationToKey),
+          [
+            {
+              uri: pathToFileURL(qualifiedPath).href,
+              range: findRangeInText(await readFile(qualifiedPath, 'utf8'), 'app_name'),
+            },
+          ].map(locationToKey),
+        );
       } finally {
         changeStrings(stringsText);
       }

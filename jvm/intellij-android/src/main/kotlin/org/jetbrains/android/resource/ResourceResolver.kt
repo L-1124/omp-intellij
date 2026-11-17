@@ -134,12 +134,13 @@ object ResourceResolver {
     @JvmStatic
     fun resolve(project: Project, module: Module?, reference: ResourceReference?): List<LSDefinitionLocation> {
         val all = resolveAll(project, module, reference)
-        if (reference?.classOrigin != null && reference.originRange != null) {
-            // When queried from Kotlin or Java, the platform's LSCommonDefinitionProvider
-            // resolves the R field and navigates to the first source via AndroidResourceNavigation
-            // (DirectNavigationProvider). Emitting only supplementary qualifiers prevents duplicate
-            // reporting of the first source in ILS 271's union stream.
-            return if (all.size <= 1) emptyList() else all.subList(1, all.size)
+        if (all.isNotEmpty() && reference?.classOrigin != null && reference.originRange != null) {
+            // Native navigation can supply the first declaration only when it exists in the
+            // host PSI snapshot. Disk-only qualifiers must remain in this provider's results.
+            val first = AndroidLocations.path(all[0].location)
+            if (AndroidSources.current(project, first) != null) {
+                return all.subList(1, all.size)
+            }
         }
         return all
     }
@@ -176,23 +177,10 @@ object ResourceResolver {
             val namespace = AndroidContext.resolveNamespace(project, owner)
             if (reference.namespace != null && reference.namespace != namespace) continue
             if (namespace == null) continue
-            // Source directories describe the declarations directly, so navigation no longer needs
-            // a build snapshot or a resolved variant.
-            val fromSources = resolveFromSources(project, owner, namespace, reference)
-            if (fromSources != null) {
-                locations.addAll(fromSources)
-                continue
-            }
-            val variant = AndroidContext.resolveVariant(owner, root) ?: continue
-            try {
-                locations.addAll(Provenance(project, path, variant, namespace).resolve(reference.type, reference.name))
-            } catch (_: InvalidProvenance) {
-                // Optional definition enhancement leaves the original provider's target intact.
-            } catch (_: InvalidPathException) {
-                // Optional definition enhancement leaves the original provider's target intact.
-            } catch (error: AndroidQueryException) {
-                if (error.errorCode == -32801) throw error
-            }
+            // The source directories are the declaration input the resource model is built from, so
+            // they answer navigation the same way the IDE does. A build snapshot is not consulted:
+            // it only describes one past build and would hide edits the user already made.
+            locations.addAll(resolveFromSources(project, owner, namespace, reference))
         }
         val result = ArrayList<LSDefinitionLocation>(locations.size)
         for (location in locations) {
@@ -204,28 +192,26 @@ object ResourceResolver {
     /**
      * Declaration locations from the module's resource source directories.
      *
-     * Returns null when this route cannot answer, so callers can keep the build-snapshot path for
-     * traces the source model does not cover yet.
+     * An empty result means the resource has no declaration in the sources this module can see; the
+     * platform then keeps whatever the compiled R class offers.
      */
     private fun resolveFromSources(
         project: Project,
         module: Module,
         namespace: String,
         reference: ResourceReference
-    ): List<Location>? {
+    ): List<Location> {
         val repository = try {
             repositoryFor(project, module, namespace)
         } catch (_: Exception) {
-            return null
+            return emptyList()
         }
         val declarations = try {
             repository.declarations(reference.type, reference.name)
         } catch (_: Exception) {
-            return null
+            return emptyList()
         }
-        if (declarations.isEmpty()) {
-            return if (repository.has(reference.type, reference.name)) emptyList() else null
-        }
+        if (declarations.isEmpty()) return emptyList()
         val result = ArrayList<Location>(declarations.size)
         for (declaration in declarations) {
             ProgressManager.checkCanceled()
