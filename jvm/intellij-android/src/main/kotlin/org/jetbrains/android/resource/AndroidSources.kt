@@ -49,6 +49,7 @@ object AndroidSources {
         internal val directories: MutableMap<Path, DirectorySnapshot?> = HashMap()
         internal val files: MutableMap<Path, PsiFile?> = HashMap()
         internal val texts: MutableMap<Path, String?> = HashMap()
+        internal val repositories: MutableMap<String, SourceResourceRepository> = HashMap()
         internal var savedModelInputs: Boolean = false
 
         @JvmField

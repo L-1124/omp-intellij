@@ -144,6 +144,19 @@ object ResourceResolver {
         return all
     }
 
+    /**
+     * Repository for one module inside the current Android source scope.
+     *
+     * Parsing every source set and every library costs hundreds of milliseconds, so the result is
+     * cached on the request's [AndroidSources.Scope] alongside the other model reads. A new request
+     * starts with an empty scope, which keeps declarations consistent with the files it verified.
+     */
+    private fun repositoryFor(project: Project, module: Module, namespace: String): SourceResourceRepository {
+        val cache = AndroidSources.scope().repositories
+        val key = module.name + '\u0000' + namespace
+        return cache.getOrPut(key) { SourceResourceRepository.load(project, module, namespace) }
+    }
+
     @JvmStatic
     fun resolveAll(project: Project, module: Module?, reference: ResourceReference?): List<LSDefinitionLocation> {
         if (module == null || reference == null || reference.isFramework) return emptyList()
@@ -162,8 +175,15 @@ object ResourceResolver {
             if (reference.classOrigin != null && !reference.classOrigin!!.startsWith(path)) continue
             val namespace = AndroidContext.resolveNamespace(project, owner)
             if (reference.namespace != null && reference.namespace != namespace) continue
-            val variant = AndroidContext.resolveVariant(owner, root)
-            if (namespace == null || variant == null) continue
+            if (namespace == null) continue
+            // Source directories describe the declarations directly, so navigation no longer needs
+            // a build snapshot or a resolved variant.
+            val fromSources = resolveFromSources(project, owner, namespace, reference)
+            if (fromSources != null) {
+                locations.addAll(fromSources)
+                continue
+            }
+            val variant = AndroidContext.resolveVariant(owner, root) ?: continue
             try {
                 locations.addAll(Provenance(project, path, variant, namespace).resolve(reference.type, reference.name))
             } catch (_: InvalidProvenance) {
@@ -181,11 +201,57 @@ object ResourceResolver {
         return result
     }
 
+    /**
+     * Declaration locations from the module's resource source directories.
+     *
+     * Returns null when this route cannot answer, so callers can keep the build-snapshot path for
+     * traces the source model does not cover yet.
+     */
+    private fun resolveFromSources(
+        project: Project,
+        module: Module,
+        namespace: String,
+        reference: ResourceReference
+    ): List<Location>? {
+        val repository = try {
+            repositoryFor(project, module, namespace)
+        } catch (_: Exception) {
+            return null
+        }
+        val declarations = try {
+            repository.declarations(reference.type, reference.name)
+        } catch (_: Exception) {
+            return null
+        }
+        if (declarations.isEmpty()) {
+            return if (repository.has(reference.type, reference.name)) emptyList() else null
+        }
+        val result = ArrayList<Location>(declarations.size)
+        for (declaration in declarations) {
+            ProgressManager.checkCanceled()
+            val path = declaration.path ?: continue
+            val file = AndroidSources.xml(project, path) ?: continue
+            val ranges = declarations(file)[key(reference.type, reference.name)] ?: continue
+            if (ranges.isEmpty()) continue
+            val document = file.fileDocument
+                ?: PsiDocumentManager.getInstance(project).getDocument(file)
+                ?: continue
+            for (range in ranges) {
+                result.add(AndroidLocations.at(path, range.toLspRange(document)))
+            }
+        }
+        return result
+    }
+
     @JvmStatic
     fun key(type: String, name: String): String {
         var effectiveType = type
         if (effectiveType == "string-array" || effectiveType == "integer-array") {
             effectiveType = ResourceType.ARRAY.getName()
+        }
+        // The XML tag is <declare-styleable>, the resource model calls the type "styleable".
+        if (effectiveType == "declare-styleable") {
+            effectiveType = ResourceType.STYLEABLE.getName()
         }
         return effectiveType + '\u0000' + getFieldNameByResourceName(name)
     }
@@ -486,7 +552,7 @@ object ResourceResolver {
                     val folderType = ResourceFolderType.getFolderType(folderName)
                     val resType = ResourceType.fromClassName(type) ?: ResourceType.fromXmlTagName(type)
                     val typed = folderType != null && resType != null && folderType != ResourceFolderType.VALUES &&
-                        FolderTypeRelationship.match(resType, folderType)
+                            FolderTypeRelationship.match(resType, folderType)
                     if (!values && !typed && type != "id") continue
                     val files = LinkedHashSet<Path>(children(folder))
                     if (virtualRoot != null) {
@@ -504,7 +570,11 @@ object ResourceResolver {
                         val regular = Files.isRegularFile(path)
                         if (built && !regular) throw InvalidProvenance()
                         val time = mergedAt ?: throw InvalidProvenance()
-                        if (regular && path.toString().endsWith(SdkConstants.DOT_XML) && AndroidSources.modifiedAfter(path, time)) {
+                        if (regular && path.toString().endsWith(SdkConstants.DOT_XML) && AndroidSources.modifiedAfter(
+                                path,
+                                time
+                            )
+                        ) {
                             val current = AndroidSources.current(project, path)
                             if (current != null && path.toString().endsWith(SdkConstants.DOT_XML) &&
                                 current.text != StringUtil.convertLineSeparators(AndroidSources.text(path) ?: "")
@@ -539,7 +609,8 @@ object ResourceResolver {
             for (folder in children(merged)) {
                 val qualifier = folder.fileName.toString()
                 if (!AndroidFolders.isValues(qualifier)) continue
-                val output = folder.resolve(if (qualifier == SdkConstants.FD_RES_VALUES) "values.xml" else "$qualifier.xml")
+                val output =
+                    folder.resolve(if (qualifier == SdkConstants.FD_RES_VALUES) "values.xml" else "$qualifier.xml")
                 val xml = AndroidSources.xml(project, output)
                 if (xml?.rootTag == null) continue
                 for (tag in xml.rootTag!!.subTags) {
