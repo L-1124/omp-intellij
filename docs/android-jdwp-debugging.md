@@ -78,6 +78,8 @@ Android 端点拒绝非空 DAP `args`。Gradle 模型与构建必须使用含 `j
 
 可选 `userId`、`pid` 或 `processName`；pid 与 processName 互斥。省略进程选择时仅允许唯一匹配进程。Attach 仅取得 JDWP 资源，不构建、安装、启动或重启应用。
 
+Attach 忽略顶层及 `android` 对象中的未知附加字段；设备、包名、用户和进程选择仍严格校验。显式 `port`、`noDebug` 及 launch 专用的 `target`、`activity`、`restartApp` 继续拒绝。
+
 | 会话 | `disconnect` 默认 / true | `disconnect(false)` |
 | --- | --- | --- |
 | 本次 launch 拥有的应用 | 身份复核后停止所选包/用户并释放资源 | Detach，保留应用 |

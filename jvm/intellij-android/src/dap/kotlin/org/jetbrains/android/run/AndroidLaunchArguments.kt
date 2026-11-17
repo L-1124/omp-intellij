@@ -62,9 +62,8 @@ object AndroidLaunchArguments {
     const val MAX_TIMEOUT_MS: Int = 300_000
 
     private val LAUNCH_ADAPTER_KEYS = setOf("android", "cwd", "program", "args")
-    private val ATTACH_ADAPTER_KEYS = setOf("android", "cwd")
+    private val UNSUPPORTED_ATTACH_KEYS = setOf("target", "activity", "restartApp", "noDebug")
     private val LAUNCH_ANDROID_KEYS = setOf("deviceId", "userId", "target", "activity", "restartApp", "timeoutMs")
-    private val ATTACH_ANDROID_KEYS = setOf("deviceId", "userId", "packageName", "pid", "processName")
     private val GRADLE_TARGET_KEYS = setOf("kind", "buildRoot", "module", "variant", "build")
     private val APKS_TARGET_KEYS = setOf("kind", "files")
     private val INSTALLED_TARGET_KEYS = setOf("kind", "packageName")
@@ -124,14 +123,8 @@ object AndroidLaunchArguments {
 
         val adapter = args.adapterArguments
         for (key in adapter.keys) {
-            if (key !in ATTACH_ADAPTER_KEYS) {
-                if (key == "noDebug") {
-                    throw invalidParams("noDebug is not supported for Android attach")
-                }
-                if (key == "target" || key == "activity" || key == "restartApp") {
-                    throw invalidParams("$key is not supported for Android attach")
-                }
-                throw invalidParams("Unsupported attach argument: $key")
+            if (key in UNSUPPORTED_ATTACH_KEYS) {
+                throw invalidParams("$key is not supported for Android attach")
             }
         }
 
@@ -139,11 +132,8 @@ object AndroidLaunchArguments {
         val androidObj = requireAndroidObject(adapter)
 
         for (key in androidObj.keys) {
-            if (key !in ATTACH_ANDROID_KEYS) {
-                if (key == "target" || key == "activity" || key == "restartApp" || key == "noDebug") {
-                    throw invalidParams("android.$key is not supported for Android attach")
-                }
-                throw invalidParams("Unsupported android attach field: $key")
+            if (key in UNSUPPORTED_ATTACH_KEYS) {
+                throw invalidParams("android.$key is not supported for Android attach")
             }
         }
 

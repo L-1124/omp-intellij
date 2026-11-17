@@ -392,7 +392,10 @@ async function attachNativeAndroidDap(
     if (options.pid !== undefined) androidArgs.pid = options.pid;
     if (options.processName !== undefined) androidArgs.processName = options.processName;
 
-    const attachReq = dap.sendRequest('attach', { android: androidArgs });
+    const attachReq = dap.sendRequest('attach', {
+      stopOnEntry: true,
+      android: { ...androidArgs, clientMetadata: { clientID: options.clientID } },
+    });
     const initializedPromise = dap.waitFor(
       (message) => message.type === 'event' && message.event === 'initialized',
       0,

@@ -521,6 +521,27 @@ class AndroidLaunchArgumentsTest {
         assertNull(minimal.pid)
         assertNull(minimal.processName)
 
+        val extraWire = """
+            {
+              "android": {
+                "deviceId": "emulator-5580",
+                "packageName": "com.example.app",
+                "clientMetadata": {"version": 1}
+              },
+              "stopOnEntry": true,
+              "program": "MainActivity.kt",
+              "args": [],
+              "clientMetadata": null
+            }
+        """.trimIndent()
+        assertEquals(
+            minimal,
+            AndroidLaunchArguments.parseAttach(
+                DAP.json.decodeFromString(AttachRequestArguments.serializer(), extraWire),
+                project,
+            ),
+        )
+
         val withProcess = AndroidLaunchArguments.parseAttach(
             AttachRequestArguments(
                 adapterArguments = buildJsonObject {
