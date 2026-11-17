@@ -175,6 +175,37 @@ test('cancelled requests stay cancelled after indexing completes and initialize 
   assert.equal(h.messages.filter((m) => m.id === 1).length, 1);
 });
 
+test('shutdown and exit close only the client connection', {
+  timeout: 15000,
+}, async (t) => {
+  const serverMessages: Message[] = [];
+  const disconnected = Promise.withResolvers<void>();
+  const h = await bridgeFixture(t, (message, socket) => {
+    serverMessages.push(message);
+    if (message.method === 'initialize') {
+      socket.once('close', disconnected.resolve);
+      socket.write(encode({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } }));
+    }
+  });
+  h.initialize();
+  await h.waitFor((message) => message.id === 1);
+  h.send({ jsonrpc: '2.0', id: 8, method: 'workspace/symbol', params: { query: 'Queued' } });
+  h.send({ jsonrpc: '2.0', id: 9, method: 'shutdown', params: null });
+  assert.deepEqual(await h.waitFor((message) => message.id === 9), {
+    jsonrpc: '2.0',
+    id: 9,
+    result: null,
+  });
+  assert.equal((await h.waitFor((message) => message.id === 8)).error?.code, -32803);
+  h.send({ jsonrpc: '2.0', method: 'exit' });
+  assert.deepEqual(await h.exited, [0, null]);
+  await disconnected.promise;
+  assert.equal(
+    serverMessages.some((message) => message.method === 'shutdown' || message.method === 'exit'),
+    false,
+  );
+});
+
 for (const failure of ['timeout', 'disconnect', 'configuration'] as const) {
   test(`initialize returns one error before EOF on ${failure}`, { timeout: 15000 }, async (t) => {
     const h = await bridgeFixture(

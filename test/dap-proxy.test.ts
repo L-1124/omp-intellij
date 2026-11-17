@@ -1585,3 +1585,40 @@ test('cancel matching startup seq after backend mapping forwards mapped seq and 
   assert.match(launchRes.type === 'response' ? (launchRes.message ?? '') : '', /Cancelled/);
   assert.equal(await h.closed, 1);
 });
+
+test('EOF during launch waits for native forced termination before disconnecting', async (t) => {
+  const heldLaunch = Promise.withResolvers<DapRequest>();
+  const heldTermination = Promise.withResolvers<DapRequest>();
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'launch') {
+        heldLaunch.resolve(request);
+        return true;
+      }
+      if (request.command === 'terminate') {
+        heldTermination.resolve(request);
+        return true;
+      }
+    },
+  });
+  await h.request('initialize');
+  h.send('launch', testLaunchArguments());
+  const launch = await heldLaunch.promise;
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  h.stdin.end();
+  const terminate = await heldTermination.promise;
+  t.mock.timers.tick(10000);
+  const terminationTurn = Promise.withResolvers<void>();
+  setImmediate(terminationTurn.resolve);
+  await terminationTurn.promise;
+  assert.equal(h.backendRequests.some((request) => request.command === 'disconnect'), false);
+  h.respond(launch, undefined, false, 'Terminated');
+  h.respond(terminate);
+  assert.equal(await h.closed, 0);
+  assert.deepEqual(
+    h.backendRequests
+      .filter((request) => ['cancel', 'terminate', 'disconnect'].includes(request.command))
+      .map((request) => request.command),
+    ['terminate', 'disconnect'],
+  );
+});

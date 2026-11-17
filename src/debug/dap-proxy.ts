@@ -506,7 +506,8 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         } else {
           if (sessionMode === 'launch' && !backendTerminated) {
             try {
-              await sendNativeRequest('terminate', {}, 3000);
+              // Native teardown waits up to five seconds each for soft stop and forced kill.
+              await sendNativeRequest('terminate');
             } catch {
               // The target may have already exited.
             }

@@ -24,6 +24,7 @@
 5. **多阶段 Shutdown 状态机与 JVM 进程树收敛**：
    - 会话退出具备确定性状态机跃迁：`connecting-lsp` ➔ `connecting-dap` ➔ `connecting-jvm` ➔ `running` / `stopped` ➔ `cleaning` ➔ `closed` / `failed`。
    - 普通 JVM `launch` 注入唯一标记 `-Domp.intellij.run.id=<UUID>`，shutdown 保留原有原生终止与标记进程回收语义。`terminate` 请求单独转发，失败时保留会话；普通 JVM attach 的 disconnect 保留原有外部进程保护。
+   - 原生 terminate 包含最多 5 秒软停止与 5 秒强制终止等待；代理等待完整响应后才发 disconnect，避免提前断连中止原生清理。
    - Android 请求直接选择 JVM Android 端点，代理只转发一次 disconnect 并保留原参数；EOF/shutdown 不追加 terminate 或第二次 disconnect。应用所有权、JDWP 与安装资源均由 JVM 连接清理，见 [Android 契约](android-jdwp-debugging.md#attach-与应用所有权)。
 
 6. **轻量 DAP 仿真与真实工程集成测试准则**：

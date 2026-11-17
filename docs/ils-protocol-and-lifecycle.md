@@ -397,6 +397,10 @@ npm run update-bundle -- --sync-marketplace --check
 
 Bridge 从接收 `initialize` 开始计时，覆盖工程配置、原生连接和握手响应；收到原生成功或错误响应后结束计时。期间超时、配置失败或连接关闭时，对仍未完成的请求回一个错误响应，再关闭输出流；已完成的初始化不会在关闭时重复应答。原生连接在初始化参数准备完成后建立，迟到的连接只释放自身 socket 和租约。
 
+每个 Bridge 只拥有自己的连接：LSP `shutdown` 在本地拒绝排队请求并返回 `null`；`exit` 关闭本连接、释放本租约并退出 Bridge。两者均不转发到共享 JVM，其他工程的连接与服务进程保持运行。共享服务停止仍由显式 `/intellij stop` 与服务端空闲策略管理。
+
+Windows 宿主在宽限期结束后可能递归终止 Bridge 进程树；共享 JVM 虽以 `detached` 启动，仍可能处于该后代树中。Bridge 消费 `exit` 时销毁 stdin 并及时退出，避免正常关闭走强杀路径。显式强杀首个 Bridge 的整棵进程树仍可能终止共享 JVM，`detached` 不提供进程树隔离保证。
+
 初始工作区身份按构建聚合根规范化：`rootUri`、旧式 `rootPath` 和 `workspaceFolders` 提升到对应构建根，文件夹按工程身份去重。该映射用于导入和租约身份；模块执行上下文仍来自服务端模型。
 
 索引等待期间，`textDocument/didChange` 和 `didClose` 继续透传并保留排队请求，由客户端决定结果是否仍有用；显式取消返回 `RequestCancelled`。请求超时、工程失败和关闭仍分别结束等待。Bridge 本地拒绝请求时同步清理符号结果关联。

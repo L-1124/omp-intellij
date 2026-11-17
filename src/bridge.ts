@@ -100,6 +100,10 @@ export async function startBridge(): Promise<void> {
     if (closing) return;
     const message = messageRaw as Record<string, unknown> | null;
     if (message) documentSymbols.fromClient(message);
+    if (message?.method === 'exit') {
+      close();
+      return;
+    }
     if (message?.method === 'initialize') {
       if (socket || pendingInitialize) {
         throw new Error('Bridge already received initialize');
@@ -572,7 +576,7 @@ export async function startBridge(): Promise<void> {
     barrier.dispose();
 
     process.stdin.unpipe(upstream);
-    process.stdin.pause();
+    process.stdin.destroy();
     if (socket) {
       upstream.unpipe(socket);
       socket.unpipe(downstream);

@@ -256,7 +256,10 @@ export class IndexBarrier {
     if (message.method === 'shutdown' || message.method === 'exit') {
       this.fail('IntelliJ connection is shutting down');
       this._applyState(message, 'client');
-      this.sendServer(frame);
+      // This client owns its connection, not the shared JVM process.
+      if (message.method === 'shutdown' && message.id !== undefined) {
+        this.sendClient(encode({ jsonrpc: '2.0', id: message.id, result: null }));
+      }
       return;
     }
     if (message.method === '$/cancelRequest') {

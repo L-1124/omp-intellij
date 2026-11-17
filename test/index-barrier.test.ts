@@ -418,10 +418,8 @@ test('shutdown does not wait for indexing and rejects queued semantic requests',
   const h = harness();
   h.client(query(8));
   h.client({ jsonrpc: '2.0', id: 9, method: 'shutdown', params: null });
-  assert.deepEqual(
-    h.upstream.map((m) => m.id),
-    [9],
-  );
+  assert.deepEqual(h.upstream, []);
+  assert.deepEqual(h.downstream[1], { jsonrpc: '2.0', id: 9, result: null });
   assert.equal(h.downstream[0].id, 8);
   assert.equal(h.downstream[0].error?.code, -32803);
   h.barrier.dispose();

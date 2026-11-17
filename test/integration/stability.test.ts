@@ -263,6 +263,112 @@ test('dual project concurrency: JDK 17 and JDK 21 independent debugging and sess
   }
 });
 
+test('project shutdown: first Bridge exits and sibling stays live', async () => {
+  const sandbox = await createIntegrationSandbox(prerequisites);
+
+  try {
+    const firstDir = await copyWorkspaceFixture('jdk17', sandbox);
+    const remainingDir = await copyWorkspaceFixture('jdk21', sandbox);
+    const initialize = (projectDir: string) => ({
+      processId: process.pid,
+      rootUri: pathToFileURL(projectDir).href,
+      rootPath: projectDir,
+      capabilities: { window: { workDoneProgress: true }, experimental: { licensingUi: true } },
+    });
+    const waitReady = async (projectDir: string) => {
+      const result = await executeIntellij(
+        { action: 'wait', project: projectDir, timeout: 120 },
+        undefined,
+        undefined,
+        { cwd: projectDir } as ExtensionContext,
+        { systemPath: sandbox.systemPath },
+      );
+      assert.equal(result.details?.phase, 'ready', result.content[0]?.text);
+    };
+
+    // Initialize sequentially: this first Bridge must be the one that spawns the shared JVM.
+    const first = createLspClientDriver(firstDir, sandbox);
+    await first.request('initialize', initialize(firstDir));
+    first.notify('initialized', {});
+
+    const serverOwnerFile = join(sandbox.systemPath, 'omp-server.json');
+    const owner = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid?: number };
+    const sharedJvmPid = owner.pid;
+    assert.ok(sharedJvmPid && sharedJvmPid > 0, 'The first Bridge must start the shared JVM');
+
+    const remaining = createLspClientDriver(remainingDir, sandbox);
+    await remaining.request('initialize', initialize(remainingDir));
+    remaining.notify('initialized', {});
+    await Promise.all([waitReady(firstDir), waitReady(remainingDir)]);
+
+    const ownerWithBoth = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid?: number };
+    assert.equal(ownerWithBoth.pid, sharedJvmPid, 'Both projects must share the first JVM');
+
+    const appSource = join(remainingDir, 'src', 'main', 'java', 'com', 'example', 'App.java');
+    const appText = await readFile(appSource, 'utf8');
+    const appUri = pathToFileURL(appSource).href;
+    remaining.notify('textDocument/didOpen', {
+      textDocument: { uri: appUri, languageId: 'java', version: 1, text: appText },
+    });
+    const lines = appText.split(/\r?\n/);
+    const referenceLine = lines.findIndex((line) => line.includes('+ PROJECT_ID'));
+    assert.ok(referenceLine >= 0, 'The fixture must reference its PROJECT_ID field');
+    const assertProjectDefinition = async () => {
+      const result = await remaining.request('textDocument/definition', {
+        textDocument: { uri: appUri },
+        position: {
+          line: referenceLine,
+          character: lines[referenceLine].lastIndexOf('PROJECT_ID') + 2,
+        },
+      });
+      const definition = Array.isArray(result) ? result[0] : result;
+      assert.ok(definition && typeof definition === 'object', 'PROJECT_ID must resolve');
+      const targetUri =
+        'uri' in definition
+          ? definition.uri
+          : 'targetUri' in definition
+            ? definition.targetUri
+            : undefined;
+      assert.equal(typeof targetUri, 'string');
+      assert.equal(
+        canonicalizeProject(String(targetUri)).canonicalPath,
+        canonicalizeProject(appSource).canonicalPath,
+        'The definition must belong to the surviving project',
+      );
+    };
+    await assertProjectDefinition();
+    const stateBefore = await readProjectState(sandbox.systemPath, remainingDir);
+    assert.equal(stateBefore.live, true);
+    assert.equal(stateBefore.pid, remaining.process.pid);
+
+    // Exercise the protocol lifecycle, not close(), which only sends stdin EOF.
+    assert.equal(await first.request('shutdown', null), null);
+    first.notify('exit');
+    assert.equal(await first.waitForExit(), 0, 'The JVM-creating Bridge must exit normally');
+    assert.equal(first.process.signalCode, null, 'The first Bridge must not need termination');
+
+    await assertProjectDefinition();
+    const ownerAfter = JSON.parse(await readFile(serverOwnerFile, 'utf8')) as { pid?: number };
+    assert.equal(ownerAfter.pid, sharedJvmPid, 'Client shutdown must not replace the shared JVM');
+    assert.ok(isProcessAlive(sharedJvmPid), 'The shared JVM must survive its first Bridge');
+    const stateAfter = await readProjectState(sandbox.systemPath, remainingDir);
+    assert.notEqual(stateAfter.phase, 'disconnected');
+    assert.notEqual(stateAfter.phase, 'failed');
+    assert.equal(stateAfter.live, true);
+    assert.equal(stateAfter.pid, remaining.process.pid);
+    assert.equal(
+      stateAfter.connectionId,
+      stateBefore.connectionId,
+      'The connection must not restart',
+    );
+    assert.equal(stateAfter.failure, undefined);
+
+    await remaining.close();
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
 test('indexing cancellation: wait cancellation releases barrier and permits subsequent requests', async () => {
   const sandbox = await createIntegrationSandbox(prerequisites);
 
@@ -404,6 +510,15 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
     });
     await siblingDap.request('configurationDone');
     await siblingDap.waitForOutputSubstring('HEARTBEAT_21=', 15000);
+    const daemonPids: number[] = [];
+    for await (const file of glob('daemon/*/daemon-*.out.log', { cwd: sandbox.gradleUserHome })) {
+      const pid = Number(/daemon-(\d+)\.out\.log$/.exec(file)?.[1]);
+      if (Number.isSafeInteger(pid) && isProcessAlive(pid)) daemonPids.push(pid);
+    }
+    assert.ok(
+      daemonPids.length > 0,
+      'A shared sandbox Gradle daemon must exist before cancellation',
+    );
 
     const buildDir = join(jdk17Dir, 'build');
     await mkdir(buildDir, { recursive: true });
@@ -431,15 +546,6 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
 
     // Await actual marker from build gate (no fake timers)
     await dap.waitForOutputSubstring('BUILD_GATE_WAITING', 45000);
-    const daemonPids: number[] = [];
-    for await (const file of glob('daemon/*/daemon-*.out.log', { cwd: sandbox.gradleUserHome })) {
-      const pid = Number(/daemon-(\d+)\.out\.log$/.exec(file)?.[1]);
-      if (Number.isSafeInteger(pid) && isProcessAlive(pid)) daemonPids.push(pid);
-    }
-    assert.ok(
-      daemonPids.length > 0,
-      'A shared sandbox Gradle daemon must exist before cancellation',
-    );
 
     // Capture snapshot and control port
     const sessions = await listDebugSessions({
@@ -456,15 +562,13 @@ test('build cancellation: aborting DAP launch terminates process tree and preser
     ) as { port: number };
     assert.ok(controlPort > 0, 'Owned debug control endpoint must exist');
 
-    // Close client stdin to trigger cancellation
+    // Hold the gate through teardown to exercise cancellation during compilation.
     dap.process.stdin?.end();
 
+    // Await actual proxy process exit
+    assert.equal(await dap.waitForExit(15000), 0, 'DAP proxy must finish cleanup successfully');
     // Release build gate latch so Gradle finishes cleanly
     await writeFile(gateFile, 'proceed', 'utf8');
-
-    // Await actual proxy process exit
-    await dap.waitForExit(15000);
-    assert.ok(dap.process.exitCode !== null || dap.process.signalCode !== null, 'DAP proxy exited');
     for (const pid of daemonPids)
       assert.equal(
         isProcessAlive(pid),
