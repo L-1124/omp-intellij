@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { encode, frameParser } from '../src/shared/protocol.js';
 
 type Message = Record<string, unknown> & {
-  error?: { code?: number; data?: { failure?: { kind?: string } } };
+  error?: { code?: number; message?: string; data?: { failure?: { kind?: string } } };
 };
 
 async function bridgeFixture(
@@ -289,6 +289,41 @@ test('bridge owns server progress for clients without progress support and prese
   assert.deepEqual(
     h.messages.filter((m) => m.method === '$/progress').map((m) => m.params),
     [{ token: 'symbols', value: [{ name: 'Example' }] }],
+  );
+  await h.close();
+});
+
+test('bridge declines refactors that require a conflicts decision', {
+  timeout: 15000,
+}, async (t) => {
+  const answered = Promise.withResolvers<Record<string, unknown>>();
+  const h = await bridgeFixture(t, (message, socket) => {
+    if (message.method === 'initialize') {
+      socket.write(encode({ jsonrpc: '2.0', id: 1, result: { capabilities: {} } }));
+      socket.write(
+        encode({
+          jsonrpc: '2.0',
+          id: 90,
+          method: 'intellij/showConflicts',
+          params: {
+            title: 'Remove unused parameter',
+            conflicts: [{ messages: ['Used in Main.kt'], location: {} }],
+            continueLabel: 'Continue',
+            cancelLabel: 'Cancel',
+          },
+        }),
+      );
+    } else if (message.id === 90 && !message.method) {
+      answered.resolve(message);
+    }
+  });
+  h.initialize();
+  await h.waitFor((m) => m.id === 1);
+  const message = await answered.promise;
+  assert.deepEqual(message.result, { decision: 'cancel' });
+  assert.equal(
+    h.messages.some((m) => m.method === 'intellij/showConflicts'),
+    false,
   );
   await h.close();
 });

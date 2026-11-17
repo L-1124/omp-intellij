@@ -333,6 +333,29 @@ export async function startBridge(): Promise<void> {
       clearTimeout(initializeTimer ?? undefined);
       initializeTimer = null;
     }
+    if (message.method === 'intellij/showConflicts' && message.id !== undefined) {
+      // The server blocks this request until answered; only a client UI can decide. Removing
+      // references is destructive, so the bridge declines instead of guessing.
+      upstream.push(
+        encode({
+          jsonrpc: '2.0',
+          id: message.id,
+          result: { decision: 'cancel' },
+        }),
+      );
+      const params = message.params;
+      const conflicts =
+        params &&
+        typeof params === 'object' &&
+        'conflicts' in params &&
+        Array.isArray(params.conflicts)
+          ? params.conflicts.length
+          : 0;
+      console.error(
+        `intellij-bridge: declined a refactor with ${conflicts} conflict(s); apply it from an IDE or reduce the change`,
+      );
+      return;
+    }
     if (
       message.method === 'window/workDoneProgress/create' &&
       message.id !== undefined &&
