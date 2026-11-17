@@ -24,8 +24,8 @@
     {
       "name": "language-server.api.features.impl.android.jar",
       "path": "lib/modules/language-server.api.features.impl.android.jar",
-      "sha256": "b8ee0e0c2843e5582de415e6faf211afb29909e9dca437f3616201e63dbe2eef",
-      "size": 1771975
+      "sha256": "f4cbc0bdb49e62aa467d0decc5b52f32449b9a375e6429476aa555a92610775e",
+      "size": 1773930
     },
     {
       "name": "adblib-9.4.1.jar",

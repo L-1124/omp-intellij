@@ -80,9 +80,13 @@ import com.intellij.xml.util.XmlIdContributor
 import com.jetbrains.lsp.protocol.Location
 import com.jetbrains.lsp.protocol.Position
 import com.jetbrains.lsp.protocol.Range
+import org.jetbrains.android.context.AndroidContext
+import org.jetbrains.android.context.AndroidFileRole
 import org.jetbrains.android.context.AndroidQueryException
 import org.jetbrains.android.navigation.AndroidCompiledResourceClassFinder
+import org.jetbrains.android.navigation.ManifestTarget
 import org.jetbrains.android.resource.AndroidSources
+import org.jetbrains.android.resource.ResourceResolver
 import org.jetbrains.kotlin.asJava.KotlinAsJavaSupport
 import org.jetbrains.kotlin.asJava.classes.KtFakeLightClass
 import org.jetbrains.kotlin.asJava.classes.KtLightClass
@@ -128,6 +132,89 @@ class AndroidXmlRelatedTestsProviderTest {
     @After
     fun disposeFixtures() {
         disposeProjectEnvironment()
+    }
+
+    @Test
+    fun manifestResourceValuesKeepTheirResourceIdentityAndSourceSetOwner() {
+        val root = Files.createTempDirectory("xml_manifest_resources")
+        try {
+            val moduleDir = root.resolve("app")
+            val mainDir = moduleDir.resolve("src/main")
+            val javaDir = mainDir.resolve("java")
+            Files.createDirectories(javaDir)
+            Files.createDirectories(moduleDir.resolve("config"))
+            val manifestText = """
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                    <application android:name="@string/application_class" android:label="@string/app_name">
+                        <activity android:name="?attr/activity_class" />
+                        <activity-alias android:name=".Alias" android:targetActivity="?android:attr/target_class" />
+                    </application>
+                </manifest>
+            """.trimIndent()
+            for (custom in listOf(false, true)) {
+                val sourceOverride = if (custom) {
+                    """sourceSets { getByName("main") { manifest.srcFile("config/manifest-main.xml") } }"""
+                } else ""
+                Files.writeString(
+                    moduleDir.resolve("build.gradle.kts"),
+                    """
+                        plugins { id("com.android.application") }
+                        android {
+                            namespace = "com.example.app"
+                            $sourceOverride
+                        }
+                    """.trimIndent()
+                )
+                val manifestPath = if (custom) moduleDir.resolve("config/manifest-main.xml")
+                else mainDir.resolve("AndroidManifest.xml")
+                Files.writeString(manifestPath, manifestText)
+                createProjectEnvironment()
+                configureModule(
+                    name = "project.app",
+                    moduleRoot = moduleDir,
+                    mainSources = emptyList(),
+                    testSources = emptyList(),
+                    extraFiles = listOf(manifestPath),
+                    sourceRootPaths = emptyList(),
+                    contentRootPaths = emptyList()
+                )
+                val production = configureModule(
+                    name = "project.app.main",
+                    moduleRoot = moduleDir,
+                    mainSources = emptyList(),
+                    testSources = emptyList(),
+                    extraFiles = emptyList(),
+                    sourceRootPaths = listOf(javaDir),
+                    contentRootPaths = listOf(mainDir),
+                    append = true
+                )
+                val xml = openXmlFile(manifestPath)
+                AndroidSources.Scope(null, xml.virtualFile).use {
+                    val info = AndroidContext.identify(xml)
+                    assertEquals(AndroidFileRole.MANIFEST, info.role)
+                    assertTrue(info.module === production)
+                    assertEquals("com.example.app", info.namespace)
+                    for ((raw, type, name) in listOf(
+                        Triple("@string/application_class", "string", "application_class"),
+                        Triple("@string/app_name", "string", "app_name"),
+                        Triple("?attr/activity_class", "attr", "activity_class"),
+                        Triple("?android:attr/target_class", "attr", "target_class")
+                    )) {
+                        val offset = manifestText.indexOf(raw) + 2
+                        val target = ManifestTarget.resolve(project, xml, offset)
+                        assertNotNull(target)
+                        assertFalse(target!!.isClassAttribute)
+                        val resource = ResourceResolver.findResourceReferenceAt(xml, offset)
+                        assertNotNull(resource)
+                        assertEquals(type, resource!!.type)
+                        assertEquals(name, resource.name)
+                        assertEquals(raw.startsWith("?android:"), resource.isFramework)
+                    }
+                }
+            }
+        } finally {
+            deleteRecursively(root)
+        }
     }
 
     @Test
@@ -1395,8 +1482,10 @@ class AndroidXmlRelatedTestsProviderTest {
                     throw UnsupportedOperationException()
 
                 override suspend fun setUnloadedModules(unloadedModuleNames: List<String>) {}
+
                 @Deprecated("Use setUnloadedModules instead")
-                override fun setUnloadedModulesSync(unloadedModuleNames: List<String>) {}
+                override fun setUnloadedModulesSync(unloadedModuleNames: List<String>) {
+                }
             }
             environment.project.registerService(ModuleManager::class.java, moduleManager)
 

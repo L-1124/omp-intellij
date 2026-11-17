@@ -1,6 +1,7 @@
 package org.jetbrains.android.navigation
 
 import com.android.SdkConstants
+import com.android.resources.ResourceUrl
 import com.android.xml.AndroidManifest
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
@@ -51,7 +52,7 @@ object ManifestTarget {
             return ManifestClassTarget.notClassAttribute()
         }
         val raw = AndroidXml.value(attribute)
-        if (raw.isNullOrBlank() || raw.contains("\${") || raw.startsWith("@")) {
+        if (raw.isNullOrBlank() || raw.contains("\${") || raw.startsWith("@") || ResourceUrl.parse(raw) != null) {
             return ManifestClassTarget.notClassAttribute()
         }
         val root = xml.rootTag
@@ -132,7 +133,8 @@ object ManifestTarget {
         if (application == null || application.name != AndroidManifest.NODE_APPLICATION || application.parentTag != root) {
             return false
         }
-        val expected = if (name == AndroidManifest.NODE_ACTIVITY_ALIAS) AndroidManifest.ATTRIBUTE_TARGET_ACTIVITY else AndroidManifest.ATTRIBUTE_NAME
+        val expected =
+            if (name == AndroidManifest.NODE_ACTIVITY_ALIAS) AndroidManifest.ATTRIBUTE_TARGET_ACTIVITY else AndroidManifest.ATTRIBUTE_NAME
         return attribute.localName == expected
     }
 }

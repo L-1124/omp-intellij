@@ -216,6 +216,25 @@ object ResourceResolver {
         for (declaration in declarations) {
             ProgressManager.checkCanceled()
             val path = declaration.path ?: continue
+            AndroidSources.track(path)
+            if (!Files.isRegularFile(path)) continue
+            if (declaration.item.isFileBased && reference.type != ResourceType.ID.getName()) {
+                val range = if (path.toString().endsWith(SdkConstants.DOT_XML)) {
+                    val file = AndroidSources.xml(project, path) ?: continue
+                    val root = file.rootTag
+                    if (root == null) {
+                        Range(Position(0, 0), Position(0, 0))
+                    } else {
+                        val document = file.fileDocument
+                        TextRange(root.textOffset + 1, root.textOffset + 1 + root.name.length)
+                            .toLspRange(document)
+                    }
+                } else {
+                    Range(Position(0, 0), Position(0, 0))
+                }
+                result.add(AndroidLocations.at(path, range))
+                continue
+            }
             val file = AndroidSources.xml(project, path) ?: continue
             val ranges = declarations(file)[key(reference.type, reference.name)] ?: continue
             if (ranges.isEmpty()) continue
@@ -251,18 +270,31 @@ object ResourceResolver {
         type: String,
         name: String
     ) {
-        val provenance = Provenance(project, module, variant, namespace)
-        if (!Files.isRegularFile(provenance.merger)) {
-            throw AndroidQueryException.missingSnapshot("Build snapshot merger.xml not found for variant $variant")
+        val origins = findVerifiedRClassOrigins(module, variant)
+        val packageResources = origins.any { it.parent.fileName.toString().startsWith("generate") }
+        val mergedResources = origins.any { it.parent.fileName.toString().startsWith("process") }
+        val wanted = key(type, name)
+        var stale: InvalidProvenance? = null
+        // Multiple compiled representations of one module are not multiple resource owners.
+        val candidates = if (packageResources && mergedResources) 2 else 1
+        for (index in 0 until candidates) {
+            val packaged = if (mergedResources) index == 1 else packageResources
+            val provenance = Provenance(project, module, variant, namespace, packaged)
+            AndroidSources.track(provenance.merger)
+            if (!Files.isRegularFile(provenance.merger)) continue
+            try {
+                provenance.load()
+                provenance.validate(wanted, type, name)
+                return
+            } catch (error: InvalidProvenance) {
+                stale = error
+            }
         }
-        try {
-            provenance.load()
-            val wanted = key(type, name)
-            provenance.validate(wanted, type, name)
-        } catch (e: InvalidProvenance) {
-            val detail = if (e.message != null) " (${e.message})" else ""
+        if (stale != null) {
+            val detail = stale.message?.let { " ($it)" } ?: ""
             throw AndroidQueryException.staleSnapshot("Resource declaration is missing from snapshot or modified without rebuilding: $type/$name$detail")
         }
+        throw AndroidQueryException.missingSnapshot("Build snapshot merger.xml not found for variant $variant")
     }
 
     @JvmStatic
@@ -360,7 +392,8 @@ object ResourceResolver {
         private val project: Project,
         private val module: Path,
         private val variant: String,
-        private val namespace: String
+        private val namespace: String,
+        packageResources: Boolean
     ) {
         private val task: String
         private val incremental: Path
@@ -380,23 +413,7 @@ object ResourceResolver {
             val mTask = module.resolve("build/intermediates/incremental").resolve(variant).resolve(mergeTask)
             val pTask = module.resolve("build/intermediates/incremental").resolve(packageTask)
             val pTaskVar = module.resolve("build/intermediates/incremental").resolve(variant).resolve(packageTask)
-            val producers = LinkedHashSet<String>()
-            for (origin in findVerifiedRClassOrigins(module, variant)) {
-                val producer = origin.parent.fileName.toString()
-                if (producer == "generate${cap}RFile") {
-                    producers.add(packageTask)
-                } else if (producer == "process${cap}Resources") {
-                    producers.add(mergeTask)
-                }
-            }
-            if (producers.size > 1) {
-                throw AndroidQueryException(
-                    "ambiguous_target: Conflicting compiled resource producers for $module",
-                    -32803
-                )
-            }
-            val isLibrary = producers.contains(packageTask)
-            if (isLibrary) {
+            if (packageResources) {
                 task = packageTask
                 incremental = if (Files.isRegularFile(pTaskVar.resolve("merger.xml"))) pTaskVar else pTask
             } else {
@@ -412,7 +429,7 @@ object ResourceResolver {
         }
 
         fun load() {
-            val file = AndroidSources.xml(project, merger)
+            val file = AndroidSources.diskXml(project, merger)
             val tag = file?.rootTag
             if (tag == null || tag.name != "merger" || "3" != tag.getAttributeValue("version")) {
                 throw InvalidProvenance()

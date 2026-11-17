@@ -149,7 +149,7 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
   - 引用反查结果：通过 `FindUsagesManager` 检索所有 Kotlin/Java 代码引用（过滤 XML 来源），追加剥离引号后的当前属性位置。若客户端请求带 `context.includeDeclaration: true`，同步追加目标类的源码声明定义位置。
 - **资源 XML 声明 references 查询**：
   - 标准 XML 请求与 `omp.findResourceFieldReferences` 在 JVM 内共用字段查询，不在 Bridge 转发第二次 RPC。显式命令协议 v1 校验精确模块、namespace、R 字段和物理编译来源。
-  - 按当前模块、变体与 AGP merger 证明声明身份和编译字段；同名、同 FQN 的独立模块不能仅因名称相同而合并。声明来源缺失或失效返回具体错误，合法零引用返回 `[]`。
+  - 按当前模块、变体与 AGP merger 证明声明身份和编译字段；同名、同 FQN 的独立模块不能仅因名称相同而合并。同一 owner 同时存在 `process<Variant>Resources` 与 `generate<Variant>RFile` 产物时，逐个验证对应 merger 的当前声明身份，存在有效快照即可；仅有过期快照仍返回 `stale_snapshot`，没有快照返回 `missing_snapshot`。多种 R 表示本身不构成 owner 歧义。
   - 官方对照：`ProjectLightResourceClassService.getLightRClassesContainingModuleResources` 枚举 owner 及依赖它的消费模块中的 R 表示；`AndroidResourcesFindUsagesHandlerFactory` 再按资源上下文收缩范围。ILS 适配同样先证明 owner/依赖关系，再枚举真实编译字段副本，不能只搜索 owner 的一个字段或仅按 namespace 扫全工程。
   - `includeDeclaration: false` 仅返回 Java/Kotlin 的真实语义引用；`true` 额外加入当前 XML 声明，不加入其他限定符副本、字节码字段或 XML 使用点。
   - 使用当前 PSI 的引用范围及 UTF-16 行列；在原生挂起读操作内搜索，复用请求取消和 `AndroidSources.Scope` 的文档版本、磁盘来源校验。显式命令与标准请求使用相同边界。
@@ -159,6 +159,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 - **`R.*` 资源的 `DirectNavigationProvider` 契约**：
   - 原生缺陷：Kotlin / Java 中跳转 `R.string.xxx` 时，ILS 原生仅返回 AGP 生成的 `R.jar` 字节码反编译类（`R$string.class`）。
   - 源码优先机制：实现 `com.intellij.navigation.DirectNavigationProvider`（`AndroidResourceNavigation`）。当导航元素为 `*.R` 内的 `PsiField` 且来源为 JAR 时，按模块、依赖关系、namespace 与编译来源限定资源源目录，通过资源 repository 枚举声明，再用当前 PSI 核验声明及范围。首个声明存在于原生 PSI 快照时由直接导航提供；否则 definition provider 保留该声明，并补齐其余限定符。声明定位不依赖变体或 AGP merger/blame 快照；缓冲区改名或文件移走后只返回仍有效的声明，全部消失时保留平台原生字节码导航。尚未落盘的新文件不参与 repository 枚举。资源 references 仍按上节校验编译字段与快照，缺失或过期时明确报错。
+  - XML 资源属性（含 Manifest）复用同一资源解析入口；类属性仍由 Manifest 类导航处理。资源身份及文件类型复用 SDK `ResourceSet`、`ResourceMergerItem.isFileBased`。values 和 `@+id` 跳到名称声明，文件型资源跳到文件：XML 使用根标签名称范围，图片及其他非 XML 资源使用文件起点 `(0, 0)`；保留限定符副本。
+  - 官方语义依据：[资源仓库层级](https://android.googlesource.com/platform/tools/adt/idea/+/HEAD/android/src/com/android/tools/idea/res/README.md)定义模块、依赖和源集归属；[light classes](https://android.googlesource.com/platform/tools/adt/idea/+/HEAD/android/docs/android-light-classes.md)将生成的 R 类作为该模型的表示，而非独立资源 owner。
 
 ### 5. 基于 K2 Analysis API 的 Compose 命名抑制契约
 

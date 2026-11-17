@@ -287,6 +287,20 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
     );
   }
 
+  // Sandbox-only image: build its real R field before importing the navigation fixture.
+  await writeFile(
+    join(targetDir, 'app/src/main/res/drawable/navigation_probe_image.png'),
+    Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    ),
+  );
+  await writeFile(
+    join(targetDir, 'app/src/main/java/com/example/app/NavigationImageProbe.kt'),
+    'package com.example.app\nclass NavigationImageProbe { val image = R.drawable.navigation_probe_image }\n',
+    'utf8',
+  );
+
   const wrapperJar = join(targetWrapperDir, 'gradle-wrapper.jar');
   const buildResult = spawnSync(
     javaExe,
@@ -1567,6 +1581,177 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
     }
 
     await t.test(
+      'Definition: layout, drawable and Manifest resource attributes reach source declarations',
+      { timeout: 180000 },
+      async () => {
+        const resources = [
+          {
+            reference: '@drawable/reference_drawable',
+            folder: 'drawable',
+            name: 'reference_drawable',
+            root: 'shape',
+          },
+          {
+            reference: '@layout/activity_main',
+            folder: 'layout',
+            name: 'activity_main',
+            root: 'LinearLayout',
+          },
+          {
+            reference: '@mipmap/reference_icon',
+            folder: 'mipmap-anydpi-v26',
+            name: 'reference_icon',
+            root: 'adaptive-icon',
+          },
+          {
+            reference: '@xml/reference_config',
+            folder: 'xml',
+            name: 'reference_config',
+            root: 'preferences',
+          },
+          { reference: '@raw/reference_raw', folder: 'raw', name: 'reference_raw', root: 'probe' },
+        ];
+        const expected = new Map<string, LspLocation[]>();
+        for (const resource of resources) {
+          const file = join(appDir, 'res', resource.folder, `${resource.name}.xml`);
+          expected.set(resource.reference, [
+            {
+              uri: pathToFileURL(file).href,
+              range: findRangeInText(await readFile(file, 'utf8'), resource.root),
+            },
+          ]);
+        }
+        expected.set('@drawable/navigation_probe_image', [
+          {
+            uri: pathToFileURL(join(appDir, 'res/drawable/navigation_probe_image.png')).href,
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+          },
+        ]);
+        const qualifiedStrings = join(appDir, 'res/values-es/strings.xml');
+        expected.set('@string/app_name', [
+          { uri: stringsUri, range: findRangeInText(stringsText, 'app_name') },
+          {
+            uri: pathToFileURL(qualifiedStrings).href,
+            range: findRangeInText(await readFile(qualifiedStrings, 'utf8'), 'app_name'),
+          },
+        ]);
+        const styles = join(appDir, 'res/values/styles.xml');
+        expected.set('@style/AppTheme', [
+          {
+            uri: pathToFileURL(styles).href,
+            range: findRangeInText(await readFile(styles, 'utf8'), 'AppTheme'),
+          },
+        ]);
+        const probes = ['layout', 'drawable'].map((folder) => {
+          const path = join(appDir, 'res', folder, 'navigation_attribute_probe.xml');
+          const text = [
+            '<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android">',
+            ...[...expected.keys()].map(
+              (reference, index) =>
+                `  <View android:tag="${reference}" android:id="@+id/navigation_probe_${index}" />`,
+            ),
+            '</LinearLayout>',
+          ].join('\n');
+          return { path, text, uri: pathToFileURL(path).href };
+        });
+        const manifestProbe = manifestText.replace(
+          '</application>',
+          `${[...expected.keys()]
+            .map(
+              (reference, index) =>
+                `<meta-data android:name="navigation.probe.${index}" android:resource="${reference}" />`,
+            )
+            .join('\n')}\n</application>`,
+        );
+        for (const probe of probes) {
+          assert.equal(existsSync(probe.path), false, 'Probe must not overwrite fixture input');
+        }
+        try {
+          for (const probe of probes) {
+            await writeFile(probe.path, probe.text, 'utf8');
+            client.notify('textDocument/didOpen', {
+              textDocument: { uri: probe.uri, languageId: 'xml', version: 1, text: probe.text },
+            });
+          }
+          changeManifest(manifestProbe);
+          for (const origin of [...probes, { uri: manifestUri, text: manifestProbe }]) {
+            for (const [reference, targets] of expected) {
+              const start = findPositionInText(origin.text, reference);
+              const definitions = normalizeLocations(
+                await client.request('textDocument/definition', {
+                  textDocument: { uri: origin.uri },
+                  position: { line: start.line, character: start.character + 2 },
+                }),
+              );
+              assert.equal(definitions.length, targets.length, `${origin.uri}: ${reference}`);
+              assert.deepEqual(
+                new Set(definitions.map(locationToKey)),
+                new Set(targets.map(locationToKey)),
+                `${origin.uri}: ${reference} must navigate to exact source ranges`,
+              );
+            }
+          }
+        } finally {
+          changeManifest(manifestText);
+          for (const probe of probes) {
+            client.notify('textDocument/didClose', { textDocument: { uri: probe.uri } });
+            await rm(probe.path, { force: true });
+          }
+        }
+      },
+    );
+
+    await t.test(
+      'Definition: Kotlin R file resources reach XML root names and binary image start',
+      { timeout: 180000 },
+      async () => {
+        const usage = join(appDir, 'java/com/example/app/ResourceUsageReference.kt');
+        const usageText = await readFile(usage, 'utf8');
+        const imageUsage = join(appDir, 'java/com/example/app/NavigationImageProbe.kt');
+        const imageText = await readFile(imageUsage, 'utf8');
+        const cases = [
+          { type: 'drawable', folder: 'drawable', name: 'reference_drawable', root: 'shape' },
+          { type: 'layout', folder: 'layout', name: 'activity_main', root: 'LinearLayout' },
+          {
+            type: 'mipmap',
+            folder: 'mipmap-anydpi-v26',
+            name: 'reference_icon',
+            root: 'adaptive-icon',
+          },
+          { type: 'xml', folder: 'xml', name: 'reference_config', root: 'preferences' },
+          { type: 'raw', folder: 'raw', name: 'reference_raw', root: 'probe' },
+          { type: 'drawable', folder: 'drawable', name: 'navigation_probe_image', root: null },
+        ];
+        for (const resource of cases) {
+          const image = resource.root === null;
+          const source = image ? imageUsage : usage;
+          const text = image ? imageText : usageText;
+          const target = join(
+            appDir,
+            'res',
+            resource.folder,
+            `${resource.name}.${image ? 'png' : 'xml'}`,
+          );
+          const field = `R.${resource.type}.${resource.name}`;
+          const definitions = normalizeLocations(
+            await client.request('textDocument/definition', {
+              textDocument: { uri: pathToFileURL(source).href },
+              position: findFieldRangeInText(text, field).start,
+            }),
+          );
+          const range =
+            resource.root === null
+              ? { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }
+              : findRangeInText(await readFile(target, 'utf8'), resource.root);
+          assert.equal(definitions.length, 1, `${field} must have one source target`);
+          assert.deepEqual(definitions.map(locationToKey), [
+            locationToKey({ uri: pathToFileURL(target).href, range }),
+          ]);
+        }
+      },
+    );
+
+    await t.test(
       'References: true transitive graph (> single edge: core -> lib -> app)',
       async () => {
         const coreStringsPath = join(
@@ -2000,6 +2185,132 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
     });
 
     await t.test(
+      'References: simultaneous process and generate R artifacts preserve exact field identity',
+      { timeout: 180000 },
+      async () => {
+        const original = join(
+          projectDir,
+          'app/build/intermediates/compile_and_runtime_r_class_jar/debug/processDebugResources/R.jar',
+        );
+        const alternate = join(
+          projectDir,
+          'app/build/intermediates/compile_r_class_jar/debug/generateDebugRFile/R.jar',
+        );
+        const preserved = existsSync(alternate) ? await readFile(alternate) : null;
+        const usage = join(appDir, 'java/com/example/app/ResourceUsageReference.kt');
+        const expected = [
+          {
+            uri: mainActivityUri,
+            range: findFieldRangeInText(mainActivityText, 'R.string.hello_message'),
+          },
+          {
+            uri: pathToFileURL(usage).href,
+            range: findFieldRangeInText(await readFile(usage, 'utf8'), 'ResString.hello_message'),
+          },
+        ];
+        const query = () =>
+          client.request('textDocument/references', {
+            textDocument: { uri: stringsUri },
+            position: findPositionInText(stringsText, 'hello_message'),
+            context: { includeDeclaration: false },
+          });
+        try {
+          await mkdir(dirname(alternate), { recursive: true });
+          await cp(original, alternate);
+          assert.ok(existsSync(original) && existsSync(alternate));
+          const references = normalizeLocations(await query());
+          assert.equal(references.length, expected.length);
+          assert.deepEqual(
+            new Set(references.map(locationToKey)),
+            new Set(expected.map(locationToKey)),
+          );
+          const result = (await client.request('workspace/executeCommand', {
+            command: 'omp.findResourceFieldReferences',
+            arguments: [
+              {
+                protocolVersion: 1,
+                moduleName: appModuleName,
+                namespace: 'com.example.app',
+                type: 'string',
+                name: 'hello_message',
+                classOrigins: [pathToFileURL(original).href, pathToFileURL(alternate).href],
+              },
+            ],
+          })) as { fieldResolved: boolean; references: LspLocation[] };
+          assert.equal(result.fieldResolved, true);
+          assert.equal(result.references.length, expected.length);
+          assert.deepEqual(
+            new Set(result.references.map(locationToKey)),
+            new Set(expected.map(locationToKey)),
+          );
+          for (const invalidOrigin of [
+            mainActivityUri,
+            pathToFileURL(
+              join(
+                projectDir,
+                'independent/build/intermediates/compile_r_class_jar/debug/generateDebugRFile/R.jar',
+              ),
+            ).href,
+            pathToFileURL(
+              join(
+                projectDir,
+                'independent/build/intermediates/compile_r_class_jar/release/generateReleaseRFile/R.jar',
+              ),
+            ).href,
+          ]) {
+            await assert.rejects(
+              () =>
+                client.request('workspace/executeCommand', {
+                  command: 'omp.findResourceFieldReferences',
+                  arguments: [
+                    {
+                      protocolVersion: 1,
+                      moduleName: appModuleName,
+                      namespace: 'com.example.app',
+                      type: 'string',
+                      name: 'hello_message',
+                      classOrigins: [pathToFileURL(original).href, invalidOrigin],
+                    },
+                  ],
+                }),
+              (error: Error) =>
+                error.message.includes('-32803') && error.message.includes('ambiguous_target'),
+            );
+          }
+          const mergers = [
+            'debug/mergeDebugResources/merger.xml',
+            'debug/packageDebugResources/merger.xml',
+            'packageDebugResources/merger.xml',
+          ].map((path) => join(projectDir, 'app/build/intermediates/incremental', path));
+          const displaced: string[] = [];
+          try {
+            for (const merger of mergers) {
+              if (!existsSync(merger)) continue;
+              await rename(merger, `${merger}.navigation-probe`);
+              displaced.push(merger);
+            }
+            await assert.rejects(
+              query,
+              (error: Error) =>
+                error.message.includes('-32803') && error.message.includes('missing_snapshot'),
+            );
+          } finally {
+            for (const merger of displaced.reverse()) {
+              await rename(`${merger}.navigation-probe`, merger);
+            }
+          }
+          assert.deepEqual(
+            new Set(normalizeLocations(await query()).map(locationToKey)),
+            new Set(expected.map(locationToKey)),
+          );
+        } finally {
+          if (preserved !== null) await writeFile(alternate, preserved);
+          else await rm(alternate, { force: true });
+        }
+      },
+    );
+
+    await t.test(
       'References: missing merger snapshot fails and recovers without reimport',
       async () => {
         const merger = join(
@@ -2360,7 +2671,18 @@ test('Android XML symbols and manifest references integration [smoke]', async (t
         // Ignore driver close failure during cleanup
       }
     }
-    await sandbox.cleanup();
+    try {
+      if (projectDir) {
+        await rm(join(projectDir, 'app/src/main/res/drawable/navigation_probe_image.png'), {
+          force: true,
+        });
+        await rm(join(projectDir, 'app/src/main/java/com/example/app/NavigationImageProbe.kt'), {
+          force: true,
+        });
+      }
+    } finally {
+      await sandbox.cleanup();
+    }
   }
 });
 

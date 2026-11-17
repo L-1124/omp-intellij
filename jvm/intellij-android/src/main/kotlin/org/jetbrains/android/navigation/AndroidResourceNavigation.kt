@@ -12,6 +12,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiField
 import com.intellij.psi.PsiFile
 import com.intellij.psi.impl.FakePsiElement
+import com.intellij.psi.xml.XmlFile
 import com.jetbrains.analyzer.api.AnalyzerContextKind
 import com.jetbrains.analyzer.bootstrap.AnalyzerContainerBuilder
 import com.jetbrains.ls.api.core.util.offsetByPosition
@@ -59,6 +60,10 @@ class AndroidResourceNavigation : DirectNavigationProvider {
                     val location = definitions[0].location
                     val path = AndroidLocations.path(location)
                     val xml = AndroidSources.navigationFile(element.project, path) ?: continue
+                    if (xml !is XmlFile) {
+                        sources.verify()
+                        return xml
+                    }
                     val document = xml.fileDocument
                     val start = document.offsetByPosition(location.range.start)
                     val end = document.offsetByPosition(location.range.end)

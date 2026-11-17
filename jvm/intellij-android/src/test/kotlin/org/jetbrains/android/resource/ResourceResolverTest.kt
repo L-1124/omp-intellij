@@ -2,6 +2,7 @@
 
 package org.jetbrains.android.resource
 
+import com.android.utils.XmlUtils
 import com.intellij.core.CoreApplicationEnvironment
 import com.intellij.core.CoreProjectEnvironment
 import com.intellij.ide.highlighter.XmlFileType
@@ -27,9 +28,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
+import org.jetbrains.android.context.AndroidQueryException
+import java.nio.file.Files
+import java.nio.file.Path
 
 class ResourceResolverTest {
 
@@ -225,6 +230,89 @@ class ResourceResolverTest {
             val ref = findReferenceInAttr(file, attr)
             assertNull("Expected null reference for attribute $attr", ref)
         }
+    }
+
+    @Test
+    fun duplicateRProducersUseTheValidOwnerSnapshot() {
+        withProducerSnapshots { module, source, merged, _ ->
+            writeSnapshot(merged, source, "title")
+            verifySnapshot(module)
+            Files.delete(merged)
+            val error = assertThrows(AndroidQueryException::class.java) { verifySnapshot(module) }
+            assertTrue(error.message.orEmpty().contains("missing_snapshot"))
+        }
+    }
+
+    @Test
+    fun packagedSnapshotRemainsUsableWhenTheLinkedSnapshotIsStale() {
+        withProducerSnapshots { module, source, merged, packaged ->
+            writeSnapshot(merged, source, "old_title")
+            writeSnapshot(packaged, source, "title")
+            verifySnapshot(module)
+            writeSnapshot(packaged, source, "old_title")
+            val error = assertThrows(AndroidQueryException::class.java) { verifySnapshot(module) }
+            assertTrue(error.message.orEmpty().contains("stale_snapshot"))
+        }
+    }
+
+    @Test
+    fun duplicateRProducersStillRejectStaleDeclarations() {
+        withProducerSnapshots { module, source, merged, packaged ->
+            writeSnapshot(merged, source, "old_title")
+            writeSnapshot(packaged, source, "old_title")
+            val error = assertThrows(AndroidQueryException::class.java) {
+                verifySnapshot(module)
+            }
+            assertTrue(error.message.orEmpty().contains("stale_snapshot"))
+        }
+    }
+
+    @Test
+    fun duplicateRProducersStillRequireABuildSnapshot() {
+        withProducerSnapshots { module, _, _, _ ->
+            val error = assertThrows(AndroidQueryException::class.java) {
+                verifySnapshot(module)
+            }
+            assertTrue(error.message.orEmpty().contains("missing_snapshot"))
+        }
+    }
+
+    private fun withProducerSnapshots(block: (Path, Path, Path, Path) -> Unit) {
+        val module = Files.createTempDirectory("resource_producers")
+        try {
+            val source = module.resolve("src/main/res/values/strings.xml")
+            Files.createDirectories(source.parent)
+            Files.writeString(source, "<resources><string name=\"title\">Title</string></resources>")
+            for (artifact in listOf(
+                "compile_and_runtime_r_class_jar/debug/processDebugResources/R.jar",
+                "compile_r_class_jar/debug/generateDebugRFile/R.jar",
+            )) {
+                val jar = module.resolve("build/intermediates").resolve(artifact)
+                Files.createDirectories(jar.parent)
+                Files.createFile(jar)
+            }
+            val merged = module.resolve("build/intermediates/incremental/debug/mergeDebugResources/merger.xml")
+            val packaged = module.resolve("build/intermediates/incremental/packageDebugResources/merger.xml")
+            block(module, source, merged, packaged)
+        } finally {
+            module.toFile().deleteRecursively()
+        }
+    }
+
+    private fun verifySnapshot(module: Path) {
+        AndroidSources.Scope(null, null).use {
+            ResourceResolver.verifyProvenance(environment.project, module, "debug", "com.example", "string", "title")
+        }
+    }
+
+    private fun writeSnapshot(snapshot: Path, source: Path, name: String) {
+        Files.createDirectories(snapshot.parent)
+        val root = XmlUtils.toXmlAttributeValue(source.parent.parent.toString())
+        val file = XmlUtils.toXmlAttributeValue(source.toString())
+        Files.writeString(
+            snapshot,
+            """<merger version="3"><dataSet config="main"><source path="$root"><file path="$file"><string name="$name">Title</string></file></source></dataSet></merger>"""
+        )
     }
 
     @Test
