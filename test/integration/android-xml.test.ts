@@ -4824,6 +4824,104 @@ test('Android Lint diagnostics integration', async (t) => {
   }
 });
 
+test('Android Lint code actions preserve request scope and apply XML suppressions', async () => {
+  const sandbox = await createIntegrationSandbox(prereqs);
+  let client: InitializedLspClientDriver | null = null;
+  try {
+    const projectDir = await copyAndroidLintFixture(sandbox);
+    const valuesPath = join(projectDir, 'app', 'src', 'main', 'res', 'values', 'code_action_probe.xml');
+    await writeFile(
+      valuesPath,
+      '<resources>\n    <string name="code_action_loading">Loading...</string>\n</resources>\n',
+    );
+    client = await startLspClient(projectDir, sandbox);
+
+    interface XmlCodeAction {
+      kind?: string;
+      diagnostics?: LspDiagnostic[];
+      edit?: { changes?: Record<string, Array<{ range: LspRange; newText: string }>> };
+    }
+
+    for (const [path, issue] of [
+      [join(projectDir, 'app', 'src', 'main', 'res', 'layout', 'layout_probe.xml'), 'HardcodedText'],
+      [valuesPath, 'TypographyEllipsis'],
+    ]) {
+      const uri = pathToFileURL(path).href;
+      const text = await readFile(path, 'utf8');
+      const lines = text.split('\n');
+      const range = {
+        start: { line: 0, character: 0 },
+        end: { line: lines.length - 1, character: lines[lines.length - 1].length },
+      };
+      client.notify('textDocument/didOpen', {
+        textDocument: { uri, languageId: 'xml', version: 1, text },
+      });
+      try {
+        const cold = (await client.request('textDocument/codeAction', {
+          textDocument: { uri },
+          range,
+          context: { diagnostics: [], only: ['quickfix'] },
+        })) as XmlCodeAction[];
+        assert.ok(
+          cold.some((action) => action.diagnostics?.some((diagnostic) => diagnostic.code === issue)),
+          `Code actions must analyze ${issue} without client diagnostics: ${JSON.stringify(cold)}`,
+        );
+
+        const report = await pullDiagnostics(client, uri);
+        const diagnostic = report.items?.find((item) => item.code === issue);
+        assert.ok(diagnostic, `Fixture must report ${issue}: ${JSON.stringify(report)}`);
+        const warm = (await client.request('textDocument/codeAction', {
+          textDocument: { uri },
+          range: diagnostic.range,
+          context: { diagnostics: [diagnostic], only: ['quickfix'] },
+        })) as XmlCodeAction[];
+        const suppression = warm
+          .flatMap((action) => Object.entries(action.edit?.changes ?? {}))
+          .find(
+            ([target, edits]) =>
+              normalizeUri(target) === normalizeUri(uri) &&
+              edits.some((edit) => edit.newText.includes(`tools:ignore="${issue}"`)),
+          );
+        const edits = suppression?.[1];
+        assert.ok(
+          edits?.length,
+          `Code actions must provide a local ${issue} suppression: ${JSON.stringify(warm)}`,
+        );
+        const offset = (position: LspPosition): number =>
+          lines.slice(0, position.line).reduce((total, line) => total + line.length + 1, 0) +
+          position.character;
+        let edited = text;
+        for (const edit of [...edits].sort(
+          (left, right) => offset(right.range.start) - offset(left.range.start),
+        )) {
+          edited =
+            edited.slice(0, offset(edit.range.start)) +
+            edit.newText +
+            edited.slice(offset(edit.range.end));
+        }
+        client.notify('textDocument/didChange', {
+          textDocument: { uri, version: 2 },
+          contentChanges: [{ text: edited }],
+        });
+        const after = await pullDiagnostics(client, uri);
+        assert.equal(
+          after.items?.some((item) => item.code === issue || item.code === 'SYNTAX'),
+          false,
+          `Applying ${issue} suppression must produce valid XML and remove the diagnostic: ${JSON.stringify(after)}`,
+        );
+      } finally {
+        client.notify('textDocument/didClose', { textDocument: { uri } });
+      }
+    }
+  } finally {
+    try {
+      await client?.close();
+    } finally {
+      await sandbox.cleanup();
+    }
+  }
+});
+
 test('Android XML and Manifest Lint diagnostics integration', {
   timeout: 600000,
 }, async (t) => {

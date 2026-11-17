@@ -244,6 +244,10 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 用户确认的保存边界：当前拉取文件的未保存内容即时参与诊断；关联资源、配置和其他清单按磁盘读取，保存后刷新；新文件首次保存后检查。输出前在新分析上下文中复核当前文档内容，避免上下文外访问快照 Document。
 
+`textDocument/codeAction` 复用 `AndroidRequests.diagnosticQuery` 的请求作用域、保存态模型输入和发布前快照复核。即使诊断已缓存，生成 Lint fix 与 `lint.xml` 抑制编辑仍需读取模块模型，不能只给重新分析诊断的路径建立作用域。动作以当前 PSI 和官方 `LintFixPerformer` 计算 `WorkspaceEdit`，保持 [Studio 的 PSI quick-fix 模型](https://github.com/JetBrains/android/blob/master/android-lint/src/com/android/tools/idea/lint/quickFixes/RemoveAttributeQuickFix.kt)与 [LSP code action 范围和编辑契约](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_codeAction)；请求本身不修改源文件。
+
+XML 抑制属性与 `xmlns:tools` 插入位置取官方 `XmlTagUtil.getStartTagNameElement(...).textRange.endOffset`。`XmlTag.textOffset` 指向整个标签起点，直接加名称长度会把属性插入标签名内部；生成编辑后必须验证 XML 仍可解析且目标诊断消失。
+
 编辑期通过官方 `ManifestMerger2` 合并当前源集与已知依赖，使用模型的 namespace、package 和已知 `minSdk`/`targetSdk` 系统属性；`setNamespace` 只负责类名解析，缺少 `package` 的现代清单还需要 `Document.PACKAGE` 注入。合并不改写源文件，并保留未保存内容与来源范围。Built 态优先使用经输入校验的 AGP 产物；模型缺失或合并失败时回退到源文件检查。
 
 显式传给 XML parser 的文本是解析输入；只有文本与源 PSI 一致时才复用 PSI-backed DOM。合并文本与源文件不同时独立解析，避免以未合并的源节点替代合并结果。

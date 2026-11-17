@@ -8,39 +8,25 @@ import com.android.tools.lint.detector.api.Incident
 import com.android.tools.lint.detector.api.LintFix
 import com.android.tools.lint.detector.api.Severity
 import com.android.utils.XmlUtils
-import com.intellij.openapi.application.readAction
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
-import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
-import com.intellij.psi.PsiManager
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlFile
 import com.intellij.psi.xml.XmlTag
-import com.jetbrains.ls.api.core.LSAnalysisContext
+import com.intellij.xml.util.XmlTagUtil
 import com.jetbrains.ls.api.core.LSServer
-import com.jetbrains.ls.api.core.util.findVirtualFile
 import com.jetbrains.ls.api.core.util.uri
 import com.jetbrains.ls.api.features.codeActions.LSCodeActionProvider
 import com.jetbrains.ls.api.features.language.LSLanguage
 import com.jetbrains.lsp.implementation.LspHandlerContext
-import com.jetbrains.lsp.protocol.CodeAction
-import com.jetbrains.lsp.protocol.CodeActionKind
-import com.jetbrains.lsp.protocol.CodeActionParams
-import com.jetbrains.lsp.protocol.Diagnostic
-import com.jetbrains.lsp.protocol.DocumentUri
-import com.jetbrains.lsp.protocol.Position
-import com.jetbrains.lsp.protocol.Range
-import com.jetbrains.lsp.protocol.TextEdit
-import com.jetbrains.lsp.protocol.URI
-import com.jetbrains.lsp.protocol.WorkspaceEdit
+import com.jetbrains.lsp.protocol.*
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import org.jetbrains.android.AndroidExtension
+import org.jetbrains.android.context.AndroidRequests
 import java.io.File
 import java.nio.file.Files
-import java.nio.file.Path
 
 class AndroidLintCodeActionProvider : LSCodeActionProvider {
 
@@ -57,76 +43,62 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
     override val providesOnlyKinds: Set<CodeActionKind> = setOf(CodeActionKind.QuickFix)
 
     context(server: LSServer, handlerContext: LspHandlerContext)
-    override fun getCodeActions(params: CodeActionParams): Flow<CodeAction> = flow {
-        val actions = server.withAnalysisContext {
-            readAction {
-                ProgressManager.checkCanceled()
-                val project = contextOf<LSAnalysisContext>().project
-                val virtualFile = params.textDocument.findVirtualFile() ?: return@readAction emptyList()
-                val file = PsiManager.getInstance(project).findFile(virtualFile) ?: return@readAction emptyList()
-                val document = PsiDocumentManager.getInstance(project).getDocument(file) ?: return@readAction emptyList()
+    override fun getCodeActions(params: CodeActionParams): Flow<CodeAction> =
+        AndroidRequests.diagnosticQuery(server, params.textDocument) { project, file, document ->
+            val virtualFile = file.virtualFile
+            val items = AndroidLintProvider.getLiveIncidents(project, file, document)
+            if (items.isEmpty()) return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
 
-                val items = AndroidLintProvider.getLiveIncidents(project, file, document)
-                if (items.isEmpty()) return@readAction emptyList()
-
-                val matching = items.filter { (diag, _) ->
-                    (params.context.diagnostics.isNotEmpty() && params.context.diagnostics.any { d ->
-                        d.range == diag.range && (d.code == diag.code || d.message == diag.message)
-                    }) || rangesIntersect(diag.range, params.range)
-                }
-
-                if (matching.isEmpty()) return@readAction emptyList()
-
-                val result = ArrayList<CodeAction>()
-                val docUri = DocumentUri(virtualFile.uri)
-                val client = AndroidLintProvider.getLiveClient(virtualFile.uri.uri)
-
-                val fileContentsMap = mutableMapOf<File, String>()
-                runCatching {
-                    val ioFile = file.virtualFile.toNioPath().toFile()
-                    fileContentsMap[ioFile] = document.text
-                }
-                val fileProvider = InMemoryFileProvider { f -> fileContentsMap[f] }
-
-                for ((diag, incident) in matching) {
-                    ProgressManager.checkCanceled()
-
-                    // 1. LintFix quick-fixes
-                    val fix = incident.fix
-                    if (fix != null && client != null) {
-                        val performer = InactiveLintFixPerformer(client)
-                        val alternatives = unpackFixes(incident, fix)
-                        for (altFix in alternatives) {
-                            val codeAction = buildCodeActionForFix(incident, altFix, diag, performer, fileProvider, document, docUri)
-                            if (codeAction != null) {
-                                result.add(codeAction)
-                            }
-                        }
-                    }
-
-                    // 2. Code-level suppress
-                    val codeSuppress = computeCodeSuppress(file, document, diag, incident)
-                    if (codeSuppress != null) {
-                        result.add(codeSuppress)
-                    }
-
-                    // 3. lint.xml suppress
-                    if (client != null) {
-                        val lintXmlSuppress = computeLintXmlSuppress(project, file, diag, incident, client)
-                        if (lintXmlSuppress != null) {
-                            result.add(lintXmlSuppress)
-                        }
-                    }
-                }
-
-                result
+            val matching = items.filter { (diag, _) ->
+                (params.context.diagnostics.isNotEmpty() && params.context.diagnostics.any { d ->
+                    d.range == diag.range && (d.code == diag.code || d.message == diag.message)
+                }) || rangesIntersect(diag.range, params.range)
             }
-        }
 
-        for (action in actions) {
-            emit(action)
+            if (matching.isEmpty()) return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
+
+            val result = ArrayList<CodeAction>()
+            val docUri = DocumentUri(virtualFile.uri)
+            val client = AndroidLintProvider.getLiveClient(virtualFile.uri.uri)
+
+            val fileContentsMap = mutableMapOf<File, String>()
+            runCatching {
+                val ioFile = file.virtualFile.toNioPath().toFile()
+                fileContentsMap[ioFile] = document.text
+            }
+            val fileProvider = InMemoryFileProvider { f -> fileContentsMap[f] }
+
+            for ((diag, incident) in matching) {
+                ProgressManager.checkCanceled()
+
+                val fix = incident.fix
+                if (fix != null && client != null) {
+                    val performer = InactiveLintFixPerformer(client)
+                    val alternatives = unpackFixes(incident, fix)
+                    for (altFix in alternatives) {
+                        val codeAction =
+                            buildCodeActionForFix(incident, altFix, diag, performer, fileProvider, document, docUri)
+                        if (codeAction != null) {
+                            result.add(codeAction)
+                        }
+                    }
+                }
+
+                val codeSuppress = computeCodeSuppress(file, document, diag, incident)
+                if (codeSuppress != null) {
+                    result.add(codeSuppress)
+                }
+
+                if (client != null) {
+                    val lintXmlSuppress = computeLintXmlSuppress(project, file, diag, incident, client)
+                    if (lintXmlSuppress != null) {
+                        result.add(lintXmlSuppress)
+                    }
+                }
+            }
+
+            AndroidRequests.DiagnosticResult(result)
         }
-    }
 
     private fun unpackFixes(incident: Incident, fix: LintFix): List<LintFix> {
         if (fix is LintFix.LintFixGroup && fix.type == LintFix.GroupType.ALTERNATIVES) {
@@ -208,7 +180,6 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
         val lineEnd = document.getLineEndOffset(line)
         val lineText = document.charsSequence.subSequence(lineStart, lineEnd).toString()
         val indent = lineText.takeWhile { it == ' ' || it == '\t' }
-        val uri = file.virtualFile.uri.uri
         val docUri = DocumentUri(file.virtualFile.uri)
 
         if (file is XmlFile || file.name.endsWith(".xml")) {
@@ -219,7 +190,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             val edits = ArrayList<TextEdit>()
 
             if (rootTag.getAttribute("xmlns:tools") == null) {
-                val rootNameEnd = rootTag.textOffset + rootTag.name.length
+                val rootNameEnd = XmlTagUtil.getStartTagNameElement(rootTag)?.textRange?.endOffset ?: return null
                 val pos = position(document, rootNameEnd)
                 edits.add(TextEdit(Range(pos, pos), " xmlns:tools=\"http://schemas.android.com/tools\""))
             }
@@ -227,14 +198,18 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             if (existingIgnore != null) {
                 val valueElement = existingIgnore.valueElement
                 if (valueElement != null) {
-                    val valRange = AndroidLintProvider.range(document, valueElement.textOffset, valueElement.textOffset + valueElement.textLength)
+                    val valRange = AndroidLintProvider.range(
+                        document,
+                        valueElement.textOffset,
+                        valueElement.textOffset + valueElement.textLength
+                    )
                     if (valRange != null) {
                         val currentVal = existingIgnore.value ?: ""
                         edits.add(TextEdit(valRange, "\"$currentVal,$issueId\""))
                     }
                 }
             } else {
-                val insertOffset = targetTag.textOffset + targetTag.name.length
+                val insertOffset = XmlTagUtil.getStartTagNameElement(targetTag)?.textRange?.endOffset ?: return null
                 val pos = position(document, insertOffset)
                 edits.add(TextEdit(Range(pos, pos), " tools:ignore=\"$issueId\""))
             }
@@ -417,6 +392,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             fileProvider: FileProvider,
             fileData: PendingEditFile,
             edits: List<PendingEdit>
-        ) {}
+        ) {
+        }
     }
 }
