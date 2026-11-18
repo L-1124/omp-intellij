@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DapSessionManager } from '@oh-my-pi/pi-coding-agent/dap/session';
+import { resolveAdapter } from '@oh-my-pi/pi-coding-agent/dap/config';
+import { injectPluginDirRoots } from '@oh-my-pi/pi-coding-agent/discovery/helpers';
 
 const options = JSON.parse(process.argv[2]);
 const manager = new DapSessionManager();
@@ -13,19 +18,26 @@ input.on('line', (line) => {
   else if (line === 'terminate') terminated.resolve();
 });
 input.once('close', () => terminated.resolve());
-const adapter = {
-  name: 'intellij',
-  command: options.nodeExecutable,
-  resolvedCommand: options.nodeExecutable,
-  args: [options.proxyScript],
-  languages: ['java', 'kotlin'],
-  fileTypes: ['.java', '.kt'],
-  rootMarkers: ['settings.gradle', 'settings.gradle.kts'],
-  launchDefaults: options.launchDefaults ?? {},
-  attachDefaults: options.attachDefaults ?? {},
-  connectMode: 'stdio',
-  acceptsDirectoryProgram: false,
-};
+await import('../../src/plugin.ts');
+await injectPluginDirRoots(
+  join(options.cwd, '.omp', 'host-home'),
+  [fileURLToPath(new URL('../../', import.meta.url))],
+  options.cwd,
+);
+await mkdir(join(options.cwd, '.omp'), { recursive: true });
+await writeFile(
+  join(options.cwd, '.omp', 'dap.json'),
+  JSON.stringify({
+    adapters: {
+      intellij: {
+        launchDefaults: options.launchDefaults ?? {},
+        attachDefaults: options.attachDefaults ?? {},
+      },
+    },
+  }),
+);
+const adapter = resolveAdapter('intellij', options.cwd);
+assert.ok(adapter, 'The installed plugin must resolve its built-in intellij adapter');
 let failure;
 try {
   process.stdout.write(`${JSON.stringify({ event: 'starting' })}\n`);
@@ -57,7 +69,13 @@ try {
   const threads = await manager.threads();
   assert.ok(threads.threads.length > 0);
   process.stdout.write(
-    `${JSON.stringify({ event: 'ready', session, capabilities, threads: threads.threads })}\n`,
+    `${JSON.stringify({
+      event: 'ready',
+      adapter: { name: adapter.name, command: adapter.resolvedCommand, args: adapter.args },
+      session,
+      capabilities,
+      threads: threads.threads,
+    })}\n`,
   );
   await terminated.promise;
 } catch (error) {

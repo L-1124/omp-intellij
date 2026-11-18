@@ -1,11 +1,10 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { IntegrationSandbox } from './fixture.js';
 
 export interface OmpHostOptions {
   mode: 'launch' | 'attach';
-  nodeExecutable?: string;
   cwd: string;
   program?: string;
   host?: string;
@@ -28,12 +27,17 @@ export interface OmpHostDriver {
 export function createOmpHostDriver(options: OmpHostOptions, sandbox: IntegrationSandbox): OmpHostDriver {
   const child = spawn(process.platform === 'win32' ? 'bun.exe' : 'bun', [
     resolve('test/integration/omp-dap-host.mjs'),
-    JSON.stringify({
-      ...options,
-      nodeExecutable: options.nodeExecutable ?? process.execPath,
-      proxyScript: resolve('dist-test/src/debug/dap-proxy.js'),
-    }),
-  ], { cwd: options.cwd, env: sandbox.env, stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
+    JSON.stringify(options),
+  ], {
+    cwd: options.cwd,
+    env: {
+      ...sandbox.env,
+      PI_CODING_AGENT_DIR: join(sandbox.sandboxDir, 'host-home', '.omp', 'agent'),
+      CLAUDE_CONFIG_DIR: join(sandbox.sandboxDir, 'host-home', '.claude'),
+    },
+    stdio: ['pipe', 'pipe', 'inherit'],
+    windowsHide: true,
+  });
   sandbox.trackProcess(child);
   const starting = Promise.withResolvers<Record<string, unknown>>();
   const ready = Promise.withResolvers<Record<string, unknown>>();

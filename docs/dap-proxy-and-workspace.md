@@ -30,6 +30,7 @@
 6. **轻量 DAP 仿真与真实工程集成测试准则**：
    - **轻量仿真**：构建基于 Node.js 原生 TCP 的伪 LSP 与伪 DAP 双服务器（`createDapTestHarness`），实现毫秒级端到端握手、断点命中、堆栈遍历与时序竞争验证，摆脱外部商业版许可证依赖，全套测试秒级跑通。
    - **真实测试安全准则**：针对真实工程的集成测试必须遵循：源码文件只读与 SHA-256 基线核验、沙箱隔离目录运行、Gradle 缓存共享与离线 properties 注入、进程树严格注册与退出清理校验，严禁全局进程强杀。Windows 下仅对已验证归属的沙箱 ILS 服务连同导入后代终止，避免迟到的 Gradle daemon 锁住待删缓存；代理强杀仍只结束代理进程，保留 EOF 回收与兄弟会话隔离的验收语义。
+   - **内置入口验证**：OMP 宿主集成先加载真实插件入口，再通过原生插件发现和 DAP 配置解析器选择 `intellij`；沙箱项目仅提供 `launchDefaults` / `attachDefaults`，不重写 `command` 或 `args`。这样可覆盖发布声明、默认参数和当前运行时资产，避免手工适配器对象漏测内置默认值。Android 分别验证 APK、已安装应用和真实 Gradle 构建启动，并保留外部附加、取消与所有权检查。
 
 ---
 
@@ -45,6 +46,7 @@ OMP 原生 `debug` 的 `launch` 接收 `program`、`args`、`adapter`、`cwd` �
 - `testMode: true` 与 `buildTool: "gradle"` 互斥。`gradleArgs`、`projectPath`、`sourceSet` 仅适用于 Gradle 启动，后两者必须是非空字符串。非法组合在连接 LSP、构建或启动调试器之前返回 DAP 失败响应。
 - 当前固定版本 ILS 的原生 JVM 启动会自动构建，未提供跳过构建参数。代理对 `build:false` 明确报不支持，不再只跳过客户端步骤却让原生端继续构建。
 - 工程配置可以覆盖全局或插件提供的适配器配置，`launchDefaults` 和 `attachDefaults` 按字段合并，仅需声明差异项；显式调用的通用 `program`、`cwd`、`args` 由 OMP 组装到最终请求。覆盖预设时保留对应模式字段的含义，不能用字符串 `"true"` 代替布尔值。
+- 通用 `intellij` 不向所有平台注入 JVM 专属的 `console`、`build`、`stopOnEntry` 启动默认项。JVM 路由本身提供 `internalConsole` 和调试入口停顿；Android 构建由 `android.target.build` 控制，APK 与已安装目标不隐含构建。Android 继续拒绝未知启动参数，避免用放宽校验掩盖适配器声明错误。
 
 例如将 Gradle 工程属性作为构建工具参数传递，同时保留原有代理命令和模式：
 

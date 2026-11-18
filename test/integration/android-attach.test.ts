@@ -2762,7 +2762,8 @@ test('native Android DAP without OMP: install cancel inspects PM state and block
   }
 });
 
-test.describe('OMP host DapSessionManager: Android owned launch, external attach, and startup cancellation', {
+
+test.describe('OMP host built-in intellij: Android owned launch, external attach, and startup cancellation', {
   timeout: Infinity,
 }, () => {
   let sandbox: IntegrationSandbox;
@@ -2800,39 +2801,44 @@ test.describe('OMP host DapSessionManager: Android owned launch, external attach
     { timeout: 180000 },
   );
 
-  test('owned launch closes its session, process and forward', { timeout: 180000 }, async () => {
-    const { targetDir, apkPath, mainActivityPath } = fixture;
-    hostLaunch = createOmpHostDriver(
-      {
-        mode: 'launch',
-        cwd: targetDir,
-        program: mainActivityPath,
-        launchDefaults: {
-          android: {
-            deviceId,
-            target: { kind: 'apks', files: [apkPath] },
-          },
+  for (const kind of ['apks', 'installed', 'gradle'] as const) {
+    test(`owned ${kind} launch closes its session, process and forward`, {
+      timeout: 180000,
+    }, async () => {
+      const { targetDir, apkPath, mainActivityPath } = fixture;
+      const target =
+        kind === 'apks'
+          ? { kind, files: [apkPath] }
+          : kind === 'installed'
+            ? { kind, packageName: TEST_PACKAGE }
+            : { kind, module: ':app', variant: 'debug', build: true };
+      hostLaunch = createOmpHostDriver(
+        {
+          mode: 'launch',
+          cwd: targetDir,
+          program: mainActivityPath,
+          launchDefaults: { android: { deviceId, target } },
+          breakpoint: { file: mainActivityPath, line: breakLine },
         },
-        breakpoint: { file: mainActivityPath, line: breakLine },
-      },
-      sandbox,
-    );
-    await hostLaunch.starting;
-    const launchReady = await hostLaunch.ready;
-    assert.equal(asRecord(launchReady.capabilities).supportsTerminateRequest, false);
-    assert.equal(asRecord(launchReady.capabilities).supportsCancelRequest, false);
-    assert.ok(Array.isArray(launchReady.threads) && launchReady.threads.length > 0);
-    await getFixturePid(deviceId);
+        sandbox,
+      );
+      await hostLaunch.starting;
+      const launchReady = await hostLaunch.ready;
+      assert.equal(asRecord(launchReady.capabilities).supportsTerminateRequest, false);
+      assert.equal(asRecord(launchReady.capabilities).supportsCancelRequest, false);
+      assert.ok(Array.isArray(launchReady.threads) && launchReady.threads.length > 0);
+      await getFixturePid(deviceId);
 
-    await hostLaunch.close();
-    const launchClosed = await hostLaunch.closed;
-    assert.deepEqual(launchClosed.sessions, []);
-    await hostLaunch.exited;
-    hostLaunch = undefined;
+      await hostLaunch.close();
+      const launchClosed = await hostLaunch.closed;
+      assert.deepEqual(launchClosed.sessions, []);
+      await hostLaunch.exited;
+      hostLaunch = undefined;
 
-    await waitForProcessGone(deviceId, TEST_PACKAGE);
-    assert.equal(getAdbForwardList(deviceId), forwardBefore);
-  });
+      await waitForProcessGone(deviceId, TEST_PACKAGE);
+      assert.equal(getAdbForwardList(deviceId), forwardBefore);
+    });
+  }
 
   test('external attach closes its session and preserves the target PID', {
     timeout: 180000,
