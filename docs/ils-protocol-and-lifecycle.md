@@ -442,6 +442,8 @@ Windows 宿主在宽限期结束后可能递归终止 Bridge 进程树；共享 
 
 ### 4. 资产发布前完整性验证
 
+Git 市场从仓库安装；`package.json` 的 `files` 仅控制 npm 包。npm 包保留 OMP 转译所需的 `src/`、独立 Node API 和 CLI 所需的 `dist/`，以及已构建的 ILS 扩展资产。重建 JVM 扩展须从 Git 源码检出。
+
 在打包发布前，必须执行以下测试与 dry-run 命令，确认无死重文件且二进制资产完好：
 
 ```bash

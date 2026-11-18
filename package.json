@@ -11,22 +11,11 @@
   "files": [
     "dist/",
     "src/",
-    "jvm/intellij-android/src/",
-    "jvm/intellij-android/gradle/",
-    "jvm/intellij-android/gradlew",
-    "jvm/intellij-android/gradlew.bat",
-    "jvm/intellij-android/build.gradle.kts",
-    "jvm/intellij-android/settings.gradle.kts",
-    "jvm/intellij-android/gradle.properties",
-    "jvm/intellij-android/gradle.lockfile",
     "resources/ils/",
-    "scripts/setup-dev-env.mjs",
-    "scripts/run-gradle.mjs",
     "scripts/clean-runtime.mjs",
     "settings.json",
     ".omp-plugin/marketplace.json",
-    "docs/",
-    "README.md"
+    "docs/"
   ],
   "bin": {
     "omp-intellij-lsp": "./dist/bridge.js",
