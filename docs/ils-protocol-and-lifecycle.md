@@ -340,7 +340,11 @@ Gradle 导入完成后，标准 definition 将 `NotificationChannel` 定位到 `
 | Composable 内直接 `mutableStateOf(0)`、`remember { mutableStateOf(0) }`、Suppress                                     | 均无 `UnrememberedMutableState`；大写函数仅出现 `FunctionName`，小写未 remember 对照为空 | Compose 规则缺口成立 |
 | 同文件未保护 API 26 调用与未 remember 状态                                                                            | 仅 `FunctionName`，两项 Android/Compose 规则均未检出                                     | 无原生规则合并结果   |
 
-`run-mcp-tool` 的 `get_file_problems` 与 `lint_files` 在本实例返回 `{"isError":true,"content":"com.intellij.codeInsight.daemon.DaemonCodeAnalyzer"}`，不能作为已验证可用的替代入口；该错误本身不证明内部故障机制。
+`run-mcp-tool` 的 `get_file_problems` 与 `lint_files` 在本实例返回 `{"isError":true,"content":"com.intellij.codeInsight.daemon.DaemonCodeAnalyzer"}`，不能作为已验证可用的替代入口。
+
+上游 `AnalysisToolset.collectLintFiles(...)` 依赖 `DaemonCodeAnalyzer` 项目服务，而当前 ILS analyzer 会话未注册该服务；返回的类名是 `InstanceNotRegisteredException` 的消息。本扩展的单文件诊断使用 `textDocument/diagnostic` 与 `AndroidLintProvider`。该宿主缺口等待上游修复。
+
+当前宿主的 `LSMcpSessionProjectResolver` 始终返回会话项目，`projectPath` 不改变解析目标；`filePath` 仍按当前会话项目解析。
 
 上述无扩展控制组证明：该版本的原生通用编译诊断可用，单独使用原生服务时未满足 Android/Compose 正反例契约。控制组未分发 Lint 依赖，也未实现 `AndroidLintProvider`；当前扩展已单独接入该 Provider。原始控制组报告及代码切片归档于 `local://native271-diagnostic-evidence.json`。
 
@@ -468,6 +472,8 @@ MyHook 实测：`MainActivity.kt` 的 `ComponentActivity` 定义指向 Gradle �
 运行和调试复用固定 ILS 的原生 DAP：通过 `start_debug_server` 建立连接，传入 `file`、`mainClass` 和 `tool`。普通 JVM 启动使用 `tool: "java"`，由宿主 `ModuleRuntime`、`JavaCommandBuildTool` 和 `JavaRunCommandsKt` 解析模块输出、依赖、JDK、工作目录、preview 与 JPMS 参数。客户端不再拼接 Gradle/Maven 构建命令，也不发送覆盖宿主解析结果的完整 classpath。Android JVM 扩展不再注册通用 JVM 启动或构建解析命令。
 
 原生 JVM DAP 在存在所属构建工具时先构建再运行，包括 `tool: "java"` 路径。默认启动不额外调用 `intellij.build`，避免重复构建；构建与运行输出均由 DAP `output` 事件传递。当前宿主启动参数没有跳过构建开关，插件明确拒绝 `build:false`，不把它伪装成真正跳过构建。独立构建接口 `intellij.build` 使用 `intellij/buildOutput` 通知关联 `buildId`，LSP 请求取消使用 `$/cancelRequest`；取消是否完成必须由实际进程退出证明，不能从参数表推断。
+
+固定版 ILS 的 `intellij.build` 对 Android 单测模块可能按 JVM 源集约定生成不存在的 `debugUnitTestClasses`，而 AGP 模型声明的任务为 `compileDebugUnitTestSources`，导致 Gradle 任务选择失败。Android Studio 使用 artifact 的 [`compileTaskName`](https://android.googlesource.com/platform/tools/adt/idea/+/mirror-goog-studio-main/project-system-gradle/src/com/android/tools/idea/gradle/project/build/invoker/GradleTaskFinderWorker.kt)；此宿主缺陷交由上游修复，插件保持原生构建路径。
 
 模型检查只使用只读的 `intellij.java.buildTool` 和 `exportWorkspace`，报告注册构建工具、导入模块、源根、SDK 和库信息；注册工具不代表构建已验证成功。模型不会执行构建，也不猜测未由协议返回的运行时 argv、classpath 或实际 Java 可执行文件。原生 `moduleName` 表示 JPMS 模块名，不能传入导入工程的模块标识；模块身份通过 `file` 消歧。Gradle 启动使用 `tool: "gradle"` 及原生顶层 `projectPath`、`sourceSet`、`toolArgs`。
 
