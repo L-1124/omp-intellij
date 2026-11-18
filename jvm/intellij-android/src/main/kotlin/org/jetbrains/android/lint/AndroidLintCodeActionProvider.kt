@@ -58,7 +58,6 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             if (matching.isEmpty()) return@diagnosticQuery AndroidRequests.DiagnosticResult(emptyList())
 
             val result = ArrayList<CodeAction>()
-            val docUri = DocumentUri(virtualFile.uri)
             val client = AndroidLintProvider.getLiveClient(virtualFile.uri.uri)
 
             val fileContentsMap = mutableMapOf<File, String>()
@@ -77,7 +76,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
                     val alternatives = unpackFixes(incident, fix)
                     for (altFix in alternatives) {
                         val codeAction =
-                            buildCodeActionForFix(incident, altFix, diag, performer, fileProvider, document, docUri)
+                            buildCodeActionForFix(incident, altFix, diag, performer, fileProvider)
                         if (codeAction != null) {
                             result.add(codeAction)
                         }
@@ -116,9 +115,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
         fix: LintFix,
         diag: Diagnostic,
         performer: InactiveLintFixPerformer,
-        fileProvider: InMemoryFileProvider,
-        currentDocument: Document,
-        currentDocUri: DocumentUri
+        fileProvider: InMemoryFileProvider
     ): CodeAction? {
         val pendingEditFiles = runCatching { performer.computeEdits(incident, fix, fileProvider) }.getOrNull()
             ?: return null
@@ -148,7 +145,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
                         .thenBy { it.range.end.line }
                         .thenBy { it.range.end.character }
                 )
-                val targetUri = DocumentUri(URI(editFile.file.toURI().toString()))
+                val targetUri = DocumentUri(URI(editFile.file.toPath().toUri().toASCIIString()))
                 changes[targetUri] = textEdits
             }
         }
@@ -264,20 +261,25 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             ?: model.projectRoot?.resolve("lint.xml")
             ?: return null
 
+        val configDir = targetLintXml.parent.toAbsolutePath().normalize()
+        val source = file.virtualFile.toNioPath().toAbsolutePath().normalize()
+        if (!source.startsWith(configDir)) return null
+        val relativeSource = configDir.relativize(source)
+
+        val existingText = when {
+            Files.isRegularFile(targetLintXml) -> Files.readString(targetLintXml)
+            Files.notExists(targetLintXml) -> null
+            else -> return null
+        }
         val tempDir = runCatching { Files.createTempDirectory("omp-lint-suppress").toFile() }.getOrNull() ?: return null
         val newXmlText = try {
             val tempXml = File(tempDir, "lint.xml")
-            val initialText = if (Files.isRegularFile(targetLintXml)) {
-                Files.readString(targetLintXml)
-            } else {
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<lint>\n</lint>\n"
-            }
-            tempXml.writeText(initialText)
+            tempXml.writeText(existingText ?: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<lint>\n</lint>\n")
             val hierarchy = ConfigurationHierarchy(client, tempDir)
             val config = LintXmlConfiguration.create(hierarchy, tempXml)
             config.startBulkEditing()
-            val ioFile = runCatching { file.virtualFile.toNioPath().toFile() }.getOrNull() ?: File(file.name)
-            config.ignore(incident.issue, ioFile)
+            // Lint resolves ignore paths relative to the configuration copy.
+            config.ignore(incident.issue, File(tempDir, relativeSource.toString()))
             config.finishBulkEditing()
             tempXml.readText()
         } catch (_: Throwable) {
@@ -286,14 +288,18 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             tempDir.deleteRecursively()
         }
 
-        val lintXmlUri = DocumentUri(URI(targetLintXml.toUri().toString()))
-        val edit = if (Files.isRegularFile(targetLintXml)) {
-            val oldText = Files.readString(targetLintXml)
-            val oldIndex = LineIndex(oldText)
-            val fullRange = oldIndex.range(0, oldText.length)
-            TextEdit(range = fullRange, newText = newXmlText)
+        val lintXmlUri = DocumentUri(URI(targetLintXml.toUri().toASCIIString()))
+        val edit = if (existingText != null) {
+            val fullRange = LineIndex(existingText).range(0, existingText.length)
+            WorkspaceEdit(changes = mapOf(lintXmlUri to listOf(TextEdit(fullRange, newXmlText))))
         } else {
-            TextEdit(range = Range(Position(0, 0), Position(0, 0)), newText = newXmlText)
+            val insert = TextEdit(Range(Position(0, 0), Position(0, 0)), newXmlText)
+            WorkspaceEdit(
+                documentChanges = listOf(
+                    CreateFile(uri = lintXmlUri),
+                    TextDocumentEdit(TextDocumentIdentifier(uri = lintXmlUri, version = null), listOf(insert))
+                )
+            )
         }
 
         return CodeAction(
@@ -301,7 +307,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
             kind = CodeActionKind.QuickFix,
             diagnostics = listOf(diagnostic),
             isPreferred = false,
-            edit = WorkspaceEdit(changes = mapOf(lintXmlUri to listOf(edit)))
+            edit = edit
         )
     }
 

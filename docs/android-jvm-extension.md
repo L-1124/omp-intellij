@@ -248,6 +248,8 @@ ILS 平台通过 Java 标准 SPI 机制发现语言服务扩展。
 
 XML 抑制属性与 `xmlns:tools` 插入位置取官方 `XmlTagUtil.getStartTagNameElement(...).textRange.endOffset`。`XmlTag.textOffset` 指向整个标签起点，直接加名称长度会把属性插入标签名内部；生成编辑后必须验证 XML 仍可解析且目标诊断消失。
 
+Lint quickfix 的目标使用可由客户端解码的标准 `file://` URI。`lint.xml` 已存在时编辑现有配置；不存在时由支持资源创建的客户端依次应用 `CreateFile` 和 `TextDocumentEdit`，创建操作不覆盖同名文件。抑制路径相对最终 `lint.xml` 的目录生成，临时配置副本不会改变抑制范围。
+
 编辑期通过官方 `ManifestMerger2` 合并当前源集与已知依赖，使用模型的 namespace、package 和已知 `minSdk`/`targetSdk` 系统属性；`setNamespace` 只负责类名解析，缺少 `package` 的现代清单还需要 `Document.PACKAGE` 注入。合并不改写源文件，并保留未保存内容与来源范围。Built 态优先使用经输入校验的 AGP 产物；模型缺失或合并失败时回退到源文件检查。
 
 显式传给 XML parser 的文本是解析输入；只有文本与源 PSI 一致时才复用 PSI-backed DOM。合并文本与源文件不同时独立解析，避免以未合并的源节点替代合并结果。

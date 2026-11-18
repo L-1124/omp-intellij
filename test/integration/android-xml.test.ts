@@ -357,6 +357,7 @@ async function startLspClient(
         synchronization: { dynamicRegistration: false },
         diagnostic: { dynamicRegistration: false },
       },
+      workspace: { workspaceEdit: { documentChanges: true, resourceOperations: ['create'] } },
       window: { workDoneProgress: true },
       experimental: { licensingUi: true },
     },
@@ -4913,6 +4914,106 @@ test('Android Lint code actions preserve request scope and apply XML suppression
         client.notify('textDocument/didClose', { textDocument: { uri } });
       }
     }
+  } finally {
+    try {
+      await client?.close();
+    } finally {
+      await sandbox.cleanup();
+    }
+  }
+});
+
+test('Android Lint code actions apply through the OMP workspace editor', async () => {
+  const sandbox = await createIntegrationSandbox(prereqs);
+  let client: InitializedLspClientDriver | undefined;
+  try {
+    const projectDir = await copyAndroidLintFixture(sandbox);
+    const moduleDir = join(projectDir, 'app');
+    const probe = join(moduleDir, 'src/main/res/values/code_action_apply.xml');
+    const lintXml = join(moduleDir, 'lint.xml');
+    const uri = pathToFileURL(probe).href;
+    const text =
+      '<resources>\n' +
+      '    <string name="loading">Loading...</string>\n' +
+      '    <string name="waiting">Waiting...</string>\n' +
+      '</resources>\n';
+    await writeFile(probe, text);
+    const active = await startLspClient(projectDir, sandbox);
+    client = active;
+    active.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'xml', version: 1, text } });
+
+    const ellipses = async () =>
+      (await pullDiagnostics(active, uri)).items?.filter((d) => d.code === 'TypographyEllipsis') ?? [];
+    const choose = async (diagnostic: LspDiagnostic, title: string): Promise<unknown> => {
+      const actions = (await active.request('textDocument/codeAction', {
+        textDocument: { uri },
+        range: diagnostic.range,
+        context: { diagnostics: [diagnostic], only: ['quickfix'] },
+      })) as Array<{ title: string; edit?: unknown }>;
+      const action = actions.find((candidate) => candidate.title.startsWith(title));
+      assert.ok(action?.edit, `Missing '${title}': ${JSON.stringify(actions)}`);
+      return action.edit;
+    };
+    const apply = (edit: unknown) => {
+      const result = spawnSync(
+        'bun',
+        [
+          '-e',
+          'import { applyWorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/edits";' +
+            'await applyWorkspaceEdit(JSON.parse(await Bun.stdin.text()), process.argv[1]);',
+          '--',
+          projectDir,
+        ],
+        { input: JSON.stringify(edit), encoding: 'utf8', timeout: 15000 },
+      );
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+    };
+
+    const before = await ellipses();
+    assert.equal(before.length, 2);
+    const first = before.find((d) => d.range.start.line === 1);
+    assert.ok(first);
+    apply(await choose(first, 'Replace with'));
+    const fixed = await readFile(probe, 'utf8');
+    assert.match(fixed, /Loading…/);
+    assert.match(fixed, /Waiting\.\.\./);
+    active.notify('textDocument/didChange', {
+      textDocument: { uri, version: 2 },
+      contentChanges: [{ text: fixed }],
+    });
+    const remaining = await ellipses();
+    assert.equal(remaining.length, 1);
+
+    assert.equal(existsSync(lintXml), false);
+    const create = await choose(remaining[0], "Suppress 'TypographyEllipsis' in lint.xml");
+    assert.equal(existsSync(lintXml), false, 'Requesting code actions must not create files');
+    const existing = '<lint>\n    <issue id="HardcodedText" severity="error"/>\n</lint>\n';
+    await writeFile(lintXml, existing);
+    assert.throws(() => apply(create), /EEXIST/);
+    assert.equal(await readFile(lintXml, 'utf8'), existing);
+    await rm(lintXml);
+    apply(create);
+    assert.match(await readFile(lintXml, 'utf8'), /<issue id="TypographyEllipsis"/);
+    active.notify('workspace/didChangeWatchedFiles', {
+      changes: [{ uri: pathToFileURL(lintXml).href, type: 1 }],
+    });
+    assert.deepEqual(await ellipses(), []);
+
+    await writeFile(lintXml, existing);
+    active.notify('workspace/didChangeWatchedFiles', {
+      changes: [{ uri: pathToFileURL(lintXml).href, type: 2 }],
+    });
+    const restored = await ellipses();
+    assert.equal(restored.length, 1);
+    apply(await choose(restored[0], "Suppress 'TypographyEllipsis' in lint.xml"));
+    const updatedConfig = await readFile(lintXml, 'utf8');
+    assert.match(updatedConfig, /<issue id="HardcodedText" severity="error"/);
+    assert.match(updatedConfig, /<issue id="TypographyEllipsis"/);
+    active.notify('workspace/didChangeWatchedFiles', {
+      changes: [{ uri: pathToFileURL(lintXml).href, type: 2 }],
+    });
+    assert.deepEqual(await ellipses(), []);
   } finally {
     try {
       await client?.close();
