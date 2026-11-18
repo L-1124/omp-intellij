@@ -338,7 +338,7 @@ async function copyAndroidFixture(sandbox: IntegrationSandbox): Promise<string> 
 async function startLspClient(
   projectDir: string,
   sandbox: IntegrationSandbox,
-  options?: { hierarchicalDocumentSymbolSupport?: boolean },
+  options?: { hierarchicalDocumentSymbolSupport?: boolean; createFiles?: boolean },
 ): Promise<InitializedLspClientDriver> {
   const rawDriver = createLspClientDriver(projectDir, sandbox);
   const driver = Object.assign(rawDriver, {
@@ -357,7 +357,12 @@ async function startLspClient(
         synchronization: { dynamicRegistration: false },
         diagnostic: { dynamicRegistration: false },
       },
-      workspace: { workspaceEdit: { documentChanges: true, resourceOperations: ['create'] } },
+      workspace: {
+        workspaceEdit: {
+          documentChanges: true,
+          resourceOperations: options?.createFiles === true ? ['create'] : [],
+        },
+      },
       window: { workDoneProgress: true },
       experimental: { licensingUi: true },
     },
@@ -4938,7 +4943,27 @@ test('Android Lint code actions apply through the OMP workspace editor', async (
       '    <string name="waiting">Waiting...</string>\n' +
       '</resources>\n';
     await writeFile(probe, text);
-    const active = await startLspClient(projectDir, sandbox);
+    const limited = await startLspClient(projectDir, sandbox);
+    try {
+      limited.notify('textDocument/didOpen', {
+        textDocument: { uri, languageId: 'xml', version: 1, text },
+      });
+      const diagnostic = (await pullDiagnostics(limited, uri)).items?.find(
+        (item) => item.code === 'TypographyEllipsis',
+      );
+      assert.ok(diagnostic);
+      const actions = (await limited.request('textDocument/codeAction', {
+        textDocument: { uri },
+        range: diagnostic.range,
+        context: { diagnostics: [diagnostic], only: ['quickfix'] },
+      })) as Array<{ title: string }>;
+      assert.ok(actions.some((action) => action.title.startsWith('Replace with')));
+      assert.ok(!actions.some((action) => action.title === "Suppress 'TypographyEllipsis' in lint.xml"));
+      limited.notify('textDocument/didClose', { textDocument: { uri } });
+    } finally {
+      await limited.close();
+    }
+    const active = await startLspClient(projectDir, sandbox, { createFiles: true });
     client = active;
     active.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'xml', version: 1, text } });
 
@@ -4987,6 +5012,15 @@ test('Android Lint code actions apply through the OMP workspace editor', async (
 
     assert.equal(existsSync(lintXml), false);
     const create = await choose(remaining[0], "Suppress 'TypographyEllipsis' in lint.xml");
+    const { documentChanges } = create as {
+      documentChanges: [
+        { kind: string; uri: string },
+        { textDocument: { uri: string; version: number | null } },
+      ];
+    };
+    assert.equal(documentChanges[0].kind, 'create');
+    assert.equal(documentChanges[1].textDocument.uri, documentChanges[0].uri);
+    assert.equal(documentChanges[1].textDocument.version, null);
     assert.equal(existsSync(lintXml), false, 'Requesting code actions must not create files');
     const existing = '<lint>\n    <issue id="HardcodedText" severity="error"/>\n</lint>\n';
     await writeFile(lintXml, existing);

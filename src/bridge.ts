@@ -180,6 +180,14 @@ export async function startBridge(): Promise<void> {
           initializationOptions,
           { systemPath: settings.systemPath },
         );
+        const workspace = caps.workspace as
+          | { workspaceEdit?: { documentChanges?: unknown; resourceOperations?: unknown } }
+          | undefined;
+        const workspaceEdit = workspace?.workspaceEdit;
+        (paramsObj.initializationOptions as Record<string, unknown>).ompAndroidCreateLintXml =
+          workspaceEdit?.documentChanges === true &&
+          Array.isArray(workspaceEdit.resourceOperations) &&
+          workspaceEdit.resourceOperations.includes('create');
         await connState.update({
           workspaceImportOptions: workspaceImportOptions(
             [projectPath, ...(p?.workspaceFolders?.map((folder) => folder.uri) ?? [])],

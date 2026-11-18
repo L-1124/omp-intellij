@@ -17,18 +17,25 @@ import com.intellij.psi.xml.XmlFile
 import com.intellij.psi.xml.XmlTag
 import com.intellij.xml.util.XmlTagUtil
 import com.jetbrains.ls.api.core.LSServer
+import com.jetbrains.ls.api.features.InitConfigurationEntry
 import com.jetbrains.ls.api.core.util.uri
 import com.jetbrains.ls.api.features.codeActions.LSCodeActionProvider
 import com.jetbrains.ls.api.features.language.LSLanguage
+import com.jetbrains.ls.snapshot.api.impl.core.InitConfigurationKey
 import com.jetbrains.lsp.implementation.LspHandlerContext
 import com.jetbrains.lsp.protocol.*
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.builtins.serializer
 import org.jetbrains.android.AndroidExtension
 import org.jetbrains.android.context.AndroidRequests
 import java.io.File
 import java.nio.file.Files
 
 class AndroidLintCodeActionProvider : LSCodeActionProvider {
+    companion object {
+        private val createLintXml = InitConfigurationKey<Boolean>("ompAndroidCreateLintXml")
+        internal val createLintXmlCapability = InitConfigurationEntry(createLintXml, Boolean.serializer())
+    }
 
     override val supportedLanguages: Set<LSLanguage> = setOf(
         AndroidExtension.JAVA,
@@ -89,7 +96,9 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
                 }
 
                 if (client != null) {
-                    val lintXmlSuppress = computeLintXmlSuppress(project, file, diag, incident, client)
+                    val lintXmlSuppress = computeLintXmlSuppress(
+                        project, file, diag, incident, client, server.config.configData[createLintXml] == true
+                    )
                     if (lintXmlSuppress != null) {
                         result.add(lintXmlSuppress)
                     }
@@ -254,7 +263,8 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
         file: PsiFile,
         diagnostic: Diagnostic,
         incident: Incident,
-        client: LintClient
+        client: LintClient,
+        canCreateLintXml: Boolean
     ): CodeAction? {
         val model = AndroidLintModelResolver.resolve(project, file.virtualFile) ?: return null
         val targetLintXml = model.moduleRoot?.resolve("lint.xml")
@@ -268,7 +278,7 @@ class AndroidLintCodeActionProvider : LSCodeActionProvider {
 
         val existingText = when {
             Files.isRegularFile(targetLintXml) -> Files.readString(targetLintXml)
-            Files.notExists(targetLintXml) -> null
+            canCreateLintXml && Files.notExists(targetLintXml) -> null
             else -> return null
         }
         val tempDir = runCatching { Files.createTempDirectory("omp-lint-suppress").toFile() }.getOrNull() ?: return null

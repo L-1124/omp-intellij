@@ -62,6 +62,7 @@ class AndroidExtension : LanguageServerExtension {
                     AndroidResourceNavigation.Entry(),
                     AndroidLintProvider(),
                     AndroidLintCodeActionProvider(),
+                    AndroidLintCodeActionProvider.createLintXmlCapability,
                     AndroidLintHoverProvider(),
                     AndroidXmlRelatedTestsProvider()
                 ),
