@@ -2762,6 +2762,85 @@ test('native Android DAP without OMP: install cancel inspects PM state and block
   }
 });
 
+test('native Android DAP: logpoints interpolate output while the target keeps running', async () => {
+  const sandbox = await createIntegrationSandbox(prerequisites);
+  let native: NativeAndroidClient | undefined;
+  let dap: NativePeer | undefined;
+  const forwardBefore = getAdbForwardList(deviceId);
+  try {
+    const { targetDir, apkPath, mainActivityPath } = await copyAndroidAttachFixture(sandbox);
+    await ensureApkBuilt(targetDir, sandbox, apkPath);
+    stopFixture(deviceId);
+    native = await startNativeClient(targetDir, sandbox);
+    const launched = await launchNativeAndroidDap(native, {
+      clientID: 'android-logpoint-output',
+      android: { deviceId, target: { kind: 'apks', files: [apkPath] } },
+    });
+    dap = launched.dap;
+    assert.equal(
+      launched.initResponse.body?.supportsLogPoints,
+      true,
+      'Android debug sessions must advertise the implemented logpoint behavior',
+    );
+    const cursor = dap.messages.length;
+    const set = await dap.request('setBreakpoints', {
+      source: { path: mainActivityPath },
+      breakpoints: [{
+        line: findSourceLine(mainActivityPath, 'counter = after;'),
+        logMessage: 'OMP_LOGPOINT before={before}, after={after}',
+      }],
+    });
+    assert.equal(set.success, true, JSON.stringify(set));
+    assert.equal((set.body?.breakpoints as BreakpointEntry[] | undefined)?.[0]?.verified, true);
+
+    const first = await dap.waitFor(
+      (message) =>
+        message.event === 'output' &&
+        String(message.body?.output ?? '').includes('OMP_LOGPOINT before='),
+      cursor,
+      15000,
+    );
+    const second = await dap.waitFor(
+      (message) =>
+        message.event === 'output' &&
+        String(message.body?.output ?? '').includes('OMP_LOGPOINT before='),
+      dap.messages.indexOf(first) + 1,
+      15000,
+    );
+    const firstValues = String(first.body?.output).match(/OMP_LOGPOINT before=(\d+), after=(\d+)/);
+    const secondValues = String(second.body?.output).match(/OMP_LOGPOINT before=(\d+), after=(\d+)/);
+    assert.ok(firstValues, `Logpoint expressions must be evaluated: ${JSON.stringify(first)}`);
+    assert.ok(secondValues, `Logpoint expressions must be evaluated: ${JSON.stringify(second)}`);
+    assert.equal(Number(firstValues[2]), Number(firstValues[1]) + 1);
+    assert.equal(Number(secondValues[2]), Number(secondValues[1]) + 1);
+    assert.ok(
+      Number(secondValues[1]) > Number(firstValues[1]),
+      'Successive logpoints must observe the target making progress without continue requests',
+    );
+    assert.equal(
+      dap.messages.slice(cursor).some((message) => message.event === 'stopped'),
+      false,
+      'Logpoints must emit output without reporting a debugger stop',
+    );
+    const cleared = await dap.request('setBreakpoints', {
+      source: { path: mainActivityPath },
+      breakpoints: [],
+    });
+    assert.equal(cleared.success, true, JSON.stringify(cleared));
+    const disconnected = await dap.request('disconnect', { terminateDebuggee: true });
+    assert.equal(disconnected.success, true, JSON.stringify(disconnected));
+    await waitForProcessGone(deviceId, TEST_PACKAGE);
+    assert.equal(getAdbForwardList(deviceId), forwardBefore);
+  } finally {
+    try {
+      if (dap) await closeNativePeerAndWait(dap);
+      await native?.close();
+    } finally {
+      stopFixture(deviceId);
+      await sandbox.cleanup();
+    }
+  }
+});
 
 test.describe('OMP host built-in intellij: Android owned launch, external attach, and startup cancellation', {
   timeout: Infinity,

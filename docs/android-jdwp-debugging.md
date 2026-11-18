@@ -115,6 +115,8 @@ Commit 已发送但成功确认丢失时，错误保留 `outcomeUnknown=true` �
 
 客户端在 launch/attach 尚未完成时，收到 `initialized` 后配置断点并发送 `configurationDone`；先等待启动请求最终响应再发送配置完成，会阻塞原生调试器握手。
 
+Logpoint 复用原生 JVM 调试器，遵循 DAP [`SourceBreakpoint.logMessage`](https://microsoft.github.io/debug-adapter-protocol/specification#Types_SourceBreakpoint)：命中时计算 `{expression}` 并发送 `output`，不暂停应用。`verified=true` 只确认断点可安装，不能证明安装后已执行该行；附加到已运行的应用后，`onResume` 等生命周期代码需要新的事件才能再次命中。验证时选择会重复执行的位置，检查实际插值输出持续变化且没有 `stopped` 事件，不能仅凭短暂的 `running` 状态或空输出判定失败。
+
 运行错误文本为 `[code] stage: detail`。JVM 构造标准 `Message(id=3001)`，包含有界 code/stage/context，关闭 telemetry。ILS 271.2085.0 官方 transport 将异常转换为仅含 message 的失败响应，wire 不保留 `body.error`；客户端应以 `success=false` 与 message 判错。
 
 ## OMP 接入与排障
