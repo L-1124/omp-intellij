@@ -1,0 +1,141 @@
+{
+  "name": "omp-intellij",
+  "owner": {
+    "name": "L-1124"
+  },
+  "metadata": {
+    "description": "IntelliJ LSP/DAP forwarding and adaptation for OMP"
+  },
+  "plugins": [
+    {
+      "name": "omp-intellij",
+      "description": "IntelliJ LSP and JVM DAP forwarding and adaptation for OMP",
+      "source": "./",
+      "author": { "name": "L-1124" },
+      "homepage": "https://github.com/L-1124/omp-intellij#readme",
+      "repository": "https://github.com/L-1124/omp-intellij",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["omp", "intellij", "lsp", "dap", "jvm", "java", "kotlin", "android"],
+      "lspServers": {
+        "intellij-server": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/bridge.js"],
+          "fileTypes": [
+            ".java",
+            ".kt",
+            ".kts",
+            ".xml",
+            ".properties",
+            ".yaml",
+            ".yml",
+            ".bazelproject"
+          ],
+          "rootMarkers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            ".bazelproject",
+            ".idea",
+            "*.iml"
+          ],
+          "warmupTimeoutMs": 30000,
+          "initOptions": {
+            "runMainCodeLens": true,
+            "intellijExtensions": true,
+            "lazyIntentions": true
+          },
+          "settings": {
+            "jetbrains.java": {
+              "hints.collapse complex types": true,
+              "hints.settings.method parameter": true,
+              "hints.types.local variable": true,
+              "settings.types.lambda parameter": true,
+              "hints.types.call chain": true
+            },
+            "jetbrains.kotlin": {
+              "hints.settings.types.property": true,
+              "hints.settings.types.variable": true,
+              "hints.type.function.return": true,
+              "hints.type.function.parameter": true,
+              "hints.settings.lambda.return": true,
+              "hints.lambda.receivers.parameters": true,
+              "hints.settings.value.ranges": true,
+              "hints.value.kotlin.time": true,
+              "hints.parameters": true,
+              "hints.parameters.compiled": true
+            }
+          }
+        }
+      },
+      "dapAdapters": {
+        "intellij": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "fileTypes": [".java", ".kt", ".kts"],
+          "rootMarkers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            ".bazelproject",
+            ".idea"
+          ],
+          "connectMode": "stdio",
+          "attachDefaults": {
+            "hostName": "127.0.0.1",
+            "timeout": 30000
+          }
+        },
+        "intellij-gradle": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "connectMode": "stdio",
+          "launchDefaults": {
+            "buildTool": "gradle",
+            "console": "internalConsole",
+            "stopOnEntry": true
+          }
+        },
+        "intellij-test": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "connectMode": "stdio",
+          "launchDefaults": {
+            "testMode": true,
+            "console": "internalConsole",
+            "build": true,
+            "stopOnEntry": true
+          },
+          "rootMarkers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            ".bazelproject",
+            ".idea"
+          ]
+        }
+      }
+    }
+  ]
+}

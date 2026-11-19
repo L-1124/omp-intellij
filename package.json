@@ -1,0 +1,66 @@
+{
+  "name": "omp-intellij",
+  "version": "2026.1107.0",
+  "description": "IntelliJ LSP and JVM DAP forwarding and adaptation for OMP",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "scripts/clean-runtime.mjs",
+    "settings.json",
+    ".omp-plugin/marketplace.json",
+    "docs/"
+  ],
+  "bin": {
+    "omp-intellij-lsp": "./dist/bridge.js",
+    "omp-intellij-dap": "./dist/debug/dap-proxy.js"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
+    "prepack": "npm run build",
+    "clean:runtime": "node scripts/clean-runtime.mjs",
+    "test": "node -e \"require('node:fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-concurrency=1 --test-timeout=30000 \"dist-test/test/*.test.js\" \"test/*.test.mjs\"",
+    "update-bundle": "npm run build && node scripts/update-server-bundle.mjs",
+    "test:smoke": "node scripts/test-integration.mjs smoke",
+    "test:integration": "node scripts/test-integration.mjs",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "check": "biome check .",
+    "check:fix": "biome check --write ."
+  },
+  "keywords": [
+    "omp",
+    "intellij",
+    "lsp",
+    "dap",
+    "jvm",
+    "kotlin",
+    "java"
+  ],
+  "author": "L-1124",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/L-1124/omp-intellij.git"
+  },
+  "homepage": "https://github.com/L-1124/omp-intellij#readme",
+  "bugs": {
+    "url": "https://github.com/L-1124/omp-intellij/issues"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@oh-my-pi/omptype": "18.18.7",
+    "@oh-my-pi/pi-coding-agent": "18.18.7",
+    "@types/node": "^24.12.0",
+    "typescript": "^7.0.2"
+  },
+  "omp": {
+    "extensions": [
+      "./src/plugin.ts"
+    ]
+  }
+}

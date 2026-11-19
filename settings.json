@@ -1,0 +1,12 @@
+{
+  "host": "127.0.0.1",
+  "startupTimeoutMs": 30000,
+  "initializeTimeoutMs": 30000,
+  "requestWaitTimeoutMs": 300000,
+  "idleTimeout": "30m",
+  "cachePolicy": {
+    "retentionDays": 30,
+    "warnAboveGiB": 5,
+    "automaticDeletion": false
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-test/
+.runtime/
+test-fixtures/**/target/
+test-fixtures/**/build/
+test-fixtures/**/.gradle/
+*.tmp
+.DS_Store
+.lsp.json
+.dap.json
+references/
