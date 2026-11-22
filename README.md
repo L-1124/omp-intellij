@@ -81,14 +81,15 @@ omp plugin install --force omp-intellij@omp-intellij
 
 日常代码分析与重构直接使用 OMP 的原生 `lsp` 工具。语言能力由外部服务端及其已安装扩展提供；本包只负责协议转发与客户端能力适配，不构建、捆绑或自动加载服务端扩展。
 
-除了直接使用 `lsp` 工具外，插件还提供专有的 `intellij` 工具接口：
+除了直接使用 `lsp` 工具外，插件还提供专有的 `intellij` 工具。启用 `bash` 时，在 OMP 的 `bash` 工具中调用以下命令；这些命令由 OMP 会话提供，无需安装独立 CLI。首次使用先查看帮助：
 
-```json
-{ "action": "wait", "project": ".", "timeout": 120 }
+```sh
+intellij --help
+intellij --action wait --project . --timeout 120
+intellij --action model --file src/main/java/com/example/App.java
 ```
-```json
-{ "action": "model", "file": "src/main/java/com/example/App.java" }
-```
+
+未启用 `bash` 时，使用同名普通工具及对应参数。
 
 - `wait`：阻塞等待后台服务端索引完成。
 - `model`：只读查询源文件所属模块、源根、SDK 与注册构建工具；不会构建或推测运行时 Classpath、启动命令。
@@ -108,38 +109,23 @@ omp plugin install --force omp-intellij@omp-intellij
 | `intellij-test`   | 运行测试；可通过 `args` 指定测试类或 `ClassName#methodName` |
 | `intellij-gradle` | 走服务端的 Gradle 任务链路启动调试                          |
 
-启动配置示例（写入 `xd://debug`）：
+启动配置示例（在 OMP 的 `bash` 工具中执行）：
 
-```json
-{
-  "action": "launch",
-  "adapter": "intellij",
-  "program": "src/main/java/com/example/App.java",
-  "timeout": 180
-}
+```sh
+debug --help
+debug --action launch --adapter intellij --program src/main/java/com/example/App.java --timeout 180
 ```
 
 运行指定测试方法：
 
-```json
-{
-  "action": "launch",
-  "adapter": "intellij-test",
-  "program": "src/test/java/com/example/JavaGreeterTest.java",
-  "args": ["com.example.JavaGreeterTest#testJavaGreeting"],
-  "timeout": 180
-}
+```sh
+debug --action launch --adapter intellij-test --program src/test/java/com/example/JavaGreeterTest.java --args com.example.JavaGreeterTest#testJavaGreeting --timeout 180
 ```
 
 使用 Gradle 启动主类：
 
-```json
-{
-  "action": "launch",
-  "adapter": "intellij-gradle",
-  "program": "src/main/java/com/example/App.java",
-  "timeout": 180
-}
+```sh
+debug --action launch --adapter intellij-gradle --program src/main/java/com/example/App.java --timeout 180
 ```
 
 `program` 是源码文件路径；相对路径以 `cwd` 为基准，省略 `cwd` 时使用 OMP 当前工作目录。普通启动的 `args` 是应用参数，测试预设的 `args` 是测试筛选标识，Gradle 预设的 `args` 仍是应用参数。全部预设默认在入口暂停，使用 `continue` 继续；切换调试目标前先结束当前会话。完整参数边界见 [OMP DAP 契约](docs/dap-proxy-and-workspace.md#1-调试适配器与启动配置)。
