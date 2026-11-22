@@ -8,15 +8,6 @@
 
 ---
 
-## 环境要求
-
-- **OMP**：支持插件扩展、LSP 与 DAP 接口。
-- **Node.js**：`>= 22`，用于驱动 LSP 桥接进程与 DAP 调试代理。
-- **JDK 与构建工具**：目标工程所需的 JDK（如 JDK 17、JDK 21）与构建工具（Gradle / Maven）；Language Server 自身运行在自带的 JBR 运行时中。
-- **授权**：使用服务端所需的 JetBrains 账号授权与 EULA 许可。
-
----
-
 ## 安装
 
 ### 从市场安装
