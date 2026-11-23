@@ -49,7 +49,9 @@
           "initOptions": {
             "runMainCodeLens": true,
             "intellijExtensions": true,
-            "lazyIntentions": true
+            "lazyIntentions": true,
+            "importInspectionProfile": false,
+            "disableRocksDBWriteAheadLog": false
           },
           "settings": {
             "jetbrains.java": {
@@ -69,7 +71,9 @@
               "hints.settings.value.ranges": true,
               "hints.value.kotlin.time": true,
               "hints.parameters": true,
-              "hints.parameters.compiled": true
+              "hints.parameters.compiled": true,
+              "hints.parameters.excluded": false,
+              "hints.call.chains": false
             }
           }
         }

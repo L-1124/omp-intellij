@@ -96,6 +96,8 @@ ILS 的 `LSExtractModCommandProviderBase` 在将 `ModCommand` 转换为 LSP `Cod
 }
 ```
 
+插件清单还对齐 VSIX 的默认值：`importInspectionProfile` 和 `disableRocksDBWriteAheadLog` 均为 `false`；Kotlin 的 `hints.parameters.excluded` 与 `hints.call.chains` 默认关闭。
+
 ### 2.4 工作区编辑能力
 
 Bridge 原样转发客户端的 `workspace.workspaceEdit` 能力与服务端的标准 `WorkspaceEdit`，不增加逐功能私有开关，也不承担文件编辑或语义完整性判断。
