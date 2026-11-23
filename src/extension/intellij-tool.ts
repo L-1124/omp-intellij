@@ -1,4 +1,9 @@
 import { join, resolve } from 'node:path';
+import type {
+  AgentToolResult,
+  AgentToolUpdateCallback,
+  ExtensionAPI,
+} from '@oh-my-pi/pi-coding-agent';
 import { type ProjectStateResult, readProjectState } from '../project/connection-state.js';
 import { findProjectRoot } from '../project/readiness.js';
 import {
@@ -16,12 +21,6 @@ import {
   type ReimportWorkspaceResult,
 } from '../project/workspace-reimport.js';
 import { settings } from '../server/service.js';
-import type {
-  ExtensionContext,
-  ExtensionPluginInstance,
-  ToolResult,
-  ToolUpdate,
-} from '../shared/extension-types.js';
 import {
   type FailureDetail,
   LICENSE_RECOVERY_GUIDANCE,
@@ -117,6 +116,23 @@ async function getWorkspaceContextSafe(
     return {
       error: sanitizeString(err instanceof Error ? err.message : String(err)),
     };
+  }
+}
+
+function checkCancellation(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const err = new Error('IntelliJ index check aborted', { cause: signal.reason });
+    err.name = 'AbortError';
+    throw err;
+  }
+}
+
+async function awaitUnaborted<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  try {
+    return await operation;
+  } catch (err) {
+    checkCancellation(signal);
+    throw err;
   }
 }
 
@@ -219,6 +235,12 @@ export interface IntellijDetails extends ProjectStateResult {
   model?: WorkspaceModelReport;
 }
 
+type IntellijResult = Omit<AgentToolResult<IntellijDetails>, 'content'> & {
+  content: Extract<AgentToolResult['content'][number], { type: 'text' }>[];
+  details: IntellijDetails;
+  isError: boolean;
+};
+
 export interface ExecuteIntellijOptions {
   readProjectState?: (systemPath: string, projectRoot: string) => Promise<ProjectStateResult>;
   reimportWorkspace?: (
@@ -245,10 +267,12 @@ export interface ExecuteIntellijOptions {
 export async function executeIntellij(
   params: IntellijParams,
   signal: AbortSignal | undefined,
-  onUpdate: ((update: ToolUpdate<IntellijDetails>) => void) | undefined,
-  ctx: ExtensionContext,
+  onUpdate: AgentToolUpdateCallback<IntellijDetails> | undefined,
+  ctx: { cwd: string },
   options: ExecuteIntellijOptions = {},
-): Promise<ToolResult<IntellijDetails>> {
+): Promise<IntellijResult> {
+  const action = params.action || 'status';
+  if (action === 'status' || action === 'wait') checkCancellation(signal);
   const readState = options.readProjectState || readProjectState;
   const reimport = options.reimportWorkspace || defaultReimportWorkspace;
   const getWorkspaceInfoFn = options.getWorkspaceInfo || defaultGetWorkspaceInfo;
@@ -259,7 +283,6 @@ export async function executeIntellij(
   const now = options.now || Date.now;
 
   const projectRoot = params.project ? resolve(ctx.cwd, params.project) : findProjectRoot(ctx.cwd);
-  const action = params.action || 'status';
 
   if (action === 'doctor') {
     signal?.throwIfAborted();
@@ -345,15 +368,15 @@ export async function executeIntellij(
   }
 
   if (action === 'status') {
-    const rawSnapshot = await readState(systemPath, projectRoot);
+    const rawSnapshot = await awaitUnaborted(readState(systemPath, projectRoot), signal);
+    checkCancellation(signal);
     const snapshot = sanitizeStatus(rawSnapshot) as ProjectStateResult;
     const authDenied = isAuthDenied(snapshot.license);
-    const workspaceContext = await getWorkspaceContextSafe(
-      getWorkspaceInfoFn,
-      projectRoot,
-      systemPath,
-      configDir,
+    const workspaceContext = await awaitUnaborted(
+      getWorkspaceContextSafe(getWorkspaceInfoFn, projectRoot, systemPath, configDir),
+      signal,
     );
+    checkCancellation(signal);
 
     if (snapshot.phase === 'not-started') {
       const textLines = [
@@ -381,13 +404,17 @@ export async function executeIntellij(
 
     const lines = [`IntelliJ index phase: ${snapshot.phase}`, `Project: ${projectRoot}`];
     if (snapshot.detail) lines.push(`Detail: ${sanitizeString(snapshot.detail)}`);
-    if (snapshot.progress?.percentage !== undefined && snapshot.progress.percentage >= 0) {
-      lines.push(`Progress: ${Math.round(snapshot.progress.percentage)}%`);
+    const percentage = snapshot.progress?.percentage;
+    if (typeof percentage === 'number' && percentage >= 0) {
+      lines.push(`Progress: ${Math.round(percentage)}%`);
+    }
+    if (snapshot.progress?.title) {
+      lines.push(`Progress title: ${sanitizeString(snapshot.progress.title)}`);
     }
     if (snapshot.progress?.message) {
       lines.push(`Progress message: ${sanitizeString(snapshot.progress.message)}`);
     }
-    if (snapshot.live === false) lines.push('Connection: none (last session ended)');
+    if (snapshot.live === false) lines.push('Connection: none (last bridge connection closed)');
     if (snapshot.connectionId) lines.push(`Connection ID: ${snapshot.connectionId}`);
     lines.push(...formatWorkspaceLines(workspaceContext));
     lines.push(...formatLicenseLines(snapshot.license));
@@ -405,7 +432,9 @@ export async function executeIntellij(
   }
 
   if (action === 'wait') {
-    const rawCurrent = await readState(systemPath, projectRoot);
+    const safeProject = sanitizeString(projectRoot);
+    const rawCurrent = await awaitUnaborted(readState(systemPath, projectRoot), signal);
+    checkCancellation(signal);
     let current = sanitizeStatus(rawCurrent) as ProjectStateResult;
     if (isAuthDenied(current.license)) {
       const authLines = [
@@ -426,10 +455,10 @@ export async function executeIntellij(
         content: [
           {
             type: 'text',
-            text: `IntelliJ index status: not-started for project ${projectRoot}.\nNo active IntelliJ connection found. Cannot wait without an active bridge. Use /intellij start to start the service, then run an LSP query to connect.`,
+            text: `IntelliJ index status: not-started for project ${safeProject}.\nNo active IntelliJ connection found. Cannot wait without an active bridge. Use /intellij start to start the service, then run an LSP query to connect.`,
           },
         ],
-        details: { project: projectRoot, ...current },
+        details: { project: safeProject, ...current },
         isError: false,
       };
     }
@@ -439,7 +468,7 @@ export async function executeIntellij(
         content: [
           {
             type: 'text',
-            text: `IntelliJ index is ready for project ${projectRoot}.`,
+            text: `IntelliJ index is ready for project ${safeProject}.`,
           },
         ],
         details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijDetails,
@@ -469,7 +498,7 @@ export async function executeIntellij(
         content: [
           {
             type: 'text',
-            text: `No active IntelliJ connection for ${projectRoot}; the last session ended in phase ${current.phase}. Cannot wait without a live bridge. Run an LSP query to reconnect; if the service is stopped, use /intellij start first.`,
+            text: `No active IntelliJ connection for ${safeProject}; the last bridge connection closed in phase ${current.phase}. Cannot wait without a live bridge. Run an LSP query to reconnect; if the service is stopped, use /intellij start first.`,
           },
         ],
         details: sanitizeStatus({
@@ -487,39 +516,49 @@ export async function executeIntellij(
     let lastUpdateKey = '';
 
     while (now() < deadline) {
-      if (signal?.aborted) {
-        const err = new Error('IntelliJ index wait aborted');
-        err.name = 'AbortError';
-        throw err;
-      }
-
-      // Avoid per-poll onUpdate spam: only emit when state changes
-      const updateKey = `${current.phase}:${current.detail || ''}:${current.progress?.percentage ?? ''}`;
-      if (updateKey !== lastUpdateKey) {
-        lastUpdateKey = updateKey;
-        onUpdate?.({
-          content: [
-            {
-              type: 'text',
-              text: `Waiting for IntelliJ index: ${current.phase}${current.detail ? ` (${current.detail})` : ''}`,
+      checkCancellation(signal);
+      if (onUpdate) {
+        const { phase, detail } = current;
+        const title = current.progress?.title || undefined;
+        const message = current.progress?.message || undefined;
+        const rawPercentage = current.progress?.percentage;
+        const percentage =
+          typeof rawPercentage === 'number' && rawPercentage >= 0 ? rawPercentage : undefined;
+        const updateKey = JSON.stringify([phase, detail, title, message, percentage]);
+        if (updateKey !== lastUpdateKey) {
+          lastUpdateKey = updateKey;
+          const lines = [`Waiting for IntelliJ index: ${phase}${detail ? ` (${detail})` : ''}`];
+          if (title) lines.push(`Progress title: ${title}`);
+          if (message) lines.push(`Progress message: ${message}`);
+          if (percentage !== undefined) lines.push(`Progress: ${percentage}%`);
+          onUpdate({
+            content: [{ type: 'text', text: lines.join('\n') }],
+            details: {
+              phase,
+              detail,
+              project: safeProject,
+              ...(title || message || percentage !== undefined
+                ? {
+                    progress: {
+                      ...(title ? { title } : {}),
+                      ...(message ? { message } : {}),
+                      ...(percentage !== undefined ? { percentage } : {}),
+                    },
+                  }
+                : {}),
             },
-          ],
-          details: { phase: current.phase, detail: current.detail, project: projectRoot },
-        });
+          });
+        }
       }
 
       const remainingMs = deadline - now();
       if (remainingMs <= 0) break;
 
-      await sleep(Math.min(pollIntervalMs, remainingMs), signal);
-
-      if (signal?.aborted) {
-        const err = new Error('IntelliJ index wait aborted');
-        err.name = 'AbortError';
-        throw err;
-      }
-
-      const loopRawCurrent = await readState(systemPath, projectRoot);
+      checkCancellation(signal);
+      await awaitUnaborted(sleep(Math.min(pollIntervalMs, remainingMs), signal), signal);
+      checkCancellation(signal);
+      const loopRawCurrent = await awaitUnaborted(readState(systemPath, projectRoot), signal);
+      checkCancellation(signal);
       current = sanitizeStatus(loopRawCurrent) as ProjectStateResult;
 
       if (isAuthDenied(current.license)) {
@@ -541,7 +580,7 @@ export async function executeIntellij(
           content: [
             {
               type: 'text',
-              text: `IntelliJ index is ready for project ${projectRoot}.`,
+              text: `IntelliJ index is ready for project ${safeProject}.`,
             },
           ],
           details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijDetails,
@@ -572,7 +611,7 @@ export async function executeIntellij(
           content: [
             {
               type: 'text',
-              text: `No active IntelliJ connection for project ${projectRoot}; current phase: ${current.phase}. Run an LSP query to reconnect.`,
+              text: `No active IntelliJ connection for project ${safeProject}; current phase: ${current.phase}. Run an LSP query to reconnect.`,
             },
           ],
           details: sanitizeStatus({ project: projectRoot, ...current }) as IntellijDetails,
@@ -581,6 +620,7 @@ export async function executeIntellij(
       }
     }
 
+    checkCancellation(signal);
     // Timeout reached without failure: return still-indexing status
     const timeoutLines = [
       `IntelliJ index wait timed out after ${timeoutSec}s for project ${projectRoot}; project is still ${current.phase}${current.detail ? `: ${current.detail}` : ''}.`,
@@ -835,48 +875,43 @@ export async function executeIntellij(
 }
 
 export function registerIntellij(
-  pi: ExtensionPluginInstance,
+  pi: Pick<ExtensionAPI, 'zod' | 'registerTool'>,
   options: ExecuteIntellijOptions = {},
 ): void {
   const z = pi.zod;
-  pi.registerTool({
+  const parameters = z.object({
+    action: z
+      .enum(['status', 'wait', 'reload', 'doctor', 'model'])
+      .default('status')
+      .describe(
+        'Inspect setup, index readiness, reload the project, or query the source-file model',
+      ),
+    project: z
+      .string()
+      .optional()
+      .describe('Project root directory; defaults to current directory or detected project root'),
+    file: z
+      .string()
+      .optional()
+      .describe(
+        'Required for model: JVM source path relative to current directory; project can specify the reactor root',
+      ),
+    timeout: z
+      .number()
+      .int()
+      .min(1)
+      .max(300)
+      .default(60)
+      .describe('Timeout in seconds for wait, reload, or model (1-300, default 60)'),
+  });
+  pi.registerTool<typeof parameters, IntellijDetails>({
     name: 'intellij',
     approval: 'exec',
     label: 'IntelliJ',
     description:
-      'Inspect IntelliJ setup, index readiness, or the compile and launch model for a source file. Doctor, status and wait do not start the service; model connects without building or running; reload triggers project reimport.',
-    parameters: z.object({
-      action: z
-        .enum(['status', 'wait', 'reload', 'doctor', 'model'])
-        .default('status')
-        .describe(
-          'Inspect setup, index readiness, reload the project, or query the source-file model',
-        ),
-      project: z
-        .string()
-        .optional()
-        .describe('Project root directory; defaults to current directory or detected project root'),
-      file: z
-        .string()
-        .optional()
-        .describe(
-          'Required for model: JVM source path relative to current directory; project can specify the reactor root',
-        ),
-      timeout: z
-        .number()
-        .int()
-        .min(1)
-        .max(300)
-        .default(60)
-        .describe('Timeout in seconds for wait, reload, or model (1-300, default 60)'),
-    }),
-    execute(
-      _id: string,
-      params: IntellijParams,
-      signal: AbortSignal | undefined,
-      onUpdate: ((update: ToolUpdate<IntellijDetails>) => void) | undefined,
-      ctx: ExtensionContext,
-    ) {
+      'Inspect IntelliJ setup or index readiness. Doctor, status and wait do not start the service; model connects to inspect a source file without building or running; reload reimports the project.',
+    parameters,
+    execute(_id, params, signal, onUpdate, ctx) {
       return executeIntellij(params, signal, onUpdate, ctx, options);
     },
   });

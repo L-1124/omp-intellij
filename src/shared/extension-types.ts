@@ -1,21 +1,16 @@
-import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionUIContext,
+  ExtensionContext as SDKContext,
+  SessionShutdownEvent,
+  SessionStartEvent,
+  SessionSwitchEvent,
+} from '@oh-my-pi/pi-coding-agent';
 
-export interface SelectItem {
-  label: string;
-  value: string;
-  description?: string;
-}
+export type ExtensionUI = Pick<ExtensionUIContext, 'notify'> &
+  Partial<Pick<ExtensionUIContext, 'confirm' | 'select' | 'setStatus'>>;
 
-export interface ExtensionUI {
-  setStatus?(key: string, text: string): void;
-  notify(message: string, level?: 'info' | 'warning' | 'error'): void;
-  confirm?(title: string, message: string): Promise<boolean>;
-  select?(prompt: string, items: SelectItem[]): Promise<SelectItem | string | undefined | null>;
-  theme?: unknown;
-}
-
-export interface ExtensionContext {
-  cwd: string;
+export interface ExtensionContext extends Pick<SDKContext, 'cwd'> {
   agent?: {
     kind?: string;
   };
@@ -60,11 +55,23 @@ export interface ToolDefinition<TParams = unknown, TDetails = Record<string, unk
 
 export type ZodLike = ExtensionAPI['zod'];
 
+export interface ExtensionSessionEvents {
+  session_start: SessionStartEvent;
+  session_switch: SessionSwitchEvent;
+  session_shutdown: SessionShutdownEvent;
+}
+
+export type ExtensionSessionHandler<K extends keyof ExtensionSessionEvents> = (
+  event: ExtensionSessionEvents[K],
+  ctx: ExtensionContext,
+) => void | Promise<void>;
+
 export interface ExtensionPluginInstance {
   setLabel?(label: string): void;
   registerTool: ExtensionAPI['registerTool'];
   registerCommand(name: string, command: CommandDefinition): void;
-  on?(event: 'session_start', handler: (event: unknown, ctx: ExtensionContext) => void): void;
-  on?(event: 'session_shutdown', handler: () => void): void;
+  on?(event: 'session_start', handler: ExtensionSessionHandler<'session_start'>): void;
+  on?(event: 'session_switch', handler: ExtensionSessionHandler<'session_switch'>): void;
+  on?(event: 'session_shutdown', handler: ExtensionSessionHandler<'session_shutdown'>): void;
   zod: ZodLike;
 }

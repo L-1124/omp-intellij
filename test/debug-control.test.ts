@@ -526,7 +526,7 @@ test('extension /intellij debug status and recover commands without UI selector'
   let selectCalled = false;
   ctx.ui.select = async () => {
     selectCalled = true;
-    return null;
+    return undefined;
   };
 
   try {

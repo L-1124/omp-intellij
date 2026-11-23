@@ -3,7 +3,9 @@ import type {
   CommandDefinition,
   ExtensionContext,
   ExtensionPluginInstance,
-  SelectItem,
+  ExtensionSessionEvents,
+  ExtensionSessionHandler,
+  ExtensionUI,
   ToolDefinition,
 } from '../src/shared/extension-types.js';
 
@@ -14,15 +16,11 @@ export interface MockNotification {
 
 export interface MockStatusCall {
   key: string;
-  value: string;
+  value: string | undefined;
 }
 
-export interface MockUI {
-  setStatus(key: string, value: string): void;
-  notify(msg: string, level?: string): void;
-  confirm?(title: string, message: string): Promise<boolean>;
-  select?(prompt: string, items: SelectItem[]): Promise<SelectItem | string | undefined | null>;
-  theme?: unknown;
+export interface MockUI extends ExtensionUI {
+  setStatus: NonNullable<ExtensionUI['setStatus']>;
 }
 
 export interface MockContext extends ExtensionContext {
@@ -39,13 +37,21 @@ export interface MockPi extends ExtensionPluginInstance {
   registerCommand(name: string, def: CommandDefinition): void;
   getCommand(name: string): CommandDefinition | undefined;
   getTool(name: string): ToolDefinition | undefined;
-  on(event: string, handler: (...args: never[]) => void): void;
-  emit(event: string, ...args: unknown[]): void;
+  on: NonNullable<ExtensionPluginInstance['on']>;
+  emit<K extends keyof ExtensionSessionEvents>(
+    event: K,
+    payload: ExtensionSessionEvents[K],
+    ctx: ExtensionContext,
+  ): Promise<void>;
 }
 
 export function createMockPi(): MockPi {
   const commands = new Map<string, CommandDefinition>();
-  const listeners = new Map<string, Array<(...args: never[]) => void>>();
+  const listeners: { [K in keyof ExtensionSessionEvents]: ExtensionSessionHandler<K>[] } = {
+    session_start: [],
+    session_switch: [],
+    session_shutdown: [],
+  };
   const tools = new Map<string, ToolDefinition>();
   let label = '';
 
@@ -68,15 +74,16 @@ export function createMockPi(): MockPi {
     getTool(name: string) {
       return tools.get(name);
     },
-    on(event: string, handler: (...args: never[]) => void) {
-      const list = listeners.get(event) ?? [];
-      list.push(handler);
-      listeners.set(event, list);
+    on<K extends keyof ExtensionSessionEvents>(event: K, handler: ExtensionSessionHandler<K>) {
+      listeners[event].push(handler);
     },
-    emit(event: string, ...args: unknown[]) {
-      const handlers = listeners.get(event) || [];
-      for (const h of handlers) {
-        Reflect.apply(h, undefined, args);
+    async emit<K extends keyof ExtensionSessionEvents>(
+      event: K,
+      payload: ExtensionSessionEvents[K],
+      ctx: ExtensionContext,
+    ) {
+      for (const handler of listeners[event]) {
+        await handler(payload, ctx);
       }
     },
     zod,
@@ -85,9 +92,8 @@ export function createMockPi(): MockPi {
 
 export interface CreateMockCtxOptions {
   agent?: { kind: string; [key: string]: unknown };
-  theme?: unknown;
-  select?: (prompt: string, items: SelectItem[]) => Promise<SelectItem | string | undefined | null>;
-  confirm?: (title: string, message: string) => Promise<boolean>;
+  select?: ExtensionUI['select'];
+  confirm?: ExtensionUI['confirm'];
 }
 
 export function createMockCtx(cwd: string, options: CreateMockCtxOptions = {}): MockContext {
@@ -95,13 +101,12 @@ export function createMockCtx(cwd: string, options: CreateMockCtxOptions = {}): 
   const notifications: MockNotification[] = [];
 
   const ui: MockUI = {
-    setStatus(key: string, value: string) {
+    setStatus(key, value) {
       statusCalls.push({ key, value });
     },
-    notify(msg: string, level: string = 'info') {
+    notify(msg, level = 'info') {
       notifications.push({ msg, level });
     },
-    theme: options.theme,
   };
 
   if (options.select) {

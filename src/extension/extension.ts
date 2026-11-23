@@ -55,7 +55,11 @@ import {
   withLifecycleLock,
 } from '../server/service.js';
 import { selectServerVersion as defaultSelectServerVersion } from '../server/versions.js';
-import type { ExtensionContext, ExtensionPluginInstance } from '../shared/extension-types.js';
+import type {
+  ExtensionContext,
+  ExtensionPluginInstance,
+  ExtensionSessionEvents,
+} from '../shared/extension-types.js';
 import {
   type FailureDetail,
   LICENSE_RECOVERY_GUIDANCE,
@@ -284,7 +288,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     statusVisible = false;
     statusText = '';
     try {
-      ctx.ui.setStatus(STATUS_KEY, '');
+      ctx.ui.setStatus(STATUS_KEY, undefined);
     } catch {}
   }
 
@@ -385,19 +389,19 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     }
   }
 
-  function startObserver(ctx: ExtensionContext): void {
-    activeCtx = ctx;
-    const currentGeneration = ++generation;
+  function detachObserver(): void {
+    generation++;
     stopObserver?.();
     stopObserver = null;
-    if (installPollTimer !== null) {
-      clearTimeout(installPollTimer);
-      installPollTimer = null;
-    }
-    if (activeCommandAbort) {
-      activeCommandAbort.abort();
-      activeCommandAbort = null;
-    }
+    clearStatus(activeCtx);
+    activeCtx = null;
+    state = { phase: 'not-started', detail: '' };
+  }
+
+  function startObserver(ctx: ExtensionContext): void {
+    detachObserver();
+    activeCtx = ctx;
+    const currentGeneration = generation;
     disposed = false;
     observationStart = Date.now();
     renderStatus(ctx);
@@ -526,10 +530,6 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         clearTimeout(installPollTimer);
         installPollTimer = null;
       }
-      if (activeCommandAbort) {
-        activeCommandAbort.abort();
-        activeCommandAbort = null;
-      }
     };
   }
 
@@ -537,6 +537,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     description:
       'IntelliJ language server, project index, cache, pruning, workspace and debug management',
     handler: async (rawArgs: string, ctx: ExtensionContext) => {
+      const commandGeneration = generation;
       const args = rawArgs.trim();
       const parts = args.split(/\s+/).filter(Boolean);
       const sub = parts[0] || 'status';
@@ -544,7 +545,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       if (sub === 'start') {
         const socket = await ensureServer({ systemPath: activeSystemPath });
         socket.destroy();
-        startObserver(ctx);
+        if (generation === commandGeneration && !disposed) startObserver(ctx);
       } else if (sub === 'stop' || sub === 'restart') {
         if (parts.length !== 1) {
           ctx.ui?.notify(`Usage: /intellij ${sub}`, 'warning');
@@ -566,7 +567,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               'info',
             );
           }
-          startObserver(ctx);
+          if (generation === commandGeneration && !disposed) startObserver(ctx);
         } catch (error: unknown) {
           ctx.ui?.notify(
             `IntelliJ ${sub} refused: ${sanitizeString(getErrorMessage(error))}`,
@@ -596,7 +597,6 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       } else if (sub === 'status') {
         const projectRoot = findProjectRootFn(ctx.cwd);
         const current = await readProjectState(activeSystemPath, projectRoot);
-        state = current;
 
         const configuration = await configApi.readServerConfig(settings.executable, configOptions);
         const configDesc =
@@ -617,22 +617,22 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           serverDesc = 'IntelliJ shared server stopped';
         }
 
-        const indexDesc = `project index: ${state.phase}${state.detail ? ` (${state.detail})` : ''}`;
+        const indexDesc = `project index: ${current.phase}${current.detail ? ` (${current.detail})` : ''}`;
 
         const parts = [serverDesc, configDesc];
         if (installDesc) {
           parts.push(installDesc);
         }
         parts.push(indexDesc);
-        const licSummary = formatLicenseSummary(state.license);
+        const licSummary = formatLicenseSummary(current.license);
         if (licSummary) {
           parts.push(licSummary);
         }
-        const failSummary = formatFailureSummary(state.failure, activeSystemPath);
+        const failSummary = formatFailureSummary(current.failure, activeSystemPath);
         if (failSummary) {
           parts.push(failSummary);
         }
-        if (isAuthDenied(state.license)) {
+        if (isAuthDenied(current.license)) {
           parts.push(`recovery: ${LICENSE_RECOVERY_GUIDANCE}`);
         }
         const debugSessions = await debugApi
@@ -654,9 +654,10 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
           return;
         }
         startObserver(ctx);
-        const commandGen = generation;
+        activeCommandAbort?.abort();
         const ownedAbort = new AbortController();
         activeCommandAbort = ownedAbort;
+        const ownsInstall = () => !disposed && activeCommandAbort === ownedAbort;
         let targetDir = dir;
 
         try {
@@ -682,11 +683,11 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               bundle,
               signal: ownedAbort.signal,
               onProgress: (prog) => {
-                applyInstallState(prog, ctx, commandGen, false);
+                if (ownsInstall()) applyInstallState(prog, activeCtx, generation, false);
               },
             });
           }
-          if (disposed || generation !== commandGen) {
+          if (!ownsInstall()) {
             return;
           }
 
@@ -701,51 +702,51 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             selectionBlockedError = getErrorMessage(selectErr);
           }
 
-          if (disposed || generation !== commandGen) {
+          if (!ownsInstall()) {
             return;
           }
 
           const realState = await installApi.readInstallState(result.installDir);
-          if (disposed || generation !== commandGen) return;
+          if (!ownsInstall()) return;
           const readyKey = `${realState?.installId || result.installDir}:ready`;
           notifiedInstalls.add(readyKey);
           if (realState?.version === result.version) {
-            applyInstallState(realState, ctx, commandGen, false);
+            applyInstallState(realState, activeCtx, generation, false);
           } else {
             activeInstallState = null;
-            renderStatus(ctx);
+            renderStatus(activeCtx);
           }
 
           if (selectionBlockedError) {
             const retryDirArg = dir ? ` --dir "${result.installDir}"` : '';
-            ctx.ui?.notify(
+            activeCtx?.ui?.notify(
               `IntelliJ server installed: ${result.version} at ${result.executable}, but not selected: ${selectionBlockedError}. Stop the server and re-run /intellij install${retryDirArg} to switch to this installation.`,
               'warning',
             );
           } else {
-            ctx.ui?.notify(
+            activeCtx?.ui?.notify(
               `IntelliJ server installed: ${result.version} at ${result.executable} (configured/selected; start explicitly)`,
               'info',
             );
           }
         } catch (err: unknown) {
-          if (disposed || generation !== commandGen) {
+          if (!ownsInstall()) {
             return;
           }
           const errorMsg = getErrorMessage(err);
           const failedState = targetDir
             ? await installApi.readInstallState(targetDir).catch(() => null)
             : null;
-          if (disposed || generation !== commandGen) return;
+          if (!ownsInstall()) return;
           const failKey = `${failedState?.installId || targetDir || 'command'}:failed`;
           notifiedInstalls.add(failKey);
           if (failedState) {
-            applyInstallState(failedState, ctx, commandGen, false);
+            applyInstallState(failedState, activeCtx, generation, false);
           } else {
             activeInstallState = null;
-            renderStatus(ctx);
+            renderStatus(activeCtx);
           }
-          ctx.ui?.notify(`IntelliJ installation failed: ${errorMsg}`, 'error');
+          activeCtx?.ui?.notify(`IntelliJ installation failed: ${errorMsg}`, 'error');
         } finally {
           if (activeCommandAbort === ownedAbort) {
             activeCommandAbort = null;
@@ -1042,7 +1043,6 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               systemPath: activeSystemPath,
             });
             const projectState = await readProjectState(activeSystemPath, projectRoot);
-            state = projectState;
             const jdkPart = info.savedJdk
               ? `${info.savedJdk}${info.savedVersion ? ` (Java ${info.savedVersion})` : ''} ${info.isApplied ? '[applied]' : '[saved, not applied - run /intellij workspace reload]'}`
               : info.appliedJdk
@@ -1168,19 +1168,19 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               return;
             }
             const items = candidates.map((c) => ({
-              label: `${c.version ? `Java ${c.version}` : 'JDK'}${c.vendor ? ` (${c.vendor})` : ''} - ${c.javaHome}`,
-              value: c.javaHome,
-              description: c.javaHome,
+              label: c.javaHome,
+              description: `${c.version ? `Java ${c.version}` : 'JDK'}${c.vendor ? ` (${c.vendor})` : ''}`,
             }));
             const selected = await ctx.ui.select('Select JDK for workspace:', items);
             if (!selected) {
               ctx.ui.notify('JDK selection cancelled.', 'info');
               return;
             }
-            targetPath =
-              typeof selected === 'object' && selected !== null && 'value' in selected
-                ? selected.value
-                : String(selected);
+            if (!items.some(({ label }) => label === selected)) {
+              ctx.ui.notify('The selected JDK was not among the discovered paths.', 'warning');
+              return;
+            }
+            targetPath = selected;
           }
 
           const projectRoot = findProjectRootFn(ctx.cwd);
@@ -1200,10 +1200,9 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             });
             const timeNote = reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
             ctx.ui?.notify(
-              'Workspace JDK saved and applied: ' +
-                (saved?.javaHome || targetPath) +
-                timeNote +
-                '.',
+              reimport.verifiedJdk
+                ? `Workspace JDK saved and verified: ${saved?.javaHome || targetPath}${timeNote}.`
+                : `Workspace JDK saved: ${saved?.javaHome || targetPath}; reload completed${timeNote}, but imported JAVA_HOME was not verified.`,
               'info',
             );
           } catch (err: unknown) {
@@ -1316,7 +1315,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               const timeNote =
                 reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
               ctx.ui?.notify(
-                `Workspace environment variable ${name} saved and reload submitted: index ready${timeNote}.${precedenceNote}`,
+                `Workspace environment variable ${name} saved; reload completed and index ready${timeNote}. Build-tool environment was not verified.${precedenceNote}`,
                 'info',
               );
             } catch (err: unknown) {
@@ -1333,7 +1332,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 );
               } else {
                 ctx.ui?.notify(
-                  `Workspace environment variable ${name} saved, but reimport failed: ${msg}. Settings are saved but not applied to active session.`,
+                  `Workspace environment variable ${name} saved, but reimport failed: ${msg}.`,
                   'warning',
                 );
               }
@@ -1376,7 +1375,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               const timeNote =
                 reimport?.elapsedMs !== undefined ? ` (${reimport.elapsedMs}ms)` : '';
               ctx.ui?.notify(
-                `Workspace environment variable ${name} unset and reload submitted: index ready${timeNote}.`,
+                `Workspace environment variable ${name} removed from the saved configuration; reload completed and index ready${timeNote}. Build-tool environment was not verified.`,
                 'info',
               );
             } catch (err: unknown) {
@@ -1393,7 +1392,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                 );
               } else {
                 ctx.ui?.notify(
-                  `Workspace environment variable ${name} unset, but reimport failed: ${msg}. Settings are saved but not applied to active session.`,
+                  `Workspace environment variable ${name} removed from the saved configuration, but reimport failed: ${msg}.`,
                   'warning',
                 );
               }
@@ -1586,7 +1585,10 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
     },
   });
 
-  pi.on?.('session_start', async (_event: unknown, ctx: ExtensionContext) => {
+  async function bindSession(
+    event: ExtensionSessionEvents['session_start' | 'session_switch'],
+    ctx: ExtensionContext,
+  ): Promise<void> {
     if (ctx.agent?.kind === 'sub') return;
     const projectRoot = findProjectRootFn(ctx.cwd);
     const markers = [
@@ -1597,20 +1599,28 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       'settings.gradle.kts',
       '.idea',
     ];
-    if (!markers.some((marker) => existsSync(join(projectRoot, marker)))) return;
-    await recordConnection(activeSystemPath, projectRoot, Date.now()).catch(() => {});
+    if (!markers.some((marker) => existsSync(join(projectRoot, marker)))) {
+      if (activeCommandAbort) startObserver(ctx);
+      else detachObserver();
+      return;
+    }
     if (typeof wsApi.registerSystemPath === 'function') {
       wsApi.registerSystemPath(activeSystemPath);
     }
     startObserver(ctx);
-  });
+    if (event.type === 'session_start') {
+      await recordConnection(activeSystemPath, projectRoot, Date.now()).catch(() => {});
+    }
+  }
+
+  pi.on?.('session_start', bindSession);
+  pi.on?.('session_switch', bindSession);
 
   pi.on?.('session_shutdown', () => {
     disposed = true;
-    generation++;
-    stopObserver?.();
-    stopObserver = null;
+    detachObserver();
+    activeCommandAbort?.abort();
+    activeCommandAbort = null;
     activeInstallState = null;
-    clearStatus(activeCtx);
   });
 }
