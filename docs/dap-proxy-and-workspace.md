@@ -125,7 +125,7 @@ graph TD
 ### 3.3 租约控制与进程归属校验 (`LeaseRecord` / `verifyServerOwnership`)
 
 - **租约注册**：每条到共享 ILS 的连接在 `systemPath/plugin-metadata/leases/<uuid>.json` 写入租约。`/intellij stop` 和 `/intellij restart` 在存在有效租约或运行中的调试会话时拒绝操作；租约表示 bridge 持有连接，不能用来判断终端会话是否仍打开。
-- **强制重启**：`/intellij restart --force` 忽略连接租约和活跃调试会话，会中断所有工程到旧 JVM 的 LSP/DAP 连接。补全只在输入标志前缀后提示 `--force`。停旧进程前仍须校验归属、EULA 和替换启动器（普通文件，POSIX 上须可执行）。缓存和工程配置保留；客户端需重新连接。
+- **强制停止与重启**：`/intellij stop --force` 和 `/intellij restart --force` 跳过活跃连接租约与调试会话的阻断，会中断所有工程到旧 JVM 的 LSP/DAP 连接。补全只在输入标志前缀后提示 `--force`。两者仍验证进程归属并保留缓存和工程配置；重启还须预检 EULA 和替换启动器（普通文件，POSIX 上须可执行）。
 - **四元组防 PID 复用校验**：启动服务端时在 `omp-server.json` 记录 `pid`、`token`、`processStartTime`（Windows 取 epoch 毫秒，Linux 取 `/proc/<pid>/stat` 启动时间 tick）、`executable`、规范化 `systemPath` 与生效插件路径 `pluginPaths`。探测或终止进程前，通过 `getProcessInfo` 与 `verifyServerOwnership` 校验四项属性一致（存活、`startTime`、`executable` 路径、`--system-path` 参数），不匹配则记为 `running-unverified` 而不执行终止。
 - 等启动器发布有效端口后再读取进程身份并写入所有者记录，避免把 `exec` 前的包装脚本解释器登记为服务进程。
 - `--system-path` 按完整参数值校验；仅路径前缀相同不算匹配。

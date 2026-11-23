@@ -9,11 +9,13 @@ import { canonicalizeProject } from '../src/project/metadata.js';
 import type { InstallResult } from '../src/server/install.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
-test('restart completion requires a flag prefix and nested keywords are case-insensitive', () => {
+test('force completion requires a flag prefix and nested keywords are case-insensitive', () => {
   const pi = createMockPi();
   extension(pi);
   const complete = pi.getCommand('intellij')?.getArgumentCompletions;
   assert.ok(complete);
+  assert.equal(complete('stop '), null);
+  assert.equal(complete('stop --f')?.[0]?.value, 'stop --force');
   assert.equal(complete('restart '), null);
   assert.equal(complete('restart --f')?.[0]?.value, 'restart --force');
   assert.equal(complete('workspace ENV UN')?.[0]?.value, 'workspace env unset');

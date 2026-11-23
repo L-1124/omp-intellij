@@ -103,6 +103,7 @@ const COMMAND_COMPLETIONS: Readonly<Record<string, Readonly<Record<string, strin
     workspace: 'Manage project JDK, environment, and imports',
     debug: 'Inspect or recover debug sessions',
   },
+  stop: { '--force': 'Stop even if active LSP or debug connections will be interrupted' },
   restart: { '--force': 'Restart even if active LSP or debug connections will be interrupted' },
   install: { '--dir': 'Install into the specified directory' },
   prune: { '--apply': 'Delete eligible workspace caches after confirmation' },
@@ -588,7 +589,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
       }
       const parent = level.join(' ');
       const fragment = text.slice(separator + 1);
-      if (parent === 'restart' && !fragment.startsWith('-')) return null;
+      if ((parent === 'stop' || parent === 'restart') && !fragment.startsWith('-')) return null;
       const prefix =
         parent === 'workspace' ||
         parent === 'workspace env' ||
@@ -619,18 +620,17 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         socket.destroy();
         if (generation === commandGeneration && !disposed) startObserver(ctx);
       } else if (sub === 'stop' || sub === 'restart') {
-        const force = sub === 'restart' && parts.length === 2 && parts[1] === '--force';
+        const force = parts.length === 2 && parts[1] === '--force';
         if (parts.length !== 1 && !force) {
-          const usage = sub === 'restart' ? 'restart [--force]' : 'stop';
-          ctx.ui?.notify(`Usage: /intellij ${usage}`, 'warning');
+          ctx.ui?.notify(`Usage: /intellij ${sub} [--force]`, 'warning');
           return;
         }
         try {
           if (sub === 'stop') {
-            const result = await lifecycleApi.stopServer({ systemPath: activeSystemPath });
+            const result = await lifecycleApi.stopServer({ systemPath: activeSystemPath, force });
             ctx.ui?.notify(
               result.stopped
-                ? `IntelliJ shared server stopped (PID ${result.pid}); caches and workspace configuration retained.`
+                ? `IntelliJ shared server ${force ? 'force-stopped' : 'stopped'} (PID ${result.pid}); caches and workspace configuration retained.${force ? ' Existing LSP and debug connections to the server were interrupted.' : ''}`
                 : result.detail || 'IntelliJ shared server is not running.',
               'info',
             );
@@ -1648,7 +1648,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|stop|restart [--force]|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop [--force]|restart [--force]|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }

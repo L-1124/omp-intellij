@@ -313,10 +313,12 @@ test('stopServer: refuses a cache-other process claiming the cache system path',
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  await assert.rejects(
-    () => stopServer({ systemPath: cache }),
-    /Refusing to stop unverified server process.*command line does not contain exact --system-path/i,
-  );
+  for (const force of [false, true]) {
+    await assert.rejects(
+      () => stopServer({ systemPath: cache, force }),
+      /Refusing to stop unverified server process.*command line does not contain exact --system-path/i,
+    );
+  }
   assert.equal((await endpoint(cache)).port, fake.port);
 });
 
@@ -471,7 +473,7 @@ test('stopServer: blocked by active connection leases; succeeds after release', 
   }
 });
 
-test('stopServer: blocked by active debug sessions; succeeds after close', async (t) => {
+test('stopServer: plain stop refuses a live debug session and force stops the owned server', async (t) => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-debug-'));
   let fake: { child: ChildProcess; port: number; cleanup: () => Promise<void> } | undefined;
   t.after(async () => {
@@ -500,24 +502,25 @@ test('stopServer: blocked by active debug sessions; succeeds after close', async
       }),
       recover: async () => {},
     });
+    t.after(() => control.close());
+    const lease = await createLease(tempRoot, { kind: 'bridge', projectPath: projectDir });
 
     // Attempting to stop while debug session is active must be rejected
     await assert.rejects(
       () => stopServer({ systemPath: tempRoot }),
-      /Cannot stop IntelliJ server: active consumers detected: active debug session\(s\)/i,
+      /Cannot stop IntelliJ server: active consumers detected:.*active connection lease.*active debug session/i,
     );
 
     // Server process must still be running
     assert.equal(isProcessAlive(serverPid), true);
 
-    // Close debug session
-    await control.close();
-
-    // Now stopServer must succeed
-    const stopResult = await stopServer({ systemPath: tempRoot });
+    const stopResult = await stopServer({ systemPath: tempRoot, force: true });
     assert.equal(stopResult.stopped, true);
     assert.equal(stopResult.pid, serverPid);
     assert.equal(isProcessAlive(serverPid), false);
+    assert.equal((await getActiveLeases(tempRoot)).length, 1);
+    await lease.release();
+    await control.close();
   } finally {
     if (fake) await fake.cleanup();
   }

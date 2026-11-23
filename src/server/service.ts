@@ -811,6 +811,7 @@ async function terminateVerifiedServer(pid: number, timeoutMs: number = 3000): P
 export interface StopServerOptions {
   systemPath?: string;
   timeoutMs?: number;
+  force?: boolean;
   inspectCommandLine?: (pid: number) => Promise<string | null>;
 }
 
@@ -921,7 +922,7 @@ export async function stopServer(options: StopServerOptions = {}): Promise<StopS
 
   return withLifecycleLock(
     async () => {
-      return internalStopServer({ systemPath, timeoutMs }, 'stop');
+      return internalStopServer({ systemPath, timeoutMs }, 'stop', options.force === true);
     },
     { systemPath, timeoutMs },
   );
