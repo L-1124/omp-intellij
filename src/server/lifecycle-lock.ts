@@ -134,10 +134,19 @@ export async function acquireLifecycleLock(options: {
     throw new Error(`Timed out waiting for IntelliJ lifecycle lock: ${lock}`);
   }
 
-  await writeFile(
-    join(lock, 'owner.json'),
-    JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }),
-  );
+  try {
+    await writeFile(
+      join(lock, 'owner.json'),
+      JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }),
+    );
+  } catch (error) {
+    try {
+      await rm(lock, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], `Failed to publish or remove lock: ${lock}`);
+    }
+    throw error;
+  }
   let released = false;
   return {
     lock,
