@@ -753,8 +753,11 @@ async function internalStopServer(
           .join(', ')}`,
       );
     }
+    const bridgeNote = activeLeases.some((lease) => lease.kind === 'bridge')
+      ? ' The OMP daemon can retain bridge connections after a client disconnects; wait for the listed bridge processes to exit.'
+      : '';
     throw new Error(
-      `Cannot ${action} IntelliJ server: active consumers detected: ${blocking.join('; ')}. All connections and debug sessions must be closed before ${action}.`,
+      `Cannot ${action} IntelliJ server: active consumers detected: ${blocking.join('; ')}. All connections and debug sessions must be closed before ${action}.${bridgeNote}`,
     );
   }
 

@@ -1202,8 +1202,8 @@ test('import configuration comparison is project-specific and detects JDK and en
   }
 });
 
-test('reimport blocks unknown and multi-root owners while excluding independent sibling connections', async (t) => {
-  for (const ownership of ['unknown', 'multi-root']) {
+test('reimport blocks live owners, including during teardown, while excluding independent sibling connections', async (t) => {
+  for (const ownership of ['unknown', 'multi-root', 'disconnecting']) {
     await t.test(ownership, async () => {
       const root = await mkdtemp(join(tmpdir(), 'omp-import-owner-'));
       const project = join(root, 'project');
@@ -1214,6 +1214,9 @@ test('reimport blocks unknown and multi-root owners while excluding independent 
       await mkdir(sibling);
       await writeFile(join(project, 'build.gradle'), "plugins { id 'java' }\n");
       await setWorkspaceEnvVar(project, 'IMPORT_MODE', 'changed', { configDir });
+      const jdk = join(root, 'jdk');
+      await createMockJdk(jdk, { version: '21.0.4' });
+      await setWorkspaceJdk(project, jdk, { systemPath, configDir });
       const owner = createConnectionState({
         systemPath,
         kind: 'bridge',
@@ -1222,9 +1225,9 @@ test('reimport blocks unknown and multi-root owners while excluding independent 
       const independent = createConnectionState({ systemPath, kind: 'runner', root: sibling });
       try {
         await owner.update({
-          phase: 'ready',
+          phase: ownership === 'disconnecting' ? 'disconnected' : 'ready',
           workspaceImportOptions:
-            ownership === 'multi-root' ? workspaceImportOptions([project], {}) : undefined,
+            ownership === 'unknown' ? undefined : workspaceImportOptions([project], {}),
         });
         await independent.update({
           phase: 'ready',
@@ -1235,12 +1238,33 @@ test('reimport blocks unknown and multi-root owners while excluding independent 
           (error: unknown) => {
             assert.equal((error as NodeJS.ErrnoException).code, 'PROJECT_LSP_RECONNECT_REQUIRED');
             assert.ok((error as Error).message.includes(owner.connectionId));
+            assert.ok((error as Error).message.includes(`PID ${process.pid}`));
+            assert.match((error as Error).message, /Wait for the old connection to release it/);
+            if (ownership === 'disconnecting') {
+              assert.match((error as Error).message, /teardown not confirmed/);
+            }
             assert.equal((error as Error).message.includes(independent.connectionId), false);
             return true;
           },
         );
         assert.equal(owner.getState().closed, false);
         assert.equal(independent.getState().closed, false);
+        const receipt = JSON.parse(
+          await readFile(
+            join(
+              systemPath,
+              'plugin-metadata',
+              'receipts',
+              `${canonicalizeProject(project).id}.import-status.json`,
+            ),
+            'utf8',
+          ),
+        );
+        assert.equal(receipt.stage, 'connect');
+        assert.equal(receipt.submittedJdk, null);
+        assert.equal(receipt.appliedJdk, null);
+        assert.equal(receipt.verifiedJdk, false);
+        assert.deepEqual(receipt.submittedEnvKeys, []);
       } finally {
         await Promise.all([owner.close(), independent.close()]);
         await rm(root, { recursive: true, force: true });
@@ -1258,12 +1282,16 @@ test('reimportWorkspace validates project root and records failed connection rec
     const projectRoot = join(tmpRoot, 'proj');
     await mkdir(systemPath, { recursive: true });
     await mkdir(projectRoot, { recursive: true });
+    const closedOwner = createConnectionState({ systemPath, kind: 'bridge', root: projectRoot });
+    await closedOwner.update({ phase: 'disconnected' });
+    await closedOwner.close();
 
-    await assert.rejects(async () =>
-      reimportWorkspace(projectRoot, {
-        systemPath,
-        timeoutMs: 500,
-      }),
+    await assert.rejects(
+      () => reimportWorkspace(projectRoot, { systemPath, timeoutMs: 500 }),
+      (error: unknown) => {
+        assert.notEqual((error as NodeJS.ErrnoException).code, 'PROJECT_LSP_RECONNECT_REQUIRED');
+        return true;
+      },
     );
 
     const receiptsDir = join(systemPath, 'plugin-metadata', 'receipts');

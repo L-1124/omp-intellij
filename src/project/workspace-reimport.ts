@@ -50,7 +50,7 @@ export async function reimportWorkspace(
   const saved = await readWorkspaceConfig(targetDir, canonical);
   const configRevision = saved?.updatedAt ?? Date.now();
   const plannedEnvKeys = saved?.env ? Object.keys(saved.env).sort() : [];
-  const appliedJdk = saved?.javaHome || null;
+  const configuredJdk = saved?.javaHome || null;
 
   const receiptDir = join(systemPath, 'plugin-metadata', 'receipts');
   const importReceiptPath = join(receiptDir, `${id}.import-status.json`);
@@ -69,7 +69,8 @@ export async function reimportWorkspace(
         stage,
         revision: configRevision,
         submittedEnvKeys: stage === 'connect' || stage === 'saved' ? [] : plannedEnvKeys,
-        appliedJdk: verifiedJdk ? appliedJdk : null,
+        submittedJdk: stage === 'connect' || stage === 'saved' ? null : configuredJdk,
+        appliedJdk: verifiedJdk ? configuredJdk : null,
         verifiedJdk,
         failure: failure
           ? {
@@ -98,19 +99,22 @@ export async function reimportWorkspace(
       const expectedOptions = workspaceImportOptions([nativePath], fullInitOptions)[id];
       const conflicts: string[] = [];
       await readProjectState(systemPath, nativePath, (connection) => {
+        // LSP shutdown can set the phase before the connection closes.
         if (
           connection.isAlive &&
           !connection.closed &&
-          connection.phase !== 'disconnected' &&
           connection.workspaceImportOptions?.[id] !== expectedOptions
         ) {
-          conflicts.push(`${connection.kind} ${connection.connectionId} (PID ${connection.pid})`);
+          const state = connection.phase === 'disconnected' ? ', teardown not confirmed' : '';
+          conflicts.push(
+            `${connection.kind} ${connection.connectionId} (PID ${connection.pid}${state})`,
+          );
         }
       });
       if (conflicts.length > 0) {
         throw Object.assign(
           new Error(
-            `Reconnect this project's LSP clients with the saved import configuration, then reload again: ${conflicts.join(', ')}. Shared ILS and debug sessions remain running; finish or detach debugging before reconnecting its owning client.`,
+            `Workspace import is blocked by an LSP connection using different or unknown import settings: ${conflicts.join(', ')}. A disconnected OMP client does not confirm that its bridge released the workspace. Wait for the old connection to release it, then reconnect this project's LSP client and retry reload. This operation does not stop shared IntelliJ or unrelated debug sessions.`,
           ),
           { code: 'PROJECT_LSP_RECONNECT_REQUIRED' },
         );
@@ -144,7 +148,7 @@ export async function reimportWorkspace(
     let verified = false;
 
     const sourceFile = await findFirstSourceFile(nativePath);
-    if (sourceFile && appliedJdk) {
+    if (sourceFile && configuredJdk) {
       try {
         const sourceFileUri = toLspFileUri(sourceFile, rootUri);
         const buildTool = await queryNativeBuildTool(session, sourceFileUri, {
@@ -159,10 +163,11 @@ export async function reimportWorkspace(
         }
         importedJavaHome = home;
         if (
-          canonicalizeProject(home).canonicalPath !== canonicalizeProject(appliedJdk).canonicalPath
+          canonicalizeProject(home).canonicalPath !==
+          canonicalizeProject(configuredJdk).canonicalPath
         ) {
           throw new Error(
-            `Model verification mismatch: expected import JDK "${appliedJdk}" but IntelliJ imported with "${home}"`,
+            `Model verification mismatch: expected import JDK "${configuredJdk}" but IntelliJ imported with "${home}"`,
           );
         }
         verified = true;
@@ -187,13 +192,13 @@ export async function reimportWorkspace(
       }
     } catch {}
 
-    if (appliedJdk && serverPid && verified) {
+    if (configuredJdk && serverPid && verified) {
       const receiptPath = join(receiptDir, `${id}.applied.json`);
       const receipt = {
         id,
         canonicalPath,
         pid: serverPid,
-        javaHome: appliedJdk,
+        javaHome: configuredJdk,
         importedJavaHome,
         appliedAt: Date.now(),
         verified: true,
@@ -209,7 +214,7 @@ export async function reimportWorkspace(
       ready: true,
       projectRoot: cleanedRoot,
       canonicalPath,
-      appliedJdk: verified ? appliedJdk : null,
+      appliedJdk: verified ? configuredJdk : null,
       verifiedJdk: verified,
       submittedEnvKeys: plannedEnvKeys,
       elapsedMs,
