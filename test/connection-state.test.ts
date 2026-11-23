@@ -399,8 +399,11 @@ test('reduceConnectionState: maintains progress but preserves failed detail and 
   assert.deepEqual(state.failure, originalFailure);
 });
 
-test('enqueueWrite error reporting: notifies onWriteError on failure and close() rejects', async () => {
-  const invalidPath = join('Z:', 'nonexistent-drive-12345', 'path');
+test('enqueueWrite error reporting: notifies onWriteError on failure and close() rejects', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-conn-write-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const invalidPath = join(root, 'not-a-directory');
+  await writeFile(invalidPath, '');
   const errors: unknown[] = [];
   const state = createConnectionState({
     systemPath: invalidPath,

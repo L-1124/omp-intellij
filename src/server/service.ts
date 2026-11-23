@@ -1006,25 +1006,33 @@ async function internalStartServer(
       throw new Error('Failed to obtain spawned IntelliJ server PID');
     }
 
-    const procInfo = await getProcessInfo(childPid);
-    if (!procInfo?.startTime) {
-      throw new Error(`Failed to capture OS process identity for child PID ${childPid}`);
-    }
-    const token = randomUUID();
-    const ownerRecord: ServerOwnerRecord = {
-      pid: childPid,
-      token,
-      systemPath: resolve(systemPath),
-      createdAt: Date.now(),
-      processStartTime: procInfo.startTime,
-      executable: procInfo.executable || resolve(executable),
-      pluginPaths: getIjPluginPaths(process.env.IJ_JAVA_OPTIONS, undefined, process.cwd()),
-    };
-    await writeFile(currentOwnerFile, JSON.stringify(ownerRecord, null, 2));
-
+    let ownerPublished = false;
     while (Date.now() < deadline) {
       if (child.exitCode !== null || child.signalCode !== null) {
         throw new Error(`IntelliJ server exited with code ${child.exitCode}; see launcher.log`);
+      }
+      if (!ownerPublished) {
+        // A launcher may exec into the server before publishing its port.
+        const portFile = await readFile(currentPortFile, 'utf8').catch(() => '');
+        if (parsePortFile(portFile) === null) {
+          await pause(100);
+          continue;
+        }
+        const procInfo = await getProcessInfo(childPid);
+        if (!procInfo?.startTime || !procInfo.executable) {
+          throw new Error(`Failed to capture OS process identity for child PID ${childPid}`);
+        }
+        const ownerRecord: ServerOwnerRecord = {
+          pid: childPid,
+          token: randomUUID(),
+          systemPath,
+          createdAt: Date.now(),
+          processStartTime: procInfo.startTime,
+          executable: procInfo.executable,
+          pluginPaths: getIjPluginPaths(process.env.IJ_JAVA_OPTIONS, undefined, process.cwd()),
+        };
+        await writeFile(currentOwnerFile, JSON.stringify(ownerRecord, null, 2));
+        ownerPublished = true;
       }
       try {
         const socket = await connect(Math.min(1000, deadline - Date.now()), systemPath);

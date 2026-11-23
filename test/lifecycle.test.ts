@@ -763,8 +763,11 @@ test('restartServer: records effective -Dplugin.path in omp-server.json and avoi
   const originalConfig = process.env.OMP_INTELLIJ_CONFIG;
   const originalIjOptions = process.env.IJ_JAVA_OPTIONS;
   process.env.OMP_INTELLIJ_CONFIG = configFile;
-  process.env.IJ_JAVA_OPTIONS =
-    '-Xmx2g -Dplugin.path="C:/custom/plugin1,C:/custom/plugin2" -Dsecret.token=super-secret-1234 -ea';
+  const pluginPaths = [
+    join(tempRoot, 'custom', 'plugin1'),
+    join(tempRoot, 'custom', 'plugin2'),
+  ].map((path) => path.replaceAll('\\', '/'));
+  process.env.IJ_JAVA_OPTIONS = `-Xmx2g -Dplugin.path="${pluginPaths.join(',')}" -Dsecret.token=super-secret-1234 -ea`;
 
   let oldFake: { child: ChildProcess; port: number; cleanup: () => Promise<void> } | undefined;
   let newPidToClean = 0;
@@ -814,10 +817,7 @@ test('restartServer: records effective -Dplugin.path in omp-server.json and avoi
     assert.equal(rawOwner.includes('-Xmx2g'), false);
 
     // Records effective plugin paths as resolved array
-    assert.ok(Array.isArray(owner.pluginPaths));
-    assert.equal(owner.pluginPaths.length, 2);
-    assert.equal(owner.pluginPaths[0].endsWith('custom/plugin1'), true);
-    assert.equal(owner.pluginPaths[1].endsWith('custom/plugin2'), true);
+    assert.deepEqual(owner.pluginPaths, pluginPaths);
 
     const verification = await verifyServerOwnership(tempRoot);
     assert.equal(verification.status, 'running-owned');

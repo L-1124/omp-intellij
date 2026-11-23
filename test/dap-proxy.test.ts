@@ -825,6 +825,10 @@ for (const spoofedOutput of [false, true]) {
     let h: DapTestHarness;
     h = await createDapTestHarness(t, {
       onDapRequest(request) {
+        if (request.command === 'intellij/threadDump') {
+          h.respond(request, undefined, false, 'JDWP connection was never established');
+          return true;
+        }
         if (request.command !== 'attach') return;
         h.respond(request);
         if (spoofedOutput) {
