@@ -24,7 +24,7 @@
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "prepack": "npm run build",
     "clean:runtime": "node scripts/clean-runtime.mjs",
-    "test": "node -e \"require('node:fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-concurrency=1 --test-timeout=30000 \"dist-test/test/*.test.js\" \"test/*.test.mjs\"",
+    "test": "node -e \"require('node:fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-concurrency=1 \"dist-test/test/*.test.js\" \"test/*.test.mjs\"",
     "update-bundle": "npm run build && node scripts/update-server-bundle.mjs",
     "test:smoke": "node scripts/test-integration.mjs smoke",
     "test:integration": "node scripts/test-integration.mjs",

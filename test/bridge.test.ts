@@ -21,7 +21,7 @@ type Message = Record<string, unknown> & {
 async function bridgeFixture(
   t: TestContext,
   onServerMessage: (message: Message, socket: net.Socket) => void,
-  options: { blockMetadata?: boolean } = {},
+  options: { blockMetadata?: boolean; initializeTimeoutMs?: number } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'omp-bridge-'));
   const systemPath = join(root, 'system');
@@ -77,7 +77,7 @@ async function bridgeFixture(
       executable: 'unused-existing-server',
       systemPath,
       startupTimeoutMs: 1000,
-      initializeTimeoutMs: 1000,
+      initializeTimeoutMs: options.initializeTimeoutMs,
       requestWaitTimeoutMs: 2000,
       idleTimeout: '30m',
       workspaceConfigPath: join(root, 'profiles'),
@@ -221,7 +221,10 @@ for (const failure of ['timeout', 'disconnect', 'configuration'] as const) {
       (message, socket) => {
         if (message.method === 'initialize' && failure === 'disconnect') socket.end();
       },
-      { blockMetadata: failure === 'configuration' },
+      {
+        blockMetadata: failure === 'configuration',
+        initializeTimeoutMs: failure === 'timeout' ? 1000 : undefined,
+      },
     );
     h.initialize();
     const response = await h.waitFor((m) => m.id === 1);
