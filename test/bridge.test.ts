@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  getHostInitializationOptions,
+  loadProjectConfiguration,
+} from '../src/project/configuration.js';
+import { canonicalizeProject } from '../src/project/metadata.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
 
 type Message = Record<string, unknown> & {
@@ -113,6 +118,9 @@ async function bridgeFixture(
     pending.clear();
   });
   return {
+    root,
+    systemPath,
+    project,
     messages,
     send(message: Message) {
       bridge.stdin.write(encode(message));
@@ -443,5 +451,180 @@ test('bridge leaves progress negotiation with clients that support it', {
   const progress = await h.waitFor((m) => m.method === '$/progress');
   assert.deepEqual(progress.params, { token: 0, value: { kind: 'begin', title: 'Indexing' } });
   assert.equal(progressAccepted, true);
+  await h.close();
+});
+
+test('bridge emits canonical folder changes and records standalone initialize inputs', {
+  timeout: 15000,
+}, async (t) => {
+  const frames: Message[] = [];
+  const h = await bridgeFixture(t, (message, socket) => {
+    frames.push(message);
+    if (message.method === 'initialize') {
+      socket.write(
+        encode({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            capabilities: { workspace: { workspaceFolders: { changeNotifications: true } } },
+          },
+        }),
+      );
+    } else if (message.method === 'test/sync') {
+      socket.write(encode({ jsonrpc: '2.0', method: 'test/synced', params: message.params }));
+      if (message.params === 2) {
+        socket.write(encode({ jsonrpc: '2.0', id: 89, method: 'workspace/workspaceFolders' }));
+      } else if (message.params === 4) {
+        socket.write(
+          encode({
+            jsonrpc: '2.0',
+            id: 90,
+            method: 'workspace/configuration',
+            params: {
+              items: [
+                { scopeUri: second.rootUri, section: 'editor' },
+                { scopeUri: third.rootUri, section: 'editor' },
+              ],
+            },
+          }),
+        );
+      }
+    }
+  });
+  const first = canonicalizeProject(h.project);
+  const second = canonicalizeProject(join(h.root, 'second'));
+  const third = canonicalizeProject(join(h.root, 'third'));
+  const profiles = join(h.root, 'profiles');
+  await mkdir(profiles);
+  for (const [project, mode] of [
+    [first, 'first'],
+    [second, 'second'],
+    [third, 'third'],
+  ] as const) {
+    await mkdir(join(project.nativePath, 'sub-a'), { recursive: true });
+    await mkdir(join(project.nativePath, 'sub-b'), { recursive: true });
+    await writeFile(join(project.nativePath, 'settings.gradle'), "rootProject.name = 'fixture'\n");
+    await writeFile(
+      join(profiles, `${project.id}.json`),
+      JSON.stringify({
+        ...project,
+        javaHome: join(h.root, `${mode}-jdk`),
+        env: { IMPORT_MODE: mode },
+        updatedAt: Date.now(),
+      }),
+    );
+  }
+  const folder = (path: string, name: string) => ({ uri: pathToFileURL(path).href, name });
+  const firstFolder = folder(first.nativePath, 'first');
+  const secondA = folder(join(second.nativePath, 'sub-a'), 'second-a');
+  const secondB = folder(join(second.nativePath, 'sub-b'), 'second-b');
+  const secondFolder = { uri: second.rootUri, name: 'second-a' };
+  const thirdA = folder(join(third.nativePath, 'sub-a'), 'third-a');
+  const thirdFolder = { uri: third.rootUri, name: 'third-a' };
+  const rawSecond = { path: secondA.uri, type: 'gradle', env: { HOST_MODE: 'client' } };
+  const fromWorkspace = join(h.root, 'source');
+  h.send({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      rootUri: first.rootUri,
+      workspaceFolders: [secondA, secondB, firstFolder],
+      initializationOptions: { fromWorkspace, projects: [rawSecond] },
+    },
+  });
+  assert.ok((await h.waitFor((m) => m.id === 1)).result);
+  const init = frames[0].params as {
+    rootUri: string;
+    workspaceFolders: unknown[];
+    initializationOptions: { fromWorkspace: string; projects: Array<Record<string, unknown>> };
+  };
+  assert.equal(init.rootUri, first.rootUri);
+  assert.deepEqual(init.workspaceFolders, [secondFolder, { ...firstFolder, uri: first.rootUri }]);
+  assert.equal(init.initializationOptions.fromWorkspace, fromWorkspace);
+  const imports = init.initializationOptions.projects;
+  const importedFirst = imports.find(
+    (entry) => canonicalizeProject(String(entry.path)).id === first.id,
+  );
+  const importedSecond = imports.find(
+    (entry) => canonicalizeProject(String(entry.path)).id === second.id,
+  );
+  assert.equal(imports.length, 2);
+  assert.equal(importedFirst?.['java-home'], join(h.root, 'first-jdk'));
+  assert.deepEqual(importedFirst?.env, {
+    IMPORT_MODE: 'first',
+    JAVA_HOME: join(h.root, 'first-jdk'),
+  });
+  assert.equal(importedSecond?.['java-home'], join(h.root, 'second-jdk'));
+  assert.deepEqual(importedSecond?.env, {
+    HOST_MODE: 'client',
+    IMPORT_MODE: 'second',
+    JAVA_HOME: join(h.root, 'second-jdk'),
+  });
+
+  const metadata = join(h.systemPath, 'plugin-metadata');
+  const snapshot = JSON.parse(
+    await readFile(join(metadata, `initialize-${second.id}.json`), 'utf8'),
+  );
+  assert.equal(snapshot.rootUri, second.rootUri);
+  assert.deepEqual(snapshot.workspaceFolders, [secondFolder]);
+  assert.deepEqual(snapshot.initializationOptions, { projects: [rawSecond] });
+  assert.deepEqual(await getHostInitializationOptions(h.systemPath, second.id), {
+    projects: [rawSecond],
+  });
+  assert.deepEqual(await getHostInitializationOptions(h.systemPath, first.id), {
+    fromWorkspace,
+    projects: [],
+  });
+
+  async function sync(seq: number) {
+    h.send({ jsonrpc: '2.0', method: 'test/sync', params: seq });
+    await h.waitFor((m) => m.method === 'test/synced' && m.params === seq);
+  }
+  function change(added: Array<typeof firstFolder>, removed: Array<typeof firstFolder>) {
+    h.send({
+      jsonrpc: '2.0',
+      method: 'workspace/didChangeWorkspaceFolders',
+      params: { event: { added, removed } },
+    });
+  }
+  const changes = () =>
+    frames.filter((frame) => frame.method === 'workspace/didChangeWorkspaceFolders');
+  change([], [secondA]);
+  await sync(2);
+  assert.deepEqual(changes(), []);
+  await h.waitFor((m) => m.id === 89);
+  h.send({ jsonrpc: '2.0', id: 89, result: [secondB, firstFolder] });
+  await sync(3);
+  assert.deepEqual(frames.find((frame) => frame.id === 89)?.result, [
+    secondFolder,
+    { ...firstFolder, uri: first.rootUri },
+  ]);
+  change([thirdA], [secondB]);
+  await sync(4);
+  assert.deepEqual(
+    changes().map((frame) => frame.params),
+    [{ event: { added: [thirdFolder], removed: [secondFolder] } }],
+  );
+
+  await h.waitFor((m) => m.id === 90);
+  h.send({ jsonrpc: '2.0', id: 90, result: ['removed', 'active'] });
+  await sync(5);
+  assert.equal(
+    (await loadProjectConfiguration(h.systemPath, second.id))?.sectionResponses,
+    undefined,
+  );
+  assert.deepEqual(
+    Object.values((await loadProjectConfiguration(h.systemPath, third.id))?.sectionResponses ?? {}),
+    ['active'],
+  );
+  const connections = join(metadata, 'connections');
+  const [connection] = (await readdir(connections)).filter((file) => file.endsWith('.json'));
+  const record = JSON.parse(await readFile(join(connections, connection), 'utf8'));
+  assert.equal(record.rootUri, first.rootUri);
+  assert.equal(typeof record.workspaceImportOptions[first.id], 'string');
+  assert.equal(Object.hasOwn(record.workspaceImportOptions, second.id), false);
+  assert.equal(record.workspaceImportOptions[third.id], null);
+  await assert.rejects(readFile(join(metadata, `initialize-${third.id}.json`)), { code: 'ENOENT' });
   await h.close();
 });

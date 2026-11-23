@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import type net from 'node:net';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadDefaultPluginSettings,
@@ -18,6 +18,7 @@ import {
 } from './project/connection-state.js';
 import { IndexBarrier } from './project/index-barrier.js';
 import {
+  type CanonicalProject,
   canonicalizeProject,
   type LeaseHandle,
   migrateProjectMetadata,
@@ -31,28 +32,54 @@ import { DocumentSymbolAdapter } from './shared/document-symbols.js';
 import { asyncFramedStream, encode } from './shared/protocol.js';
 import { type FailureDetail, sanitizeStatus, sanitizeString } from './shared/runtime-status.js';
 
-export async function saveInitializeParams(
-  params: unknown,
-  options?: { rawInitializationOptions?: Record<string, unknown> },
-): Promise<void> {
-  const p = params as {
-    rootUri?: string;
-    rootPath?: string;
-    workspaceFolders?: Array<{ uri: string }>;
-  } | null;
-  const uri = p?.rootUri || p?.workspaceFolders?.[0]?.uri || p?.rootPath;
-  if (!uri) return;
+type WorkspaceFolder = { uri: string; name: string };
+type InitializeParams = Record<string, unknown> & {
+  rootUri?: string | null;
+  rootPath?: string | null;
+  workspaceFolders?: WorkspaceFolder[] | null;
+};
+
+function buildProject(uri: string): CanonicalProject {
+  return canonicalizeProject(findBuildRoot(uri));
+}
+
+async function saveInitializeParams(params: InitializeParams, id: string): Promise<void> {
   const dir = join(settings.systemPath, 'plugin-metadata');
   await mkdir(dir, { recursive: true });
-  const { id } = canonicalizeProject(uri);
   const target = join(dir, `initialize-${id}.json`);
   const temp = `${target}.${randomUUID()}.tmp`;
-  const sanitized = sanitizeStatus(params) as Record<string, unknown>;
-  if (options?.rawInitializationOptions) {
-    sanitized.rawInitializationOptions = sanitizeStatus(options.rawInitializationOptions);
-  }
-  await writeFile(temp, JSON.stringify(sanitized), 'utf8');
+  await writeFile(temp, JSON.stringify(sanitizeStatus(params)), 'utf8');
   await rename(temp, target);
+}
+
+function workspaceFoldersById(
+  aliases: ReadonlyMap<string, { project: CanonicalProject; folder: WorkspaceFolder }>,
+): Map<string, WorkspaceFolder> {
+  const folders = new Map<string, WorkspaceFolder>();
+  for (const { project, folder } of aliases.values()) {
+    if (!folders.has(project.id)) folders.set(project.id, { ...folder, uri: project.rootUri });
+  }
+  return folders;
+}
+
+function standaloneOptions(
+  raw: Record<string, unknown>,
+  projectId: string,
+  primaryId: string,
+): Record<string, unknown> {
+  const options = { ...raw };
+  if (projectId !== primaryId) delete options.fromWorkspace;
+  if (Array.isArray(raw.projects)) {
+    options.projects = raw.projects.filter((project) => {
+      if (!project || typeof project.path !== 'string') return true;
+      try {
+        return buildProject(project.path).id === projectId;
+      } catch {
+        return true;
+      }
+    });
+  }
+  return options;
 }
 
 export async function startBridge(): Promise<void> {
@@ -67,6 +94,11 @@ export async function startBridge(): Promise<void> {
   }
 
   let projectPath = findBuildRoot(process.cwd());
+  let primary = canonicalizeProject(projectPath);
+  const folderAliases = new Map<string, { project: CanonicalProject; folder: WorkspaceFolder }>();
+  let announcedFolders = new Map<string, WorkspaceFolder>();
+  const activeRoots = new Map<string, string>();
+  let implicitPrimary = true;
   const connState = createConnectionState({
     systemPath: settings.systemPath,
     kind: 'bridge',
@@ -82,6 +114,7 @@ export async function startBridge(): Promise<void> {
   const ownedProgressTokens = new Set<unknown>();
 
   const pendingConfigRequests = new Map<unknown, Array<{ scopeUri?: string; section?: string }>>();
+  const pendingFolderRequests = new Set<unknown>();
   const documentSymbols = new DocumentSymbolAdapter();
 
   // The request whose applyModCommand the server interrupted to ask for a variant choice.
@@ -119,44 +152,36 @@ export async function startBridge(): Promise<void> {
         );
       }, initializeTimeoutMs);
       initializeTimer.unref();
-      const p = message.params as
-        | { rootUri?: string; rootPath?: string; workspaceFolders?: Array<{ uri: string }> }
-        | undefined;
-      let uri = p?.rootUri || p?.workspaceFolders?.[0]?.uri || p?.rootPath;
-      if (p && uri) {
-        const project = canonicalizeProject(findBuildRoot(uri));
-        projectPath = project.nativePath;
-        if (canonicalizeProject(uri).id !== project.id) {
-          uri = project.rootUri;
-          p.rootUri = project.rootUri;
-          if (p.rootPath) p.rootPath = project.nativePath;
+      const paramsObj = (message.params || {}) as InitializeParams;
+      message.params = paramsObj;
+      const uri = paramsObj.rootUri || paramsObj.workspaceFolders?.[0]?.uri || paramsObj.rootPath;
+      if (uri) {
+        primary = buildProject(uri);
+        projectPath = primary.nativePath;
+        if (paramsObj.rootUri || canonicalizeProject(uri).id !== primary.id) {
+          paramsObj.rootUri = primary.rootUri;
         }
-        if (p.workspaceFolders) {
-          p.workspaceFolders = [
-            ...new Map(
-              p.workspaceFolders.map((folder) => {
-                const root = canonicalizeProject(findBuildRoot(folder.uri));
-                return [
-                  root.id,
-                  canonicalizeProject(folder.uri).id === root.id
-                    ? folder
-                    : { ...folder, uri: root.rootUri },
-                ] as const;
-              }),
-            ).values(),
-          ];
-        }
-        await migrateProjectMetadata(settings.systemPath, project);
+        if (paramsObj.rootPath) paramsObj.rootPath = projectPath;
         connState
           .update({ root: projectPath, phase: 'connecting', detail: 'Initializing connection' })
           .catch(() => {});
-        recordConnection(settings.systemPath, projectPath, Date.now()).catch(() => {});
       }
+      activeRoots.set(primary.id, primary.nativePath);
+      const projects = new Map([[primary.id, primary]]);
+      if (Array.isArray(paramsObj.workspaceFolders)) {
+        for (const folder of paramsObj.workspaceFolders) {
+          const project = buildProject(folder.uri);
+          folderAliases.set(folder.uri, { project, folder });
+          activeRoots.set(project.id, project.nativePath);
+          projects.set(project.id, project);
+        }
+        announcedFolders = workspaceFoldersById(folderAliases);
+        paramsObj.workspaceFolders = [...announcedFolders.values()];
+      }
+      implicitPrimary = !announcedFolders.has(primary.id);
 
-      let rawInitializationOptions: Record<string, unknown> | undefined;
+      let rawInitializationOptions: Record<string, unknown>;
       try {
-        message.params = message.params || {};
-        const paramsObj = message.params as Record<string, unknown>;
         const caps = (paramsObj.capabilities as Record<string, unknown>) || {};
         const exp = (caps.experimental as Record<string, unknown>) || {};
         exp.licensingUi = true;
@@ -174,16 +199,16 @@ export async function startBridge(): Promise<void> {
           (paramsObj.initializationOptions as Record<string, unknown>) || {};
         delete initializationOptions.eulaHash;
 
-        rawInitializationOptions = JSON.parse(JSON.stringify(initializationOptions));
-        paramsObj.initializationOptions = await applyWorkspaceOptions(
-          projectPath,
-          initializationOptions,
-          { systemPath: settings.systemPath },
-        );
+        rawInitializationOptions = initializationOptions;
+        const effectiveOptions = await applyWorkspaceOptions(projectPath, initializationOptions, {
+          systemPath: settings.systemPath,
+          additionalRoots: [...activeRoots.values()],
+        });
+        paramsObj.initializationOptions = effectiveOptions;
         await connState.update({
           workspaceImportOptions: workspaceImportOptions(
-            [projectPath, ...(p?.workspaceFolders?.map((folder) => folder.uri) ?? [])],
-            paramsObj.initializationOptions as Record<string, unknown>,
+            [...activeRoots.values()],
+            effectiveOptions,
           ),
         });
       } catch (err: unknown) {
@@ -195,46 +220,46 @@ export async function startBridge(): Promise<void> {
       }
 
       if (uri) {
-        const { id, nativePath, rootUri: canonicalRootUri } = canonicalizeProject(uri);
         try {
-          const existingConfig = await loadProjectConfiguration(settings.systemPath, id);
-          if (!existingConfig) {
-            const defaults = await loadDefaultPluginSettings();
-            const params = message.params;
-            let hostSettings: Record<string, unknown> | undefined;
-            if (
-              params &&
-              typeof params === 'object' &&
-              'settings' in params &&
-              params.settings &&
-              typeof params.settings === 'object'
-            ) {
-              hostSettings = params.settings as Record<string, unknown>;
-            } else if (
-              rawInitializationOptions &&
-              'settings' in rawInitializationOptions &&
-              rawInitializationOptions.settings &&
-              typeof rawInitializationOptions.settings === 'object'
-            ) {
-              hostSettings = rawInitializationOptions.settings as Record<string, unknown>;
+          const hostSettings =
+            paramsObj.settings && typeof paramsObj.settings === 'object'
+              ? paramsObj.settings
+              : rawInitializationOptions.settings;
+          for (const [id, project] of projects) {
+            const { nativePath, rootUri } = project;
+            await migrateProjectMetadata(settings.systemPath, project);
+            if (id === primary.id) {
+              recordConnection(settings.systemPath, projectPath, Date.now()).catch(() => {});
             }
-            const merged = hostSettings ? { ...defaults, ...hostSettings } : defaults;
+            const existing = await loadProjectConfiguration(settings.systemPath, id);
+            const rawOptions = standaloneOptions(rawInitializationOptions, id, primary.id);
+            const defaults = existing ? undefined : await loadDefaultPluginSettings();
             await saveProjectConfiguration(settings.systemPath, {
+              ...existing,
               id,
               projectPath: nativePath,
-              rootUri: canonicalRootUri,
+              rootUri,
               updatedAt: Date.now(),
-              settings: merged,
-              rawInitializationOptions,
+              settings: existing?.settings ?? {
+                ...defaults,
+                ...(hostSettings && typeof hostSettings === 'object' ? hostSettings : {}),
+              },
+              rawInitializationOptions: rawOptions,
             });
-          } else {
-            existingConfig.projectPath = nativePath;
-            existingConfig.rootUri = canonicalRootUri;
-            existingConfig.rawInitializationOptions = rawInitializationOptions;
-            existingConfig.updatedAt = Date.now();
-            await saveProjectConfiguration(settings.systemPath, existingConfig);
+            await saveInitializeParams(
+              {
+                ...paramsObj,
+                rootUri,
+                rootPath: nativePath,
+                workspaceFolders: [
+                  announcedFolders.get(id) ?? { uri: rootUri, name: basename(nativePath) },
+                ],
+                initializationOptions: rawOptions,
+                rawInitializationOptions: rawOptions,
+              },
+              id,
+            );
           }
-          await saveInitializeParams(message.params, { rawInitializationOptions });
         } catch (err: unknown) {
           const safeMsg = sanitizeString(err instanceof Error ? err.message : String(err));
           console.error(`intellij: failed to persist initialize configuration: ${safeMsg}`);
@@ -277,6 +302,64 @@ export async function startBridge(): Promise<void> {
       return;
     }
 
+    if (message?.method === 'workspace/didChangeWorkspaceFolders') {
+      const params = message.params as
+        | { event?: { added?: WorkspaceFolder[]; removed?: WorkspaceFolder[] } }
+        | undefined;
+      const event = params?.event;
+      if (event && Array.isArray(event.added) && Array.isArray(event.removed)) {
+        for (const folder of event.removed) {
+          if (folderAliases.delete(folder.uri)) continue;
+          // An equivalent spelling of the same raw path is not a different subfolder alias.
+          const rawId = canonicalizeProject(folder.uri).id;
+          const matches = [...folderAliases.keys()].filter(
+            (uri) => canonicalizeProject(uri).id === rawId,
+          );
+          if (matches.length === 1) folderAliases.delete(matches[0]);
+        }
+        for (const folder of event.added) {
+          if (!folderAliases.has(folder.uri)) {
+            folderAliases.set(folder.uri, { project: buildProject(folder.uri), folder });
+          }
+        }
+        const after = workspaceFoldersById(folderAliases);
+        const removed = [...announcedFolders].filter(([id]) => !after.has(id));
+        const added = [...after].filter(([id]) => !announcedFolders.has(id));
+        if (added.length === 0 && removed.length === 0) return;
+
+        const importOptions = { ...connState.getState().workspaceImportOptions };
+        for (const [id] of removed) {
+          announcedFolders.delete(id);
+          if (implicitPrimary && id === primary.id) continue;
+          activeRoots.delete(id);
+          delete importOptions[id];
+        }
+        for (const [id, folder] of added) {
+          announcedFolders.set(id, folder);
+          if (activeRoots.has(id)) continue;
+          const project = canonicalizeProject(folder.uri);
+          activeRoots.set(id, project.nativePath);
+          // The notification cannot transmit saved JDK/env or prove the import configuration.
+          importOptions[id] = null;
+          await migrateProjectMetadata(settings.systemPath, project);
+          const existing = await loadProjectConfiguration(settings.systemPath, id);
+          if (!existing) {
+            await saveProjectConfiguration(settings.systemPath, {
+              id,
+              projectPath: project.nativePath,
+              rootUri: project.rootUri,
+              updatedAt: Date.now(),
+              settings: await loadDefaultPluginSettings(),
+            });
+          }
+        }
+        await connState.update({ workspaceImportOptions: importOptions });
+        event.added = added.map(([, folder]) => folder);
+        event.removed = removed.map(([, folder]) => folder);
+        frame = encode(message);
+      }
+    }
+
     if (message?.method === 'workspace/didChangeConfiguration') {
       const params = message.params;
       if (
@@ -286,7 +369,7 @@ export async function startBridge(): Promise<void> {
         params.settings &&
         typeof params.settings === 'object'
       ) {
-        const { id, nativePath, rootUri: canonicalRootUri } = canonicalizeProject(projectPath);
+        const { id, nativePath, rootUri } = primary;
         try {
           await updateProjectSettings(
             settings.systemPath,
@@ -294,7 +377,7 @@ export async function startBridge(): Promise<void> {
             params.settings as Record<string, unknown>,
             {
               projectPath: nativePath,
-              rootUri: canonicalRootUri,
+              rootUri,
             },
           );
         } catch (err: unknown) {
@@ -312,9 +395,29 @@ export async function startBridge(): Promise<void> {
       const items = pendingConfigRequests.get(message.id);
       pendingConfigRequests.delete(message.id);
       if (items && Array.isArray(message.result)) {
-        const { id } = canonicalizeProject(projectPath);
-        await recordConfigurationItems(settings.systemPath, id, items, message.result);
+        await recordConfigurationItems(
+          settings.systemPath,
+          primary.id,
+          items,
+          message.result,
+          activeRoots,
+        );
       }
+    }
+    if (
+      message &&
+      !message.method &&
+      pendingFolderRequests.delete(message.id) &&
+      Array.isArray(message.result)
+    ) {
+      const folders = new Map<string, WorkspaceFolder>();
+      for (const folder of message.result as WorkspaceFolder[]) {
+        const id = (folderAliases.get(folder.uri)?.project ?? buildProject(folder.uri)).id;
+        const announced = announcedFolders.get(id);
+        if (announced) folders.set(id, announced);
+      }
+      message.result = [...folders.values()];
+      frame = encode(message);
     }
 
     if (message) {
@@ -459,6 +562,9 @@ export async function startBridge(): Promise<void> {
       ) {
         pendingConfigRequests.set(message.id, params.items);
       }
+    }
+    if (message.method === 'workspace/workspaceFolders' && message.id !== undefined) {
+      pendingFolderRequests.add(message.id);
     }
     // A fix that needed a variant choice never edited anything, yet the server answers success.
     // Rewrite that answer so the caller does not build on a change that did not happen.

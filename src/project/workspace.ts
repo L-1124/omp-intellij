@@ -17,6 +17,7 @@ import {
   pathsEqual,
   verifyRecordedPathAttribution,
 } from './metadata.js';
+import { findBuildRoot } from './readiness.js';
 
 export function cleanPath(input: unknown): string {
   if (typeof input !== 'string') return String(input ?? '');
@@ -975,17 +976,18 @@ export function workspaceImportOptions(
   projectRoots: readonly string[],
   initializationOptions: Record<string, unknown>,
 ): Record<string, string> {
-  const projects = Array.isArray(initializationOptions.projects)
-    ? initializationOptions.projects.filter((project): project is Record<string, unknown> =>
-        Boolean(project && typeof project === 'object' && typeof project.path === 'string'),
-      )
-    : [];
-  const byId = new Map(
-    projects.map((project) => {
-      const canonical = canonicalizeProject(project.path as string);
-      return [canonical.id, { ...project, path: canonical.canonicalPath }] as const;
-    }),
-  );
+  const byId = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(initializationOptions.projects)) {
+    for (const project of initializationOptions.projects) {
+      if (!project || typeof project.path !== 'string') continue;
+      try {
+        const canonical = canonicalizeProject(project.path);
+        byId.set(canonical.id, { ...project, path: canonical.canonicalPath });
+      } catch {
+        // Only locally resolvable projects have a local import fingerprint.
+      }
+    }
+  }
   const roots = new Set([
     ...projectRoots.map((root) => canonicalizeProject(root).id),
     ...byId.keys(),
@@ -1022,7 +1024,7 @@ export function workspaceImportOptions(
 export async function applyWorkspaceOptions(
   projectRoot?: string,
   initOptions: Record<string, unknown> = {},
-  options: { systemPath?: string; configDir?: string } = {},
+  options: { systemPath?: string; configDir?: string; additionalRoots?: readonly string[] } = {},
 ): Promise<Record<string, unknown>> {
   if (!projectRoot) return initOptions || {};
   const cleanedRoot = cleanPath(projectRoot);
@@ -1035,6 +1037,60 @@ export async function applyWorkspaceOptions(
     const source = await knownWorktreeSource(nativePath, options.systemPath ?? settings.systemPath);
     if (source) initOptions = { ...initOptions, fromWorkspace: source };
   }
+  const roots = new Map([[id, canonical]]);
+  for (const root of options.additionalRoots ?? []) {
+    const project = canonicalizeProject(root);
+    if (!roots.has(project.id)) roots.set(project.id, project);
+  }
+  if (Array.isArray(initOptions.projects)) {
+    const projects: unknown[] = [];
+    const seen = new Set<string>();
+    let changed = false;
+    for (const entry of initOptions.projects) {
+      if (!entry || typeof entry.path !== 'string') {
+        projects.push(entry);
+        continue;
+      }
+      let direct: CanonicalProject;
+      let root: CanonicalProject | undefined;
+      try {
+        direct = canonicalizeProject(entry.path);
+        const build = roots.has(direct.id)
+          ? direct
+          : canonicalizeProject(findBuildRoot(entry.path));
+        root = roots.get(build.id);
+      } catch {
+        projects.push(entry);
+        continue;
+      }
+      if (!root) {
+        projects.push(entry);
+      } else if (seen.has(root.id)) {
+        changed = true;
+      } else {
+        seen.add(root.id);
+        if (direct.id !== root.id) {
+          projects.push({ ...entry, path: root.rootUri });
+          changed = true;
+        } else {
+          projects.push(entry);
+        }
+      }
+    }
+    if (changed) initOptions = { ...initOptions, projects };
+  }
+  for (const project of roots.values()) {
+    initOptions = await applySavedWorkspaceOptions(targetDir, project, initOptions);
+  }
+  return initOptions;
+}
+
+async function applySavedWorkspaceOptions(
+  targetDir: string,
+  canonical: CanonicalProject,
+  initOptions: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { nativePath, id } = canonical;
 
   const saved = await readWorkspaceConfig(targetDir, canonical);
   const hasSavedJdk = Boolean(saved?.javaHome);
@@ -1046,11 +1102,8 @@ export async function applyWorkspaceOptions(
     return initOptions || {};
   }
 
-  const result: Record<string, unknown> = initOptions
-    ? JSON.parse(JSON.stringify(initOptions))
-    : {};
-
-  const projects: Array<Record<string, unknown>> = Array.isArray(result.projects)
+  const result = { ...initOptions };
+  const projects = Array.isArray(result.projects)
     ? [...(result.projects as Array<Record<string, unknown>>)]
     : [];
 

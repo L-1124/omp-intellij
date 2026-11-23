@@ -156,7 +156,8 @@ export interface ConnectionRecord extends StateRecord {
   canonicalPath: string | null;
   closed: boolean;
   isAlive?: boolean;
-  workspaceImportOptions?: Record<string, string>;
+  // A null value tracks a live folder whose import options were not sent in initialize.
+  workspaceImportOptions?: Record<string, string | null>;
 }
 
 export interface ProjectStateResult {
@@ -596,7 +597,7 @@ export function createConnectionState(options: {
         progress?: ProgressPayload | null;
         failure?: FailureDetail | null;
         license?: LicenseSummary;
-        workspaceImportOptions?: Record<string, string>;
+        workspaceImportOptions?: ConnectionRecord['workspaceImportOptions'];
       } = {},
     ) {
       if (closed) return;
@@ -928,6 +929,7 @@ export async function readProjectState(
       }
     }
 
+    const ownsWorkspace = record.workspaceImportOptions?.[targetId] !== undefined;
     let matches = false;
     if (record.canonicalPath) {
       let recordId: string | null = null;
@@ -939,7 +941,7 @@ export async function readProjectState(
       } catch {}
 
       if (recordId !== null && recordId === targetId) {
-        matches = true;
+        matches = record.workspaceImportOptions === undefined || ownsWorkspace;
       } else {
         const a = caseSensitive ? targetCanonical : targetCanonical.toLowerCase();
         const b = caseSensitive ? recordCanonical : recordCanonical.toLowerCase();
@@ -951,11 +953,11 @@ export async function readProjectState(
       }
     }
 
-    if (matches || record.workspaceImportOptions?.[targetId] !== undefined) {
+    if (matches || ownsWorkspace) {
       onConnection?.(record);
     }
 
-    if (matches) {
+    if (matches || ownsWorkspace) {
       matchingConnections.push(record);
     }
   }

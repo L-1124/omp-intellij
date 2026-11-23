@@ -696,7 +696,11 @@ export async function createLspSession(
     initParams.initializationOptions = await applyWorkspaceOptions(
       nativePath,
       (initParams.initializationOptions as Record<string, unknown>) || {},
-      { systemPath, configDir },
+      {
+        systemPath,
+        configDir,
+        additionalRoots: folders?.flatMap((folder) => (folder.uri ? [folder.uri] : [])),
+      },
     );
     await connState.update({
       workspaceImportOptions: workspaceImportOptions(

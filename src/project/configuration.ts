@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { canonicalizeProject } from './metadata.js';
 
@@ -179,16 +179,32 @@ export async function findProjectIdForScope(
   systemPath: string,
   defaultProjectId: string,
   scopeUri?: string,
+  activeRoots?: ReadonlyMap<string, string>,
 ): Promise<string | null> {
-  if (!scopeUri) {
+  if (scopeUri === undefined || scopeUri === null) {
     return defaultProjectId;
   }
+  if (!scopeUri) return null;
+  if (activeRoots && !scopeUri.startsWith('file:') && !isAbsolute(scopeUri)) return null;
 
   let targetPath: string;
   try {
     targetPath = scopeUri.startsWith('file:') ? fileURLToPath(scopeUri) : resolve(scopeUri);
   } catch {
     return null;
+  }
+  if (activeRoots) {
+    let bestId: string | null = null;
+    let bestLength = -1;
+    for (const [id, path] of activeRoots) {
+      if (!isPathInside(targetPath, path)) continue;
+      const length = resolve(path).length;
+      if (length > bestLength || (length === bestLength && id === defaultProjectId)) {
+        bestId = id;
+        bestLength = length;
+      }
+    }
+    return bestId;
   }
 
   const defaultSnap = await loadProjectConfiguration(systemPath, defaultProjectId);
@@ -232,6 +248,7 @@ export async function recordConfigurationItems(
   defaultProjectId: string,
   items: ConfigurationItemQuery[],
   results: unknown[],
+  activeRoots?: ReadonlyMap<string, string>,
 ): Promise<void> {
   const byProject = new Map<string, Record<string, unknown>>();
 
@@ -240,7 +257,12 @@ export async function recordConfigurationItems(
     const val = results[i];
     if (!item) continue;
 
-    const projectId = await findProjectIdForScope(systemPath, defaultProjectId, item.scopeUri);
+    const projectId = await findProjectIdForScope(
+      systemPath,
+      defaultProjectId,
+      item.scopeUri,
+      activeRoots,
+    );
     if (!projectId) continue;
 
     let map = byProject.get(projectId);

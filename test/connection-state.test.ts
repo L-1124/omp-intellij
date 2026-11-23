@@ -12,6 +12,37 @@ import {
 import { canonicalizeProject } from '../src/project/metadata.js';
 import { getProcessInfo } from '../src/server/service.js';
 
+test('unknown secondary import options still expose live ownership until the folder is removed', async (t) => {
+  const systemPath = await mkdtemp(join(tmpdir(), 'omp-conn-dynamic-root-'));
+  const primary = canonicalizeProject(join(systemPath, 'primary'));
+  const secondary = canonicalizeProject(join(systemPath, 'secondary'));
+  const state = createConnectionState({ systemPath, root: primary.nativePath, kind: 'bridge' });
+  t.after(async () => {
+    try {
+      await state.close();
+    } finally {
+      await rm(systemPath, { recursive: true, force: true });
+    }
+  });
+  await state.update({
+    phase: 'ready',
+    workspaceImportOptions: { [primary.id]: 'initial', [secondary.id]: null },
+  });
+  const owners: Array<string | null | undefined> = [];
+  const status = await readProjectState(systemPath, secondary.nativePath, (connection) => {
+    owners.push(connection.workspaceImportOptions?.[secondary.id]);
+  });
+  assert.deepEqual(owners, [null]);
+  assert.equal(status.connectionId, state.connectionId);
+  assert.equal(status.live, true);
+
+  await state.update({ workspaceImportOptions: { [primary.id]: 'initial' } });
+  const removed = await readProjectState(systemPath, secondary.nativePath, () => {
+    assert.fail('removed folder still claimed by owning bridge');
+  });
+  assert.equal(removed.connectionId, undefined);
+});
+
 test('concurrent status reads preserve the final closed record and leave no temporary files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'omp-record-read-close-'));
   const errors: unknown[] = [];
