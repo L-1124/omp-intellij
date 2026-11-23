@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -53,7 +53,7 @@ test('readServerEula reads EULA document and computes correct 16-char lowercase 
   const doc = await readServerEula(bundle.launcher);
 
   assert.equal(doc.executable, bundle.launcher);
-  assert.equal(doc.path, bundle.eulaPath);
+  assert.equal(doc.path, await realpath(bundle.eulaPath));
   assert.equal(doc.text, 'Fake IntelliJ Server EULA Content\nCopyright (c) JetBrains');
 
   const expectedBytes = Buffer.from('Fake IntelliJ Server EULA Content\nCopyright (c) JetBrains');
@@ -114,7 +114,7 @@ test('readServerEula resolves a linked launcher directory to the real bundle EUL
   await symlink(bundle.serverRoot, linkedServer, process.platform === 'win32' ? 'junction' : 'dir');
 
   const doc = await readServerEula(join(linkedServer, 'bin', 'intellij-server.exe'));
-  assert.equal(doc.path, bundle.eulaPath);
+  assert.equal(doc.path, await realpath(bundle.eulaPath));
 });
 
 test('readEulaAcceptance returns empty list when file is missing', async (t) => {

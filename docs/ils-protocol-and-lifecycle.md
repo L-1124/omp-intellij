@@ -190,6 +190,8 @@ ILS 在 `ServerCapabilities.executeCommandProvider.commands` 中发布原生命�
 
 `initializationOptions.fromWorkspace` 控制是否为新连接的工作区从主工作区索引分叉。当当前目录为 Git linked worktree 且主工作区已存在就绪、路径归属匹配的初始化记录时，`applyWorkspaceOptions` 自动注入主工作区的原始 `rootUri`（不确定时回退冷启动；显式传入 `fromWorkspace` 包含 `null` 禁用时优先）。索引分叉通过传递原始源 URI 由服务端完成 RocksDB 分支（Windows 下须保持源 URI 大小写与主工作区初始化时完全一致；成功时日志输出 `Forking the workspace database from ...`，路径未命中时输出 `Not forking ... holds no database`），不直接复制底层 RocksDB 目录。
 
+Git 和 Node 使用不同的路径拼写时（如 Windows 8.3 短路径），用真实路径核对索引来源，但仍将已就绪初始化记录中的原始 `rootUri` 传给服务端。
+
 ### 4.3 启动排障与运行时清理
 
 - **连接超时排查步骤**：

@@ -1073,6 +1073,20 @@ test('linked worktrees only inherit an attributed ready source URI and preserve 
   );
   await writeFile(record, JSON.stringify({ rootUri: pathToFileURL(linked).href }));
   assert.equal((await applyWorkspaceOptions(linked, {}, options)).fromWorkspace, undefined);
+
+  const mainAlias = join(root, 'main-alias');
+  const linkedAlias = join(root, 'linked-alias');
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  await symlink(main, mainAlias, linkType);
+  await symlink(linked, linkedAlias, linkType);
+  const aliasUri = pathToFileURL(mainAlias).href;
+  await recordReadiness(systemPath, mainAlias);
+  await writeFile(
+    join(metadata, `initialize-${canonicalizeProject(mainAlias).id}.json`),
+    JSON.stringify({ rootUri: aliasUri }),
+  );
+  assert.equal((await applyWorkspaceOptions(linkedAlias, {}, options)).fromWorkspace, aliasUri);
+  assert.equal((await applyWorkspaceOptions(mainAlias, {}, options)).fromWorkspace, undefined);
 });
 
 test('process exit releases only this process leases across multiple registered system paths', async () => {

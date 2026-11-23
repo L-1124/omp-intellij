@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -932,44 +932,64 @@ async function knownWorktreeSource(
   const roots = fields
     .filter((field) => field.startsWith('worktree '))
     .map((field) => field.slice(9));
-  const current = roots
-    .filter((root) => {
-      const rel = relative(root, project);
-      return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-    })
-    .sort((a, b) => b.length - a.length)[0];
-  if (!current || !roots[0] || pathsEqual(current, roots[0])) return undefined;
-  const source = resolve(roots[0], relative(current, project));
-  if (!existsSync(source)) return undefined;
-  const canonical = canonicalizeProject(source);
-  const ledger = await getProjectLedger(systemPath, source);
-  if (!ledger?.lastReady) return undefined;
-  let raw: string;
-  try {
-    raw = await readFile(
-      join(systemPath, 'plugin-metadata', `initialize-${canonical.id}.json`),
-      'utf8',
-    );
-  } catch (error: unknown) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
-      return undefined;
-    throw error;
+  const main = roots[0];
+  if (!main) return undefined;
+
+  // Git and Node can spell the same Windows directory with long and short names.
+  const projectPath = await realpath(project).catch(() => null);
+  const mainPath = await realpath(main).catch(() => null);
+  if (!projectPath || !mainPath) return undefined;
+  let currentPath: string | undefined;
+  let suffix = '';
+  for (const root of roots) {
+    const rootPath = await realpath(root).catch(() => null);
+    if (!rootPath || (currentPath && rootPath.length <= currentPath.length)) continue;
+    const rel = relative(rootPath, projectPath);
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue;
+    currentPath = rootPath;
+    suffix = rel;
   }
-  try {
-    const record: unknown = JSON.parse(raw);
-    if (
-      record &&
-      typeof record === 'object' &&
-      'rootUri' in record &&
-      typeof record.rootUri === 'string' &&
-      record.rootUri.startsWith('file:') &&
-      pathsEqual(fileURLToPath(record.rootUri), source)
-    )
-      return record.rootUri;
-  } catch {
-    console.error('intellij: ignoring invalid source-workspace metadata; using a cold index');
+  if (!currentPath || pathsEqual(currentPath, mainPath)) return undefined;
+  const source = resolve(main, suffix);
+  const sourcePath = await realpath(source).catch(() => null);
+  if (!sourcePath) return undefined;
+
+  const candidates = new Set([source, sourcePath]);
+  for (const candidate of candidates) {
+    if (!(await getProjectLedger(systemPath, candidate))?.lastReady) continue;
+    const rootUri = await readSourceUri(candidate);
+    if (rootUri) return rootUri;
+  }
+  // Older records are keyed by the spelling sent in initialize, not the real path.
+  for (const ledger of (await getAllProjectLedgers(systemPath)).values()) {
+    const candidate = ledger.nativePath ?? ledger.canonicalPath;
+    if (!ledger.lastReady || !candidate || candidates.has(candidate)) continue;
+    const candidatePath = await realpath(candidate).catch(() => null);
+    if (!candidatePath || !pathsEqual(candidatePath, sourcePath)) continue;
+    const rootUri = await readSourceUri(candidate);
+    if (rootUri) return rootUri;
   }
   return undefined;
+
+  async function readSourceUri(candidate: string): Promise<string | undefined> {
+    const { id } = canonicalizeProject(candidate);
+    let raw: string;
+    try {
+      raw = await readFile(join(systemPath, 'plugin-metadata', `initialize-${id}.json`), 'utf8');
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    try {
+      const { rootUri } = JSON.parse(raw) as { rootUri?: unknown };
+      if (typeof rootUri !== 'string' || !rootUri.startsWith('file:')) return undefined;
+      const recordedPath = await realpath(fileURLToPath(rootUri));
+      if (sourcePath && pathsEqual(recordedPath, sourcePath)) return rootUri;
+    } catch {
+      console.error('intellij: ignoring invalid source-workspace metadata; using a cold index');
+    }
+    return undefined;
+  }
 }
 
 export function workspaceImportOptions(
