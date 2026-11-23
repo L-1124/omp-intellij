@@ -9,6 +9,20 @@ import { canonicalizeProject } from '../src/project/metadata.js';
 import type { InstallResult } from '../src/server/install.js';
 import { createMockCtx, createMockPi } from './helpers.js';
 
+test('restart completion requires a flag prefix and nested keywords are case-insensitive', () => {
+  const pi = createMockPi();
+  extension(pi);
+  const complete = pi.getCommand('intellij')?.getArgumentCompletions;
+  assert.ok(complete);
+  assert.equal(complete('restart '), null);
+  assert.equal(complete('restart --f')?.[0]?.value, 'restart --force');
+  assert.equal(complete('workspace ENV UN')?.[0]?.value, 'workspace env unset');
+  assert.equal(complete('debug ST')?.[0]?.value, 'debug status');
+  assert.equal(complete('eula VI')?.[0]?.value, 'eula view');
+  assert.equal(complete('WORKSPACE ENV '), null);
+  assert.equal(complete('restart --F'), null);
+});
+
 test('JDK selection saves exactly the selected host label and cancellation leaves it unchanged', async () => {
   const root = await mkdtemp(join(tmpdir(), 'omp-jdk-select-'));
   const javaHome = join(root, 'Java 21 (Azul)');

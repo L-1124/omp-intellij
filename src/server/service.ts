@@ -1,6 +1,17 @@
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import {
+  access,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -258,8 +269,108 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 function normalizePathForPlatform(p: string): string {
-  const resolved = resolve(p).replace(/\\/g, '/');
+  const resolved = resolve(p);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function windowsArgv(commandLine: string): string[] | null {
+  // Windows treats argv[0] specially; backslashes don't escape its quotes.
+  const match = /^(?:"[^"]*"|[^ \t"])+/.exec(commandLine);
+  if (!match) return null;
+  const argv = [match[0]];
+  let i = match[0].length;
+  while (i < commandLine.length) {
+    while (commandLine[i] === ' ' || commandLine[i] === '\t') i++;
+    if (i === commandLine.length) break;
+    let arg = '';
+    let quoted = false;
+    while (i < commandLine.length) {
+      if (!quoted && (commandLine[i] === ' ' || commandLine[i] === '\t')) break;
+      const start = i;
+      while (commandLine[i] === '\\') i++;
+      const slashes = i - start;
+      if (commandLine[i] !== '"') {
+        arg += commandLine.slice(start, i);
+        if (slashes === 0) arg += commandLine[i++];
+        continue;
+      }
+      arg += '\\'.repeat(Math.floor(slashes / 2));
+      i++;
+      if (slashes % 2 !== 0 || (quoted && commandLine[i] === '"')) {
+        arg += '"';
+        if (slashes % 2 === 0) i++;
+      } else {
+        quoted = !quoted;
+      }
+    }
+    if (quoted) return null;
+    argv.push(arg);
+  }
+  return argv;
+}
+
+async function darwinArgv(pid: number): Promise<string[] | null> {
+  // ps flattens arguments. Query KERN_PROCARGS2 through macOS's system Ruby instead.
+  const script = `
+    require 'fiddle/import'
+    module KernelArgs
+      extend Fiddle::Importer
+      dlload Fiddle::Handle::DEFAULT
+      extern 'int sysctl(void*, unsigned int, void*, void*, void*, size_t)'
+    end
+    ctl_kern = 1
+    kern_procargs2 = 49
+    mib = [ctl_kern, kern_procargs2, Integer(ARGV.fetch(0))].pack('i*')
+    size = [0].pack('J')
+    abort unless KernelArgs.sysctl(mib, 3, nil, size, nil, 0) == 0
+    length = size.unpack1('J')
+    data = "\\0" * length
+    abort unless KernelArgs.sysctl(mib, 3, data, size, nil, 0) == 0
+    abort unless size.unpack1('J') == length
+    argc = data.unpack1('i')
+    path_end = data.index("\\0", 4)
+    abort unless argc && argc > 0 && path_end
+    start = path_end + 1
+    start += 1 while data.getbyte(start) == 0
+    abort unless start < length
+    finish = start
+    argc.times do
+      ending = data.index("\\0", finish)
+      abort unless ending
+      finish = ending + 1
+    end
+    STDOUT.binmode.write(data.byteslice(start, finish - start))
+  `;
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/ruby', ['-e', script, String(pid)], {
+      encoding: 'buffer',
+      timeout: 5000,
+    });
+    if (stdout.at(-1) !== 0) return null;
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+      .decode(stdout.subarray(0, -1))
+      .split('\0');
+  } catch {
+    return null;
+  }
+}
+
+function matchesSystemPath(argv: string[] | null, expectedSystemPath: string): boolean {
+  const flag = '--system-path';
+  const windows = process.platform === 'win32';
+  let value: string | undefined;
+  for (let i = 1; argv && i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--') break;
+    const option = windows ? arg.slice(0, flag.length + 1).toLowerCase() : arg;
+    if (option === flag) return false;
+    if (!option.startsWith(`${flag}=`)) continue;
+    if (value !== undefined || !arg.startsWith(`${flag}=`)) return false;
+    value = arg.slice(flag.length + 1);
+  }
+  if (value === undefined) return false;
+  if (windows) value = value.replaceAll('/', '\\').toLowerCase();
+  return value === expectedSystemPath;
 }
 
 export interface ProcessIdentity {
@@ -267,6 +378,7 @@ export interface ProcessIdentity {
   startTime: number;
   executable: string;
   commandLine: string;
+  argv?: string[] | null;
 }
 
 export async function getProcessInfo(pid: number): Promise<ProcessIdentity | null> {
@@ -297,19 +409,20 @@ export async function getProcessInfo(pid: number): Promise<ProcessIdentity | nul
         });
       }
       if (res.stdout) {
-        const text = res.stdout.trim();
+        const text = res.stdout.replace(/\r?\n$/, '');
         const firstTab = text.indexOf('\t');
         const secondTab = firstTab !== -1 ? text.indexOf('\t', firstTab + 1) : -1;
         if (firstTab !== -1 && secondTab !== -1) {
           const startTime = Number(text.slice(0, firstTab).trim());
           const executable = text.slice(firstTab + 1, secondTab).trim();
-          const commandLine = text.slice(secondTab + 1).trim();
+          const commandLine = text.slice(secondTab + 1);
           if (Number.isFinite(startTime) && startTime > 0) {
             return {
               pid,
               startTime,
               executable,
               commandLine,
+              argv: windowsArgv(commandLine),
             };
           }
         }
@@ -330,9 +443,17 @@ export async function getProcessInfo(pid: number): Promise<ProcessIdentity | nul
         try {
           executable = await readlink(`/proc/${pid}/exe`);
         } catch {}
-        const cmdRaw = await readFile(`/proc/${pid}/cmdline`, 'utf8');
-        const commandLine = cmdRaw.replace(/\0/g, ' ').trim();
-        return { pid, startTime, executable, commandLine };
+        const cmdRaw = await readFile(`/proc/${pid}/cmdline`);
+        const commandLine = cmdRaw.toString('utf8').replace(/\0/g, ' ').trim();
+        let argv: string[] | null = null;
+        if (cmdRaw.at(-1) === 0) {
+          try {
+            argv = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+              .decode(cmdRaw.subarray(0, -1))
+              .split('\0');
+          } catch {}
+        }
+        return { pid, startTime, executable, commandLine, argv };
       } catch {}
     }
 
@@ -547,15 +668,8 @@ export async function verifyServerOwnership(
     };
   }
 
-  const liveCmd =
-    process.platform === 'win32' ? procInfo.commandLine.toLowerCase() : procInfo.commandLine;
-  const normalizedCmd = liveCmd.replace(/\\/g, '/');
-  const hasExactSystemPath =
-    normalizedCmd.includes(`--system-path=${expectedSystemPath}`) ||
-    normalizedCmd.includes(`--system-path="${expectedSystemPath}"`) ||
-    normalizedCmd.includes(`--system-path='${expectedSystemPath}'`);
-
-  if (!hasExactSystemPath) {
+  const argv = process.platform === 'darwin' ? await darwinArgv(pid) : (procInfo.argv ?? null);
+  if (!matchesSystemPath(argv, expectedSystemPath)) {
     return {
       status: 'running-unverified',
       pid,
@@ -710,6 +824,7 @@ export interface RestartServerOptions {
   systemPath?: string;
   timeoutMs?: number;
   executable?: string;
+  force?: boolean;
 }
 
 export interface RestartServerResult {
@@ -725,11 +840,14 @@ async function internalStopServer(
     timeoutMs: number;
   },
   action: 'stop' | 'restart' = 'stop',
+  allowActiveConsumers = false,
 ): Promise<StopServerResult> {
   const { systemPath, timeoutMs } = options;
 
-  const activeLeases = await getActiveLeases(systemPath);
-  const activeDebugSessions = await listAllActiveDebugSessions(systemPath);
+  const activeLeases = allowActiveConsumers ? [] : await getActiveLeases(systemPath);
+  const activeDebugSessions = allowActiveConsumers
+    ? []
+    : await listAllActiveDebugSessions(systemPath);
 
   if (activeLeases.length > 0 || activeDebugSessions.length > 0) {
     const blocking: string[] = [];
@@ -844,7 +962,8 @@ async function internalStartServer(
   },
   _lockHandle: LockHandle,
 ): Promise<{ socket: net.Socket; pid: number; endpoint: ServerEndpoint }> {
-  const { systemPath, timeoutMs } = options;
+  const { timeoutMs } = options;
+  const systemPath = resolve(options.systemPath);
   const startConfig = await resolveStartConfiguration({ executable: options.executable });
   const executable = startConfig.executable;
   const eulaHash = options.eulaHash ?? (await requireAcceptedEula(executable)).hash;
@@ -940,9 +1059,26 @@ export async function restartServer(
     async (lockHandle) => {
       // Validate replacement before stopping a healthy server.
       const startConfig = await resolveStartConfiguration({ executable: options.executable });
+      if (!(await stat(startConfig.executable)).isFile()) {
+        throw new Error(
+          `Replacement server launcher "${startConfig.executable}" is not a regular file`,
+        );
+      }
+      if (process.platform !== 'win32') {
+        await access(startConfig.executable, constants.X_OK).catch((cause: unknown) => {
+          throw new Error(
+            `Replacement server launcher "${startConfig.executable}" is not executable`,
+            { cause },
+          );
+        });
+      }
       const eulaDoc = await requireAcceptedEula(startConfig.executable);
 
-      const stopResult = await internalStopServer({ systemPath, timeoutMs }, 'restart');
+      const stopResult = await internalStopServer(
+        { systemPath, timeoutMs },
+        'restart',
+        options.force === true,
+      );
 
       // 5. Start new server
       const startResult = await internalStartServer(

@@ -29,7 +29,10 @@ interface FakeServer {
   cleanup: () => Promise<void>;
 }
 
-async function startFakeServer(systemPath: string): Promise<FakeServer> {
+async function startFakeServer(
+  systemPath: string,
+  argv = [`--system-path=${resolve(systemPath)}`],
+): Promise<FakeServer> {
   await mkdir(systemPath, { recursive: true });
   const portFile = join(systemPath, 'server.port');
   const ownerFile = join(systemPath, 'omp-server.json');
@@ -50,7 +53,7 @@ async function startFakeServer(systemPath: string): Promise<FakeServer> {
   const scriptFile = join(systemPath, 'fake-server.mjs');
   await writeFile(scriptFile, script, 'utf8');
 
-  const child = spawn(process.execPath, [scriptFile, `--system-path=${resolve(systemPath)}`], {
+  const child = spawn(process.execPath, [scriptFile, ...argv], {
     detached: true,
     windowsHide: true,
     stdio: 'ignore',
@@ -301,6 +304,45 @@ test('stopServer: refuses to stop foreign live owner (command line does not matc
   assert.equal(isProcessAlive(process.pid), true);
 });
 
+test('stopServer: refuses a cache-other process claiming the cache system path', async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-'));
+  const cache = join(tempRoot, 'cache');
+  const fake = await startFakeServer(cache, [`--system-path=${join(tempRoot, 'cache-other')}`]);
+  t.after(async () => {
+    await fake.cleanup();
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    () => stopServer({ systemPath: cache }),
+    /Refusing to stop unverified server process.*command line does not contain exact --system-path/i,
+  );
+  assert.equal((await endpoint(cache)).port, fake.port);
+});
+
+test('stopServer: rejects embedded, duplicate, and positional system path arguments', async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-'));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const cache = join(tempRoot, 'cache with spaces');
+  const flag = `--system-path=${cache}`;
+  for (const argv of [
+    [flag],
+    [`--description=contains "${flag}" here`],
+    [flag, `--system-path=${cache}-other`],
+    ['--', flag],
+  ]) {
+    const fake = await startFakeServer(cache, argv);
+    try {
+      const expected =
+        argv.length === 1 && argv[0] === flag ? 'running-owned' : 'running-unverified';
+      assert.equal((await verifyServerOwnership(cache)).status, expected);
+    } finally {
+      await fake.cleanup();
+      await rm(cache, { recursive: true, force: true });
+    }
+  }
+});
+
 test('stopServer: refuses to stop legacy PID-only owner record without token/systemPath/startTime', async (t) => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-legacy-'));
   t.after(async () => {
@@ -545,7 +587,7 @@ test('restartServer: preserves EULA gate and preserves old running server on rej
 
     // Attempting to restart without accepted EULA must reject with EULA error
     await assert.rejects(
-      () => restartServer({ systemPath: tempRoot, executable: exe }),
+      () => restartServer({ systemPath: tempRoot, executable: exe, force: true }),
       /EULA_NOT_ACCEPTED|has not been accepted/i,
     );
 
@@ -568,7 +610,45 @@ test('restartServer: preserves EULA gate and preserves old running server on rej
   }
 });
 
-test('restartServer: stops old server and launches new server under lifecycle lock, preserving data', async (t) => {
+for (const launcher of [
+  { kind: 'directory', error: /not a regular file/ },
+  ...(process.platform === 'win32'
+    ? []
+    : [{ kind: 'non-executable file', error: /not executable/ }]),
+]) {
+  test(`restartServer: preserves the owned server when the replacement is a ${launcher.kind}`, async (t) => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-launcher-'));
+    const configFile = join(tempRoot, 'agent', 'intellij.json');
+    const originalConfig = process.env.OMP_INTELLIJ_CONFIG;
+    process.env.OMP_INTELLIJ_CONFIG = configFile;
+    let fake: FakeServer | undefined;
+    t.after(async () => {
+      if (originalConfig === undefined) delete process.env.OMP_INTELLIJ_CONFIG;
+      else process.env.OMP_INTELLIJ_CONFIG = originalConfig;
+      await fake?.cleanup();
+      await rm(tempRoot, { recursive: true, force: true });
+    });
+
+    const executable = join(tempRoot, 'bin', 'replacement.exe');
+    await mkdir(join(tempRoot, 'bin'));
+    if (launcher.kind === 'directory') await mkdir(executable);
+    else await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+    await writeFile(join(tempRoot, 'EULA.txt'), 'JetBrains Server User Agreement Test Fixture');
+    await acceptServerEula(await readServerEula(executable), { configFile });
+
+    fake = await startFakeServer(tempRoot);
+    const before = await verifyServerOwnership(tempRoot);
+    assert.equal(before.status, 'running-owned');
+    await assert.rejects(
+      () => restartServer({ systemPath: tempRoot, executable, force: true }),
+      launcher.error,
+    );
+    assert.deepEqual(await verifyServerOwnership(tempRoot), before);
+    assert.equal((await endpoint(tempRoot)).port, fake.port);
+  });
+}
+
+test('restartServer: force replaces only an owned server despite live consumers and preserves data', async (t) => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'omp-lifecycle-restart-'));
   const configDir = join(tempRoot, 'agent');
   await mkdir(configDir, { recursive: true });
@@ -606,11 +686,42 @@ test('restartServer: stops old server and launches new server under lifecycle lo
     const doc = await readServerEula(exe);
     await acceptServerEula(doc, { configFile });
 
-    // Restart server
+    const lease = await createLease(tempRoot, { kind: 'bridge', projectPath: dataDir });
+    const debug = await createDebugControl({
+      systemPath: tempRoot,
+      projectRoot: dataDir,
+      getStatus: () => ({
+        phase: 'connecting-lsp',
+        mode: 'launch',
+        projectRoot: dataDir,
+        pendingRequests: 0,
+      }),
+      recover: async () => {},
+    });
+    t.after(() => debug.close());
+    await assert.rejects(
+      () => restartServer({ systemPath: tempRoot, executable: exe }),
+      /active connection lease\(s\): bridge.*active debug session\(s\)/,
+    );
+
+    const ownerFile = join(tempRoot, 'omp-server.json');
+    const oldOwner = await readFile(ownerFile, 'utf8');
+    await writeFile(ownerFile, JSON.stringify({ ...JSON.parse(oldOwner), processStartTime: 0 }));
+    try {
+      await assert.rejects(
+        () => restartServer({ systemPath: tempRoot, executable: exe, force: true }),
+        /Refusing to restart unverified server process/,
+      );
+      assert.equal(isProcessAlive(oldPid), true);
+    } finally {
+      await writeFile(ownerFile, oldOwner);
+    }
+
     const restartResult = await restartServer({
       systemPath: tempRoot,
       executable: exe,
       timeoutMs: 8000,
+      force: true,
     });
 
     assert.equal(restartResult.restarted, true);
@@ -631,11 +742,12 @@ test('restartServer: stops old server and launches new server under lifecycle lo
     assert.equal(cachedData, 'important index cache data');
 
     // Verify omp-server.json records pluginPaths as [] when none configured
-    const ownerFile = join(tempRoot, 'omp-server.json');
     const ownerRecord = JSON.parse(await readFile(ownerFile, 'utf8')) as ServerOwnerRecord;
     assert.deepEqual(ownerRecord.pluginPaths, []);
 
     // Clean up new server
+    await lease.release();
+    await debug.close();
     await stopServer({ systemPath: tempRoot });
     assert.equal(isProcessAlive(newPidToClean), false);
   } finally {

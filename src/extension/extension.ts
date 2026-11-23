@@ -87,6 +87,49 @@ export function parseJdkPath(input: unknown): string {
 
 const STATUS_KEY = 'intellij-index';
 
+const COMMAND_COMPLETIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  '': {
+    status: 'Show server and project status',
+    start: 'Start the shared IntelliJ server',
+    stop: 'Stop the shared IntelliJ server when idle',
+    restart: 'Restart the shared IntelliJ server when idle',
+    doctor: 'Diagnose setup and connection problems',
+    install: 'Install the bundled IntelliJ server',
+    versions: 'List installed IntelliJ server versions',
+    use: 'Select an installed server version',
+    cache: 'Inspect the workspace cache',
+    prune: 'Preview stale workspace cache cleanup',
+    eula: 'View or accept the server license agreement',
+    workspace: 'Manage project JDK, environment, and imports',
+    debug: 'Inspect or recover debug sessions',
+  },
+  restart: { '--force': 'Restart even if active LSP or debug connections will be interrupted' },
+  install: { '--dir': 'Install into the specified directory' },
+  prune: { '--apply': 'Delete eligible workspace caches after confirmation' },
+  eula: {
+    status: 'Show license acceptance status',
+    view: 'Show the server license agreement',
+    accept: 'Accept the agreement identified by the supplied hash',
+  },
+  workspace: {
+    status: 'Show project configuration and import status',
+    list: 'List known projects',
+    jdks: 'List discovered JDKs',
+    jdk: 'Select or set the project JDK',
+    reload: 'Reimport the project',
+    env: 'Manage project environment variables',
+  },
+  'workspace env': {
+    view: 'Show saved environment settings',
+    set: 'Save a project environment variable',
+    unset: 'Remove a saved project environment variable',
+  },
+  debug: {
+    status: 'List debug sessions for the current project',
+    recover: 'Recover a debug session',
+  },
+};
+
 function projectLabel(state: ProjectStateResult, fallbackRoot?: string, cwd?: string): string {
   if (state?.canonicalPath) return state.canonicalPath;
   return fallbackRoot || cwd || '';
@@ -536,6 +579,35 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
   pi.registerCommand('intellij', {
     description:
       'IntelliJ language server, project index, cache, pruning, workspace and debug management',
+    getArgumentCompletions(argumentPrefix) {
+      const text = argumentPrefix.trimStart().replace(/\s+/g, ' ');
+      const separator = text.lastIndexOf(' ');
+      const level = text.slice(0, Math.max(0, separator)).split(' ');
+      if (level[0] === 'workspace' || level[0] === 'debug' || level[0] === 'eula') {
+        if (level[1]) level[1] = level[1].toLowerCase();
+      }
+      const parent = level.join(' ');
+      const fragment = text.slice(separator + 1);
+      if (parent === 'restart' && !fragment.startsWith('-')) return null;
+      const prefix =
+        parent === 'workspace' ||
+        parent === 'workspace env' ||
+        parent === 'debug' ||
+        parent === 'eula'
+          ? fragment.toLowerCase()
+          : fragment;
+      if (!Object.hasOwn(COMMAND_COMPLETIONS, parent)) return null;
+      const candidates = COMMAND_COMPLETIONS[parent];
+
+      const items = Object.entries(candidates)
+        .filter(([candidate]) => candidate.startsWith(prefix))
+        .map(([candidate, description]) => ({
+          label: candidate,
+          value: parent ? `${parent} ${candidate}` : candidate,
+          description,
+        }));
+      return items.length ? items : null;
+    },
     handler: async (rawArgs: string, ctx: ExtensionContext) => {
       const commandGeneration = generation;
       const args = rawArgs.trim();
@@ -547,8 +619,10 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         socket.destroy();
         if (generation === commandGeneration && !disposed) startObserver(ctx);
       } else if (sub === 'stop' || sub === 'restart') {
-        if (parts.length !== 1) {
-          ctx.ui?.notify(`Usage: /intellij ${sub}`, 'warning');
+        const force = sub === 'restart' && parts.length === 2 && parts[1] === '--force';
+        if (parts.length !== 1 && !force) {
+          const usage = sub === 'restart' ? 'restart [--force]' : 'stop';
+          ctx.ui?.notify(`Usage: /intellij ${usage}`, 'warning');
           return;
         }
         try {
@@ -561,9 +635,12 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
               'info',
             );
           } else {
-            const result = await lifecycleApi.restartServer({ systemPath: activeSystemPath });
+            const result = await lifecycleApi.restartServer({
+              systemPath: activeSystemPath,
+              force,
+            });
             ctx.ui?.notify(
-              `IntelliJ shared server restarted: ${result.endpoint.host}:${result.endpoint.port} (PID ${result.pid}); caches and workspace configuration retained.`,
+              `IntelliJ shared server ${force ? 'force-restarted' : 'restarted'}: ${result.endpoint.host}:${result.endpoint.port} (PID ${result.pid}); caches and workspace configuration retained.${force && result.previousPid !== null ? ' Existing LSP and debug connections to the old server were interrupted.' : ''}`,
               'info',
             );
           }
@@ -1578,7 +1655,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|stop|restart|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop|restart [--force]|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }

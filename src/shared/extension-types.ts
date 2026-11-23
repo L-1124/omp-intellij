@@ -17,7 +17,8 @@ export interface ExtensionContext extends Pick<SDKContext, 'cwd'> {
   ui?: ExtensionUI;
 }
 
-export interface CommandDefinition {
+export interface CommandDefinition
+  extends Pick<Parameters<ExtensionAPI['registerCommand']>[1], 'getArgumentCompletions'> {
   description: string;
   handler(rawArgs: string, ctx: ExtensionContext): Promise<void>;
 }
