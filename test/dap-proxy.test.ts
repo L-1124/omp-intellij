@@ -3,6 +3,7 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -20,6 +21,7 @@ import {
   normalizeSourcePaths,
   resolveSourceFile,
 } from '../src/debug/dap-proxy.js';
+import { createLspSession, runViaDap } from '../src/debug/run-core.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
 import { createDapTestHarness, type DapRequest, type DapTestHarness } from './dap-fixture.js';
 
@@ -1317,9 +1319,14 @@ test('initial capabilities report false defaults while backend capabilities and 
       capabilities.supportsConfigurationDoneRequest,
     true,
   );
-  assert.equal('supportSuspendDebuggee' in capabilities && capabilities.supportSuspendDebuggee, false);
+  assert.equal(
+    'supportSuspendDebuggee' in capabilities && capabilities.supportSuspendDebuggee,
+    false,
+  );
   assert.deepEqual(
-    'exceptionBreakpointFilters' in capabilities ? capabilities.exceptionBreakpointFilters : undefined,
+    'exceptionBreakpointFilters' in capabilities
+      ? capabilities.exceptionBreakpointFilters
+      : undefined,
     [{ filter: 'uncaught', label: 'Uncaught' }],
   );
   h.emit('capabilities', {
@@ -1501,9 +1508,7 @@ test('cancel maps in-flight client requestId to backend seq, preserves progressI
   assert.equal(cancelReq?.arguments?.progressId, 'p-1');
 
   h.respond(backendThreads, { threads: [{ id: 1, name: 'main' }] });
-  const threadsRes = await h.waitFor(
-    (m) => m.type === 'response' && m.request_seq === threadsSeq,
-  );
+  const threadsRes = await h.waitFor((m) => m.type === 'response' && m.request_seq === threadsSeq);
   assert.equal(threadsRes.type === 'response' && threadsRes.success, true);
 
   const cancelCountBefore = h.backendRequests.filter((r) => r.command === 'cancel').length;
@@ -1540,9 +1545,7 @@ test('cancel matching startup seq before backend mapping aborts startup while mi
   assert.equal((await h.request('cancel', { requestId: launchSeq + 50 })).success, true);
   const cancelRes = await h.request('cancel', { requestId: launchSeq });
   assert.equal(cancelRes.success, true);
-  const launchRes = await h.waitFor(
-    (m) => m.type === 'response' && m.request_seq === launchSeq,
-  );
+  const launchRes = await h.waitFor((m) => m.type === 'response' && m.request_seq === launchSeq);
   assert.equal(launchRes.type === 'response' && launchRes.success, false);
   assert.equal(
     h.backendRequests.some((r) => r.command === 'cancel'),
@@ -1573,14 +1576,10 @@ test('cancel matching startup seq after backend mapping forwards mapped seq and 
   const backendCancel = await cancelForwarded.promise;
   assert.equal(backendCancel.arguments?.requestId, backendLaunch.seq);
   assert.equal(backendCancel.arguments?.progressId, 'p-launch');
-  const cancelRes = await h.waitFor(
-    (m) => m.type === 'response' && m.request_seq === cancelSeq,
-  );
+  const cancelRes = await h.waitFor((m) => m.type === 'response' && m.request_seq === cancelSeq);
   assert.equal(cancelRes.type === 'response' && cancelRes.success, true);
   h.respond(backendLaunch, undefined, false, 'Cancelled');
-  const launchRes = await h.waitFor(
-    (m) => m.type === 'response' && m.request_seq === launchSeq,
-  );
+  const launchRes = await h.waitFor((m) => m.type === 'response' && m.request_seq === launchSeq);
   assert.equal(launchRes.type === 'response' && launchRes.success, false);
   assert.match(launchRes.type === 'response' ? (launchRes.message ?? '') : '', /Cancelled/);
   assert.equal(await h.closed, 1);
@@ -1611,7 +1610,10 @@ test('EOF during launch waits for native forced termination before disconnecting
   const terminationTurn = Promise.withResolvers<void>();
   setImmediate(terminationTurn.resolve);
   await terminationTurn.promise;
-  assert.equal(h.backendRequests.some((request) => request.command === 'disconnect'), false);
+  assert.equal(
+    h.backendRequests.some((request) => request.command === 'disconnect'),
+    false,
+  );
   h.respond(launch, undefined, false, 'Terminated');
   h.respond(terminate);
   assert.equal(await h.closed, 0);
@@ -1620,5 +1622,93 @@ test('EOF during launch waits for native forced termination before disconnecting
       .filter((request) => ['cancel', 'terminate', 'disconnect'].includes(request.command))
       .map((request) => request.command),
     ['terminate', 'disconnect'],
+  );
+});
+
+const malformedFrame = 'Content-Length: 0\r\n\r\n';
+
+async function listenForMalformedReply(t: TestContext): Promise<number> {
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on('error', () => {});
+    socket.once('close', () => sockets.delete(socket));
+    socket.once('data', () => socket.write(malformedFrame));
+  });
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    if (!server.listening) return;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    server.close(() => resolve());
+    await promise;
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return (server.address() as net.AddressInfo).port;
+}
+
+test('malformed DAP stdin fails a pending attach exactly once', { timeout: 5000 }, async (t) => {
+  const initializing = Promise.withResolvers<void>();
+  const h = await createDapTestHarness(t, {
+    onDapRequest(request) {
+      if (request.command === 'initialize') {
+        initializing.resolve();
+        return true;
+      }
+    },
+  });
+  const seq = h.send('attach', { port: 5005 });
+  await initializing.promise;
+  h.stdin.write(malformedFrame);
+  assert.equal(await h.closed, 1);
+  const responses = h.messages.filter((m) => m.type === 'response' && m.request_seq === seq);
+  assert.equal(responses.length, 1);
+  const response = responses[0];
+  assert.ok(response?.type === 'response');
+  assert.equal(response.success, false);
+  assert.match(response.message ?? '', /Invalid DAP client data: Invalid LSP frame length/);
+});
+
+test('malformed DAP backend data fails a pending attach', { timeout: 5000 }, async (t) => {
+  const port = await listenForMalformedReply(t);
+  const h = await createDapTestHarness(t, {
+    onLspRequest(method, params) {
+      if (
+        method === 'workspace/executeCommand' &&
+        params &&
+        typeof params === 'object' &&
+        'command' in params &&
+        params.command === 'start_debug_server'
+      ) {
+        return port;
+      }
+    },
+  });
+  const response = await h.request('attach', { port: 5005 });
+  assert.equal(response.success, false);
+  assert.match(response.message ?? '', /Invalid DAP backend data: Invalid LSP frame length/);
+  assert.equal(await h.closed, 1);
+});
+
+test('malformed LSP data rejects runner initialization', { timeout: 5000 }, async (t) => {
+  const port = await listenForMalformedReply(t);
+  const root = await mkdtemp(join(tmpdir(), 'omp-intellij-malformed-lsp-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const socket = net.createConnection({ host: '127.0.0.1', port });
+  t.after(() => {
+    socket.destroy();
+  });
+  await once(socket, 'connect');
+  await assert.rejects(
+    createLspSession(root, { socket, systemPath: join(root, 'system') }),
+    /Invalid LSP frame length/,
+  );
+});
+
+test('malformed DAP backend data rejects a native run', { timeout: 5000 }, async (t) => {
+  const port = await listenForMalformedReply(t);
+  await assert.rejects(
+    runViaDap({ port, launchConfig: {} }),
+    /Invalid DAP backend data: Invalid LSP frame length/,
   );
 });

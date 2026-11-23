@@ -576,7 +576,19 @@ export async function createLspSession(
     }
   }
 
-  socket.on('data', frameParser(handleMessage));
+  const parseData = frameParser(handleMessage);
+  socket.on('data', (chunk: Buffer) => {
+    if (isClosed) return;
+    try {
+      parseData(chunk);
+    } catch (error: unknown) {
+      void cleanup(error instanceof Error ? error : new Error(String(error)), {
+        stage:
+          protocolState.failure?.stage ??
+          (protocolState.phase === 'connecting' ? 'initialize' : serverReady ? 'request' : 'index'),
+      }).catch(() => {});
+    }
+  });
   socket.once('error', (err: Error) => void cleanup(err).catch(() => {}));
   socket.once('close', () => void cleanup().catch(() => {}));
 
@@ -1080,7 +1092,22 @@ export async function runViaDap(options: {
     }
   }
 
-  socket.on('data', frameParser(onDapMessage));
+  const parseData = frameParser(onDapMessage);
+  socket.on('data', (chunk: Buffer) => {
+    try {
+      parseData(chunk);
+    } catch (error: unknown) {
+      if (finished) return;
+      socket.destroy();
+      nativeDisconnected.resolve();
+      void performTermination(
+        new Error(
+          `Invalid DAP backend data: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        ),
+      );
+    }
+  });
 
   socket.once('connect', () => {
     sendDap({

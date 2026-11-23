@@ -497,7 +497,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
               await sendNativeRequest('disconnect', disconnectArgs ?? {}, 15000);
             } catch (error: unknown) {
               if (!(error instanceof NativeDisconnectCompleted)) {
-                cleanupError = error instanceof Error ? error.message : String(error);
+                cleanupError ??= error instanceof Error ? error.message : String(error);
                 output(`Android debugger cleanup failed: ${cleanupError}\n`);
                 exitCode = 1;
               }
@@ -540,7 +540,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
           } catch (error: unknown) {
             // IntelliJ may close its DAP transport after teardown before flushing the response.
             if (!(error instanceof NativeDisconnectCompleted)) {
-              cleanupError = `IntelliJ debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+              cleanupError ??= `IntelliJ debugger cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
               output(`${cleanupError}\n`);
               exitCode = 1;
             }
@@ -577,7 +577,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         phase = 'failed';
         exitCode = 1;
       });
-      finalExitCode = exitCode;
+      finalExitCode = cleanupError ? 1 : exitCode;
       finishStartup(
         false,
         undefined,
@@ -586,7 +586,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       if (closingRequest) respond(closingRequest, !cleanupError, undefined, cleanupError);
       if (!deferExit) {
         if (sessionMode) sendTerminated();
-        onExit(exitCode);
+        onExit(finalExitCode);
       }
     })();
     return shutdownPromise;
@@ -750,7 +750,10 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     return session;
   }
 
-  async function startAndroidDebugServer(session: LspSession, signal: AbortSignal): Promise<number> {
+  async function startAndroidDebugServer(
+    session: LspSession,
+    signal: AbortSignal,
+  ): Promise<number> {
     const result = await session.request(
       'workspace/executeCommand',
       {
@@ -777,7 +780,9 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
 
   async function connectBackend(isAndroid = false): Promise<void> {
     if (!lspSession) throw new Error('LSP session not active');
-    const startCommand = isAndroid ? 'org.intellij.android.debug.startServer' : 'start_debug_server';
+    const startCommand = isAndroid
+      ? 'org.intellij.android.debug.startServer'
+      : 'start_debug_server';
     const provider = lspSession.serverCapabilities?.executeCommandProvider;
     const commands =
       provider && typeof provider === 'object' && !Array.isArray(provider) && 'commands' in provider
@@ -836,7 +841,22 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     dapSocket = socket;
     const closure = Promise.withResolvers<boolean>();
     backendClosed = closure.promise;
-    socket.on('data', frameParser(handleDebugServerMessage));
+    const parseBackendData = frameParser(handleDebugServerMessage);
+    socket.on('data', (chunk: Buffer) => {
+      try {
+        parseBackendData(chunk);
+      } catch (error: unknown) {
+        const failure = new Error(
+          `Invalid DAP backend data: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+        if (isShuttingDown) cleanupError ??= failure.message;
+        else debugError ??= failure.message;
+        socket.destroy(failure);
+        output(`${failure.message}\n`);
+        void shutdown(1);
+      }
+    });
     let backendEndedCleanly = false;
     socket.once('end', () => {
       backendEndedCleanly = true;
@@ -1108,7 +1128,12 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       }
       if (hasRequestId) {
         const nativeRequestId = clientSeqToNativeSeq.get(rawRequestId);
-        if (nativeRequestId !== undefined && backendInitialized && dapSocket && !dapSocket.destroyed) {
+        if (
+          nativeRequestId !== undefined &&
+          backendInitialized &&
+          dapSocket &&
+          !dapSocket.destroyed
+        ) {
           forwardClientRequest(request, { ...args, requestId: nativeRequestId });
           return;
         }
@@ -1220,115 +1245,125 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       let attachTimeout = 30000;
       if (!isAndroid) {
         if (command === 'attach') {
-        if (
-          !Number.isSafeInteger(args.port) ||
-          Number(args.port) < 1 ||
-          Number(args.port) > 65535
-        ) {
-          respond(
-            request,
-            false,
-            undefined,
-            'IntelliJ attach requires a JDWP port between 1 and 65535',
-          );
-          return;
-        }
-        const rawHost = args.host ?? args.hostName ?? '127.0.0.1';
-        if (typeof rawHost !== 'string' || !rawHost.trim()) {
-          respond(request, false, undefined, 'IntelliJ attach requires a non-empty host');
-          return;
-        }
-        const hostResult = normalizeAttachHost(rawHost);
-        if ('error' in hostResult) {
-          respond(request, false, undefined, hostResult.error);
-          return;
-        }
-        hostName = hostResult.host;
-        if (args.timeout !== undefined) {
           if (
-            typeof args.timeout !== 'number' ||
-            !Number.isFinite(args.timeout) ||
-            args.timeout <= 0
+            !Number.isSafeInteger(args.port) ||
+            Number(args.port) < 1 ||
+            Number(args.port) > 65535
           ) {
-            respond(request, false, undefined, 'IntelliJ attach timeout must be a positive number');
+            respond(
+              request,
+              false,
+              undefined,
+              'IntelliJ attach requires a JDWP port between 1 and 65535',
+            );
             return;
           }
-          attachTimeout =
-            args.timeout <= 300 ? Math.round(args.timeout * 1000) : Math.round(args.timeout);
-        }
-      } else {
-        if (
-          args.timeout !== undefined &&
-          (typeof args.timeout !== 'number' || !Number.isFinite(args.timeout) || args.timeout <= 0)
-        ) {
-          respond(request, false, undefined, 'IntelliJ launch timeout must be a positive number');
-          return;
-        }
-        for (const field of ['testMode', 'build', 'stopOnEntry', 'noDebug']) {
-          if (args[field] !== undefined && typeof args[field] !== 'boolean') {
-            respond(request, false, undefined, `${field} must be a boolean`);
+          const rawHost = args.host ?? args.hostName ?? '127.0.0.1';
+          if (typeof rawHost !== 'string' || !rawHost.trim()) {
+            respond(request, false, undefined, 'IntelliJ attach requires a non-empty host');
             return;
           }
-        }
-        if (args.build === false) {
-          respond(
-            request,
-            false,
-            undefined,
-            'build: false is not supported: the IntelliJ debug adapter always builds before launching a JVM program',
-          );
-          return;
-        }
-        for (const field of ['args', 'vmArgs', 'gradleArgs']) {
-          const value = args[field];
+          const hostResult = normalizeAttachHost(rawHost);
+          if ('error' in hostResult) {
+            respond(request, false, undefined, hostResult.error);
+            return;
+          }
+          hostName = hostResult.host;
+          if (args.timeout !== undefined) {
+            if (
+              typeof args.timeout !== 'number' ||
+              !Number.isFinite(args.timeout) ||
+              args.timeout <= 0
+            ) {
+              respond(
+                request,
+                false,
+                undefined,
+                'IntelliJ attach timeout must be a positive number',
+              );
+              return;
+            }
+            attachTimeout =
+              args.timeout <= 300 ? Math.round(args.timeout * 1000) : Math.round(args.timeout);
+          }
+        } else {
           if (
-            value !== undefined &&
-            (!Array.isArray(value) || !value.every((item) => typeof item === 'string'))
+            args.timeout !== undefined &&
+            (typeof args.timeout !== 'number' ||
+              !Number.isFinite(args.timeout) ||
+              args.timeout <= 0)
           ) {
-            respond(request, false, undefined, `${field} must be an array of strings`);
+            respond(request, false, undefined, 'IntelliJ launch timeout must be a positive number');
+            return;
+          }
+          for (const field of ['testMode', 'build', 'stopOnEntry', 'noDebug']) {
+            if (args[field] !== undefined && typeof args[field] !== 'boolean') {
+              respond(request, false, undefined, `${field} must be a boolean`);
+              return;
+            }
+          }
+          if (args.build === false) {
+            respond(
+              request,
+              false,
+              undefined,
+              'build: false is not supported: the IntelliJ debug adapter always builds before launching a JVM program',
+            );
+            return;
+          }
+          for (const field of ['args', 'vmArgs', 'gradleArgs']) {
+            const value = args[field];
+            if (
+              value !== undefined &&
+              (!Array.isArray(value) || !value.every((item) => typeof item === 'string'))
+            ) {
+              respond(request, false, undefined, `${field} must be an array of strings`);
+              return;
+            }
+          }
+          if (args.buildTool !== undefined && args.buildTool !== 'gradle') {
+            respond(request, false, undefined, 'buildTool must be "gradle" or omitted');
+            return;
+          }
+          if (args.buildTool === 'gradle' && args.testMode === true) {
+            respond(
+              request,
+              false,
+              undefined,
+              'Gradle launch expects a main class, not a test target',
+            );
+            return;
+          }
+          for (const field of ['gradleArgs', 'projectPath', 'sourceSet']) {
+            if (args[field] === undefined) continue;
+            if (args.buildTool !== 'gradle') {
+              respond(request, false, undefined, `${field} requires buildTool: "gradle"`);
+              return;
+            }
+            if (
+              field !== 'gradleArgs' &&
+              (typeof args[field] !== 'string' || !args[field].trim())
+            ) {
+              respond(request, false, undefined, `${field} must be a non-empty string`);
+              return;
+            }
+          }
+          const program =
+            typeof args.program === 'string'
+              ? args.program
+              : typeof args.file === 'string'
+                ? args.file
+                : undefined;
+          if (!program) {
+            respond(request, false, undefined, 'DAP launch requires program or file parameter');
+            return;
+          }
+          resolvedFile = resolveSourceFile(targetCwd, program);
+          if (!resolvedFile) {
+            respond(request, false, undefined, `Unable to resolve source file for ${program}`);
             return;
           }
         }
-        if (args.buildTool !== undefined && args.buildTool !== 'gradle') {
-          respond(request, false, undefined, 'buildTool must be "gradle" or omitted');
-          return;
-        }
-        if (args.buildTool === 'gradle' && args.testMode === true) {
-          respond(
-            request,
-            false,
-            undefined,
-            'Gradle launch expects a main class, not a test target',
-          );
-          return;
-        }
-        for (const field of ['gradleArgs', 'projectPath', 'sourceSet']) {
-          if (args[field] === undefined) continue;
-          if (args.buildTool !== 'gradle') {
-            respond(request, false, undefined, `${field} requires buildTool: "gradle"`);
-            return;
-          }
-          if (field !== 'gradleArgs' && (typeof args[field] !== 'string' || !args[field].trim())) {
-            respond(request, false, undefined, `${field} must be a non-empty string`);
-            return;
-          }
-        }
-        const program =
-          typeof args.program === 'string'
-            ? args.program
-            : typeof args.file === 'string'
-              ? args.file
-              : undefined;
-        if (!program) {
-          respond(request, false, undefined, 'DAP launch requires program or file parameter');
-          return;
-        }
-        resolvedFile = resolveSourceFile(targetCwd, program);
-        if (!resolvedFile) {
-          respond(request, false, undefined, `Unable to resolve source file for ${program}`);
-          return;
-        }
-      }
       }
       isStarting = true;
       isAndroidSession = isAndroid;
@@ -1519,12 +1554,24 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
     }
   }
 
-  const onData = frameParser((message: unknown) => {
+  const parseClientData = frameParser((message: unknown) => {
     void handleClientMessage(message).catch((error: unknown) => {
       console.error(`DAP client request failed: ${String(error)}`);
       void shutdown(1);
     });
   });
+  function onData(chunk: Buffer): void {
+    try {
+      parseClientData(chunk);
+    } catch (error: unknown) {
+      stdin.off('data', onData);
+      const reason = `Invalid DAP client data: ${error instanceof Error ? error.message : String(error)}`;
+      if (isShuttingDown) cleanupError ??= reason;
+      else debugError ??= reason;
+      output(`${reason}\n`);
+      void shutdown(1);
+    }
+  }
   stdin.on('data', onData);
   return {
     shutdown,
