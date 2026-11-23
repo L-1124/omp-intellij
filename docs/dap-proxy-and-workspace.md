@@ -8,9 +8,9 @@ OMP 原生 `debug` 工具的 `launch` 操作接受 `program`、`args`、`adapter
 
 - **显式选择与覆盖合并**：调用方依据运行场景显式指定 `adapter`（自动发现仅凭文件扩展名与工程标记匹配，无法区分同一源码的主类、测试与 Gradle 运行模式）。项目 `.omp/dap.json` 可按字段增量覆盖插件根目录的 `launchDefaults` 与 `attachDefaults`，显式调用参数 `program`、`cwd`、`args` 由 OMP 组装进最终请求（保持布尔值与字符串数组类型，`testMode` 等布尔选项不传字符串 `"true"`）。
 - **类型与互斥约束**：
-  - `testMode`、`build`、`stopOnEntry`、`noDebug` 为布尔值；`args`、`vmArgs`、`gradleArgs` 为字符串数组。
-  - `buildTool` 允许省略（交由 ILS 按所属模块选择原生构建与启动链路）或设为 `"gradle"`。
-  - `testMode: true` 与 `buildTool: "gradle"` 互斥；`gradleArgs`、`projectPath`、`sourceSet` 仅用于 Gradle 模式（后两项须为非空字符串）。非法组合在建立 LSP 连接或构建前直接返回 DAP 失败响应。
+  - `testMode`、`build`、`stopOnEntry`、`noDebug` 为布尔值；`args`、`vmArgs`、`gradleArgs`、`bazelArgs` 为字符串数组。
+  - `buildTool` 可省略（默认 JVM 启动）或指定 `"gradle"`、`"bazel"`；两种显式构建模式均不接受 `testMode: true`。
+  - `gradleArgs`、`projectPath`、`sourceSet` 仅用于 Gradle；`target`、`bazelArgs` 仅用于 Bazel。非法组合在建立 LSP 或 DAP 连接前直接返回失败响应。
   - 原生 JVM 启动始终包含前置构建流程，不提供跳过构建的参数，`build:false` 直接返回不支持。
   - 通用 `intellij` 预设不强行向非 JVM 目标注入 JVM 专属的 `console`、`build` 或 `stopOnEntry` 默认项：JVM 路由自带 `internalConsole` 与入口暂停，Android 构建行为由 `android.target.build` 控制。
 
@@ -27,6 +27,8 @@ OMP 原生 `debug` 工具的 `launch` 操作接受 `program`、`args`、`adapter
   }
 }
 ```
+
+用 `debug --action launch --adapter intellij-bazel --program app/Main.java` 启动 Bazel JVM 调试。需由 ILS 导入 Bazel 工程；目标和构建由 ILS 解析和执行。项目 `.omp/dap.json` 的 `adapters.intellij-bazel.launchDefaults` 可设置 `target`（如 `//app:main`）与 `bazelArgs`。目标省略时沿用 ILS 导入的目标；应用参数仍通过 `args` 传递。
 
 ### 1.2 会话生命周期与附加探测
 

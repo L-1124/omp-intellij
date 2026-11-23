@@ -114,6 +114,17 @@
             "stopOnEntry": true
           }
         },
+        "intellij-bazel": {
+          "command": "node",
+          "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],
+          "languages": ["java", "kotlin"],
+          "connectMode": "stdio",
+          "launchDefaults": {
+            "buildTool": "bazel",
+            "console": "internalConsole",
+            "stopOnEntry": true
+          }
+        },
         "intellij-test": {
           "command": "node",
           "args": ["${OMP_PLUGIN_ROOT}/dist/debug/dap-proxy.js"],

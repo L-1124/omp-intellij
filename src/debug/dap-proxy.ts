@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { settings } from '../server/service.js';
@@ -1240,6 +1240,8 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       const explicitCwd = typeof args.cwd === 'string' && args.cwd ? resolve(args.cwd) : undefined;
       const targetCwd = explicitCwd ?? process.cwd();
       const isAndroid = Object.hasOwn(args, 'android') && args.android !== undefined;
+      const buildTool = args.buildTool;
+      const isBazelLaunch = !isAndroid && command === 'launch' && buildTool === 'bazel';
       let resolvedFile: string | null = null;
       let hostName = '127.0.0.1';
       let attachTimeout = 30000;
@@ -1311,7 +1313,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             );
             return;
           }
-          for (const field of ['args', 'vmArgs', 'gradleArgs']) {
+          for (const field of ['args', 'vmArgs', 'gradleArgs', 'bazelArgs']) {
             const value = args[field];
             if (
               value !== undefined &&
@@ -1321,8 +1323,8 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
               return;
             }
           }
-          if (args.buildTool !== undefined && args.buildTool !== 'gradle') {
-            respond(request, false, undefined, 'buildTool must be "gradle" or omitted');
+          if (buildTool !== undefined && buildTool !== 'gradle' && buildTool !== 'bazel') {
+            respond(request, false, undefined, 'buildTool must be "gradle", "bazel", or omitted');
             return;
           }
           if (args.buildTool === 'gradle' && args.testMode === true) {
@@ -1332,6 +1334,23 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
               undefined,
               'Gradle launch expects a main class, not a test target',
             );
+            return;
+          }
+          if (isBazelLaunch && args.testMode === true) {
+            respond(
+              request,
+              false,
+              undefined,
+              'Bazel launch expects a main class, not a test target',
+            );
+            return;
+          }
+          if (!isBazelLaunch && (args.target !== undefined || args.bazelArgs !== undefined)) {
+            respond(request, false, undefined, 'target and bazelArgs require buildTool: "bazel"');
+            return;
+          }
+          if (isBazelLaunch && args.target !== undefined && typeof args.target !== 'string') {
+            respond(request, false, undefined, 'target must be a string');
             return;
           }
           for (const field of ['gradleArgs', 'projectPath', 'sourceSet']) {
@@ -1373,6 +1392,22 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
       try {
         const explicitProject = typeof args.project === 'string' ? args.project : undefined;
         projectRoot = detectProjectRoot(resolvedFile ?? targetCwd, explicitProject);
+        if (isBazelLaunch && !explicitProject && resolvedFile) {
+          let directory = dirname(resolvedFile);
+          while (true) {
+            if (
+              ['MODULE.bazel', 'WORKSPACE.bazel', 'WORKSPACE'].some((marker) =>
+                existsSync(join(directory, marker)),
+              )
+            ) {
+              projectRoot = directory;
+              break;
+            }
+            const parent = dirname(directory);
+            if (parent === directory) break;
+            directory = parent;
+          }
+        }
         phase = 'connecting-lsp';
         debugControl = await createDebugControl({
           systemPath: options.systemPath ?? settings.systemPath,
@@ -1457,8 +1492,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             `Could not determine JVM mainClass from ${resolvedFile}; please specify mainClass explicitly`,
           );
         }
-        const isGradleLaunch = args.buildTool === 'gradle';
-        const gradleArgs = args.gradleArgs ?? [];
+        const isGradleLaunch = buildTool === 'gradle';
         sessionAbortController.signal.throwIfAborted();
         let applicationArgs = (args.args ?? []) as string[];
         let additionalClassPaths: string[] = [];
@@ -1505,19 +1539,31 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
         await startNative(
           'launch',
           {
-            type: isGradleLaunch ? 'intellij_gradle' : 'intellij_jvm',
+            type: isBazelLaunch
+              ? 'intellij_bazel'
+              : isGradleLaunch
+                ? 'intellij_gradle'
+                : 'intellij_jvm',
             request: 'launch',
             name: mainClass,
             mainClass,
             file: fileUri,
-            tool: isGradleLaunch ? 'gradle' : 'java',
+            tool: isBazelLaunch ? 'bazel' : isGradleLaunch ? 'gradle' : 'java',
             ...(isGradleLaunch
               ? {
                   projectPath: typeof args.projectPath === 'string' ? args.projectPath : undefined,
                   sourceSet: typeof args.sourceSet === 'string' ? args.sourceSet : undefined,
-                  toolArgs: gradleArgs,
+                  toolArgs: args.gradleArgs ?? [],
                 }
-              : {}),
+              : isBazelLaunch
+                ? {
+                    projectPath:
+                      typeof args.target === 'string' && args.target.trim()
+                        ? args.target
+                        : undefined,
+                    toolArgs: args.bazelArgs ?? [],
+                  }
+                : {}),
             additionalClassPaths,
             additionalModulePaths,
             vmArgs: [...extraVmArgs, `-Domp.intellij.run.id=${activeRunMarker}`],
@@ -1533,7 +1579,7 @@ export function startDapProxy(options: DapProxyOptions = {}): DapProxySession {
             ? args.timeout <= 300
               ? Math.round(args.timeout * 1000)
               : Math.round(args.timeout)
-            : isGradleLaunch
+            : isGradleLaunch || isBazelLaunch
               ? (settings.requestWaitTimeoutMs ?? 300000)
               : 15000,
         );

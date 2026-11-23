@@ -22,6 +22,7 @@ import {
   resolveSourceFile,
 } from '../src/debug/dap-proxy.js';
 import { createLspSession, runViaDap } from '../src/debug/run-core.js';
+import { pathsEqual } from '../src/project/metadata.js';
 import { encode, frameParser } from '../src/shared/protocol.js';
 import { createDapTestHarness, type DapRequest, type DapTestHarness } from './dap-fixture.js';
 
@@ -108,6 +109,42 @@ test('resolveSourceFile resolves existing paths and candidate extensions', () =>
 
   const candidate = resolveSourceFile(process.cwd(), 'com.example.NonExistentClass');
   assert.ok(candidate);
+});
+
+test('Bazel launch uses the workspace root and sends native target and build arguments', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'omp-bazel-launch-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, 'nested-workspace');
+  const pkg = join(workspace, 'app');
+  await mkdir(pkg, { recursive: true });
+  await writeFile(join(workspace, 'MODULE.bazel'), '');
+  await writeFile(join(pkg, 'BUILD.bazel'), '');
+  const program = join(pkg, 'Main.java');
+  await writeFile(program, 'class Main { public static void main(String[] args) {} }');
+
+  const h = await createDapTestHarness(t);
+  const response = await h.request('launch', {
+    buildTool: 'bazel',
+    program,
+    cwd: root,
+    mainClass: 'Main',
+    target: '//app:main',
+    bazelArgs: ['--config=debug', '--nofetch'],
+    args: ['application argument'],
+    stopOnEntry: false,
+  });
+  assert.equal(response.success, true, response.message);
+  const initialize = h.lspRequests.find((r) => r.method === 'initialize')?.params;
+  assert.ok(initialize && typeof initialize === 'object' && 'rootUri' in initialize);
+  assert.ok(typeof initialize.rootUri === 'string');
+  assert.ok(pathsEqual(fileURLToPath(initialize.rootUri), workspace));
+  const native = h.backendRequests.find((r) => r.command === 'launch')?.arguments;
+  assert.equal(native?.type, 'intellij_bazel');
+  assert.equal(native?.tool, 'bazel');
+  assert.equal(native?.projectPath, '//app:main');
+  assert.deepEqual(native?.toolArgs, ['--config=debug', '--nofetch']);
+  assert.deepEqual(native?.args, ['application argument']);
+  assert.equal(Object.hasOwn(native ?? {}, 'target'), false);
 });
 
 test('launch forwards the explicit cwd and lets the native adapter resolve the module runtime', async (t) => {
@@ -463,7 +500,7 @@ test('launch rejects malformed and conflicting preset arguments before opening a
     { args: { noDebug: null }, error: /noDebug must be a boolean/ },
     { args: { args: ['valid', 1] }, error: /args must be an array of strings/ },
     { args: { vmArgs: '-Xmx1g' }, error: /vmArgs must be an array of strings/ },
-    { args: { buildTool: 'maven' }, error: /buildTool must be "gradle" or omitted/ },
+    { args: { buildTool: 'maven' }, error: /buildTool must be "gradle", "bazel", or omitted/ },
     {
       args: { buildTool: 'gradle', testMode: true },
       error: /Gradle launch expects a main class, not a test target/,
@@ -471,6 +508,10 @@ test('launch rejects malformed and conflicting preset arguments before opening a
     { args: { gradleArgs: [] }, error: /gradleArgs requires buildTool: "gradle"/ },
     { args: { projectPath: ':app' }, error: /projectPath requires buildTool: "gradle"/ },
     { args: { sourceSet: 'main' }, error: /sourceSet requires buildTool: "gradle"/ },
+    { args: { target: '//app:main' }, error: /target and bazelArgs require buildTool: "bazel"/ },
+    { args: { buildTool: 'bazel', target: 1 }, error: /target must be a string/ },
+    { args: { buildTool: 'bazel', bazelArgs: [false] }, error: /bazelArgs must be an array/ },
+    { args: { buildTool: 'bazel', testMode: true }, error: /Bazel launch expects a main class/ },
     {
       args: { buildTool: 'gradle', gradleArgs: [false] },
       error: /gradleArgs must be an array of strings/,
