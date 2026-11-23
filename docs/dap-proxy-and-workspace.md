@@ -61,6 +61,7 @@ OMP Bridge 与 DAP Proxy 共用流式分帧解析器 `frameParser`，采用滑�
 - **报头限制**：上限 8192 字节（`8 KiB`），超过上限未遇到 `\r\n\r\n` 抛出 `Invalid LSP header`。
 - **载荷限制**：须满足 `1 <= length <= 67108864`（64 MiB），越界抛出 `Invalid LSP frame length`。
 - **分片拼装**：接收数据块时通过 `Buffer.subarray` 切片缓存，整帧收齐后调用一次 `Buffer.concat(parts, length)` 拼装，支持跨 chunk 报头与多帧粘包场景。
+- **协议错误**：帧或 JSON 无法解析时关闭相应连接、拒绝待处理请求，并通过会话清理路径释放资源。
 
 ---
 
@@ -124,7 +125,10 @@ graph TD
 ### 3.3 租约控制与进程归属校验 (`LeaseRecord` / `verifyServerOwnership`)
 
 - **租约注册**：每条到共享 ILS 的连接在 `systemPath/plugin-metadata/leases/<uuid>.json` 写入租约。`/intellij stop` 和 `/intellij restart` 在存在有效租约或运行中的调试会话时拒绝操作；租约表示 bridge 持有连接，不能用来判断终端会话是否仍打开。
+- **强制重启**：`/intellij restart --force` 忽略连接租约和活跃调试会话，会中断所有工程到旧 JVM 的 LSP/DAP 连接。补全只在输入标志前缀后提示 `--force`。停旧进程前仍须校验归属、EULA 和替换启动器（普通文件，POSIX 上须可执行）。缓存和工程配置保留；客户端需重新连接。
 - **四元组防 PID 复用校验**：启动服务端时在 `omp-server.json` 记录 `pid`、`token`、`processStartTime`（Windows 取 epoch 毫秒，Linux 取 `/proc/<pid>/stat` 启动时间 tick）、`executable`、规范化 `systemPath` 与生效插件路径 `pluginPaths`。探测或终止进程前，通过 `getProcessInfo` 与 `verifyServerOwnership` 校验四项属性一致（存活、`startTime`、`executable` 路径、`--system-path` 参数），不匹配则记为 `running-unverified` 而不执行终止。
+- `--system-path` 按完整参数值校验；仅路径前缀相同不算匹配。
+- 生命周期锁取得后若写入 `owner.json` 失败，撤销本次锁目录创建，允许后续操作重新获取锁。
 - **跨平台停止策略**：通过校验后，Windows 使用异步 `taskkill /F /T`（3 秒命令门限，再等待最多 2 秒确认进程消失，超时或非零退出均保留原始 stderr 报错）；POSIX 按 `SIGTERM` 升级 `SIGKILL` 执行。
 
 ### 3.4 构建聚合根、连接记录与失败状态
