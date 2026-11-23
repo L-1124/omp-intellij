@@ -114,14 +114,16 @@ graph TD
 
 ### 3.2 工程级 JDK 与环境变量注入 (`applyWorkspaceOptions`)
 
-- Bridge 转发 `initialize` 请求前，从 `<hash>.json` 读取该工程绑定的 `javaHome` 与 `env`，注入至 `initializationOptions.projects[i]`，隔离不同工程间的编译环境。
+- Bridge 转发 `initialize` 请求前，按构建根归一化并去重 workspace folders，为每个初始工程根注入各自的 JDK/env，并保存供 runner 使用的工程级初始化快照。配置响应只归属当前连接中最具体的匹配根。
 - 原生初始化配置只读，`reloadWorkspace` 覆盖参数仅作用于当次导入。Bridge 与 runner 在连接记录中保存各工程导入选项的 SHA-256 指纹（排除索引目录与客户端能力等非导入字段，不写入环境变量明文）。
-- 更改 JDK 或环境变量后，若存在导入选项不同或未知的活动 LSP 连接，`reload` 返回 `PROJECT_LSP_RECONNECT_REQUIRED` 并写入失败回执，此时按要求重连受影响的客户端后再重载（多根连接须整体重连，活跃调试会话需先结束或 detach），其余工程连接与共享 ILS 守护进程保持运行。
-- 回执字段 `importedJavaHome` 校验构建工具导入期读到的 `JAVA_HOME`，实际运行使用的 JDK 以启动结果为准。完整 `reload` 流程需在共享超时与取消预算内顺序完成重导入 RPC、就绪状态等待及原生 `wait-for-highwatermark`，随后校验环境并写出成功回执。
+- 动态增加工程根可更新连接成员，但其导入指纹仍为未知；若需应用该根保存的 JDK/env，须通过包含该根的新 `initialize` 重建连接。
+- 更改 JDK 或环境变量后，导入选项不同或未知的在线连接会使 `reload` 返回 `PROJECT_LSP_RECONNECT_REQUIRED` 并写入失败回执。OMP 19.1 的 daemon 可在客户端断开后保留 bridge 和 lease。等列出的旧 bridge 实例退出，再建立 LSP 连接并重载；多根连接须整体重建，关闭调试所有者前先结束或 detach。其余工程和共享 ILS 保持运行。
+- 需要立即重建时，在连接同一 daemon 的 OMP 上用 `omp ps --all --json` 和 `omp ps info <unit-id> --json` 核对 LSP unit 的 PID、工程和租约状态。确认该 unit 已无客户端连接后，再用 `omp ps stop <unit-id> --timeout 5` 停止它；不要按名称批量停止其他工程的 unit。
+- 回执字段 `importedJavaHome` 校验构建工具导入期读到的 `JAVA_HOME`。环境变量键表示提交成功，实际运行环境以构建工具或启动结果为准。重导入依次完成 RPC、就绪等待、原生 `wait-for-highwatermark` 和适用的 JDK 校验。
 
 ### 3.3 租约控制与进程归属校验 (`LeaseRecord` / `verifyServerOwnership`)
 
-- **租约注册**：每次客户端连接在 `systemPath/plugin-metadata/leases/<uuid>.json` 写入租约；执行 `/intellij stop` 时先核查活跃租约与调试会话，仍有其他租约在线时拒绝停止共享进程。
+- **租约注册**：每条到共享 ILS 的连接在 `systemPath/plugin-metadata/leases/<uuid>.json` 写入租约。`/intellij stop` 和 `/intellij restart` 在存在有效租约或运行中的调试会话时拒绝操作；租约表示 bridge 持有连接，不能用来判断终端会话是否仍打开。
 - **四元组防 PID 复用校验**：启动服务端时在 `omp-server.json` 记录 `pid`、`token`、`processStartTime`（Windows 取 epoch 毫秒，Linux 取 `/proc/<pid>/stat` 启动时间 tick）、`executable`、规范化 `systemPath` 与生效插件路径 `pluginPaths`。探测或终止进程前，通过 `getProcessInfo` 与 `verifyServerOwnership` 校验四项属性一致（存活、`startTime`、`executable` 路径、`--system-path` 参数），不匹配则记为 `running-unverified` 而不执行终止。
 - **跨平台停止策略**：通过校验后，Windows 使用异步 `taskkill /F /T`（3 秒命令门限，再等待最多 2 秒确认进程消失，超时或非零退出均保留原始 stderr 报错）；POSIX 按 `SIGTERM` 升级 `SIGKILL` 执行。
 
