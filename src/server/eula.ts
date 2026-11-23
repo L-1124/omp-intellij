@@ -22,8 +22,7 @@ export class EulaNotAcceptedError extends Error {
     super(
       `IntelliJ Server EULA has not been accepted for ${document.path} ` +
         `(hash: ${document.hash}). ` +
-        'Use "/intellij eula view" to inspect the agreement and ' +
-        `"/intellij eula accept ${document.hash}" to accept it.`,
+        'Use "/intellij eula accept" to review and accept it.',
     );
     this.name = 'EulaNotAcceptedError';
     this.document = document;

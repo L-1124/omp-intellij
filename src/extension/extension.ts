@@ -109,7 +109,7 @@ const COMMAND_COMPLETIONS: Readonly<Record<string, Readonly<Record<string, strin
   eula: {
     status: 'Show license acceptance status',
     view: 'Show the server license agreement',
-    accept: 'Accept the agreement identified by the supplied hash',
+    accept: 'Review and explicitly accept the current agreement',
   },
   workspace: {
     status: 'Show project configuration and import status',
@@ -919,7 +919,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             if (isAccepted) {
               eulaNote = `EULA accepted (${doc.hash}).`;
             } else {
-              eulaNote = `EULA not accepted (hash: ${doc.hash}). Run /intellij eula accept ${doc.hash} before starting the server.`;
+              eulaNote = `EULA not accepted (hash: ${doc.hash}). Run /intellij eula accept to review it before starting the server.`;
             }
           } catch (eulaErr: unknown) {
             eulaNote = `EULA status unknown (${getErrorMessage(eulaErr)}).`;
@@ -1527,7 +1527,6 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
         }
       } else if (sub === 'eula') {
         const eulaSub = (parts[1] || 'status').toLowerCase();
-        const rawHash = parts[2] ? parts[2].trim() : '';
 
         if (eulaSub === 'status') {
           const resolved = await resolveSelectedExecutable();
@@ -1544,9 +1543,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             const acceptance = await readEulaAcceptance(configOptions);
             const isAccepted = acceptance.acceptedHashes.includes(doc.hash);
             const statusLabel = isAccepted ? 'accepted' : 'not accepted';
-            const actionPrompt = isAccepted
-              ? ''
-              : ` Run /intellij eula accept ${doc.hash} to accept.`;
+            const actionPrompt = isAccepted ? '' : ' Run /intellij eula accept to review it.';
             ctx.ui?.notify(
               `IntelliJ EULA: ${statusLabel}; hash: ${doc.hash}; path: ${doc.path}.${actionPrompt}`,
               'info',
@@ -1574,12 +1571,8 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             ctx.ui?.notify(`Failed to read IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
           }
         } else if (eulaSub === 'accept') {
-          const hashCandidate = rawHash;
-          if (!/^[0-9a-f]{16}$/.test(hashCandidate)) {
-            ctx.ui?.notify(
-              'Usage: /intellij eula accept <16-character lowercase hex hash>',
-              'warning',
-            );
+          if (parts.length !== 2) {
+            ctx.ui?.notify('Usage: /intellij eula accept', 'warning');
             return;
           }
           const resolved = await resolveSelectedExecutable();
@@ -1598,29 +1591,29 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             ctx.ui?.notify(`Failed to read IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
             return;
           }
-          if (doc.hash !== hashCandidate) {
-            ctx.ui?.notify(
-              `EULA hash mismatch: requested ${hashCandidate}, but current EULA hash is ${doc.hash} (${doc.path}).`,
-              'warning',
-            );
-            return;
-          }
-          if (typeof ctx.ui?.confirm !== 'function') {
-            ctx.ui?.notify(
-              'EULA acceptance cancelled: interactive confirmation UI unavailable.',
-              'warning',
-            );
-            return;
-          }
-          const ok = await ctx.ui.confirm(
-            'Accept IntelliJ Language Server EULA',
-            `Accept IntelliJ Language Server EULA?\nPath: ${doc.path}\nHash: ${doc.hash}\nBy accepting, you agree to JetBrains EULA terms.`,
-          );
-          if (!ok) {
-            ctx.ui?.notify('EULA acceptance cancelled by user.', 'info');
+          const ui = ctx.ui;
+          if (!ui?.formDialog) {
+            ui?.notify('EULA acceptance requires a host with interactive form support.', 'warning');
             return;
           }
           try {
+            const body = [
+              `Path: ${doc.path}`,
+              `Hash: ${doc.hash}`,
+              ...doc.text.trim().split(/\r?\n(?:[ \t]*\r?\n)+/),
+            ]
+              .map(
+                (paragraph) =>
+                  `<p>${paragraph.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</p>`,
+              )
+              .join('');
+            const result = await ui.formDialog(
+              `<form><h2>IntelliJ Language Server EULA</h2>${body}<label><input type="checkbox" name="accept" value="yes" required> I accept the JetBrains EULA shown above</label></form>`,
+            );
+            if (result?.data.accept !== 'yes' || result.timedOut) {
+              ui?.notify('EULA acceptance cancelled.', 'info');
+              return;
+            }
             await withLifecycleLock(
               async () => {
                 const freshResolved = await resolveSelectedExecutable();
@@ -1632,7 +1625,7 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
                   return;
                 }
                 const freshDoc = await readServerEula(freshResolved.executable);
-                if (freshDoc.hash !== hashCandidate || freshDoc.path !== doc.path) {
+                if (freshDoc.hash !== doc.hash || freshDoc.path !== doc.path) {
                   ctx.ui?.notify(
                     `EULA document changed during confirmation (current hash: ${freshDoc.hash}). Acceptance cancelled; please review the updated EULA.`,
                     'warning',
@@ -1651,11 +1644,11 @@ export default function (pi: ExtensionPluginInstance, overrides: ExtensionOverri
             ctx.ui?.notify(`Failed to accept IntelliJ EULA: ${getErrorMessage(err)}`, 'warning');
           }
         } else {
-          ctx.ui?.notify('Usage: /intellij eula [status|view|accept <16-lowerhex>]', 'warning');
+          ctx.ui?.notify('Usage: /intellij eula [status|view|accept]', 'warning');
         }
       } else {
         ctx.ui?.notify(
-          'Usage: /intellij [status|start|stop|restart [--force]|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept <hash>]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
+          'Usage: /intellij [status|start|stop|restart [--force]|doctor|install [--dir <path>]|versions|use <version>|cache|prune [--apply]|eula [status|view|accept]|workspace [status|list|jdks|jdk [path]|reload|env [set <NAME> <value>|unset <NAME>]]|debug [status|recover [id]]]',
           'warning',
         );
       }

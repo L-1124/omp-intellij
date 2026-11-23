@@ -8,7 +8,7 @@ import type {
 } from '@oh-my-pi/pi-coding-agent';
 
 export type ExtensionUI = Pick<ExtensionUIContext, 'notify'> &
-  Partial<Pick<ExtensionUIContext, 'confirm' | 'select' | 'setStatus'>>;
+  Partial<Pick<ExtensionUIContext, 'confirm' | 'formDialog' | 'select' | 'setStatus'>>;
 
 export interface ExtensionContext extends Pick<SDKContext, 'cwd'> {
   agent?: {

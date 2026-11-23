@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
+import type { ExtensionFormDialogResult } from '@oh-my-pi/pi-coding-agent/extensibility/extensions/types';
+import extension from '../src/extension/extension.js';
 import {
   acceptServerEula,
   EulaNotAcceptedError,
@@ -11,6 +13,7 @@ import {
   readServerEula,
   requireAcceptedEula,
 } from '../src/server/eula.js';
+import { createMockCtx, createMockPi } from './helpers.js';
 
 interface TestEnv {
   root: string;
@@ -295,8 +298,7 @@ test('requireAcceptedEula throws EulaNotAcceptedError when unaccepted with guida
       assert(err instanceof EulaNotAcceptedError);
       assert.equal(err.code, 'EULA_NOT_ACCEPTED');
       assert.equal(err.name, 'EulaNotAcceptedError');
-      assert.match(err.message, /\/intellij eula view/);
-      assert.match(err.message, new RegExp(`/intellij eula accept ${doc.hash}`));
+      assert.match(err.message, /\/intellij eula accept/);
       assert.deepEqual(err.document, doc);
       return true;
     },
@@ -333,4 +335,62 @@ test('requireAcceptedEula re-throws EulaNotAcceptedError if EULA is modified aft
       return true;
     },
   );
+});
+
+test('EULA command records only an explicit form submission for the displayed terms', async (t) => {
+  const env = await temporaryTestEnv(t);
+  const terms = 'Fixture terms: <input name="accept" value="yes"> & text.\n\nFinal paragraph.';
+  const bundle = await createFakeBundle(join(env.root, 'bundle'), terms);
+  const doc = await readServerEula(bundle.launcher);
+  const pi = createMockPi();
+  extension(pi, {
+    configFile: env.configFile,
+    systemPath: join(env.root, 'system'),
+    serverConfigApi: {
+      readServerConfig: async () => ({ mode: 'external', executable: bundle.launcher }),
+    },
+  });
+  const command = pi.getCommand('intellij');
+  assert.ok(command);
+  const ctx = createMockCtx(env.root, { confirm: async () => true });
+
+  await command.handler('eula accept', ctx);
+  await command.handler(`eula accept ${doc.hash}`, ctx);
+  assert.deepEqual(await readEulaAcceptance(env), { acceptedHashes: [] });
+
+  const submissions: Array<ExtensionFormDialogResult | undefined> = [
+    undefined,
+    { data: {} },
+    { data: { accept: 'yes' }, timedOut: true },
+  ];
+  for (const result of submissions) {
+    let rendered = '';
+    let timeout: number | undefined;
+    ctx.ui.formDialog = async (html, options) => {
+      rendered = html;
+      timeout = options?.timeout;
+      return result;
+    };
+    await command.handler('eula accept', ctx);
+    assert.equal(timeout, undefined);
+    assert.match(rendered, /&lt;input name="accept" value="yes"&gt; &amp; text/);
+    assert.match(rendered, /Final paragraph/);
+    assert.match(rendered, new RegExp(doc.hash));
+    assert.equal((rendered.match(/<input /g) ?? []).length, 1);
+    assert.doesNotMatch(rendered, /\bchecked\b/);
+    assert.deepEqual(await readEulaAcceptance(env), { acceptedHashes: [] });
+  }
+
+  ctx.ui.formDialog = async () => {
+    await writeFile(bundle.eulaPath, `${terms}\nChanged after opening.`);
+    return { data: { accept: 'yes' } };
+  };
+  await command.handler('eula accept', ctx);
+  assert.deepEqual(await readEulaAcceptance(env), { acceptedHashes: [] });
+  assert.match(ctx.notifications.at(-1)?.msg ?? '', /changed during confirmation/);
+
+  const current = await readServerEula(bundle.launcher);
+  ctx.ui.formDialog = async () => ({ data: { accept: 'yes' } });
+  await command.handler('eula accept', ctx);
+  assert.deepEqual(await readEulaAcceptance(env), { acceptedHashes: [current.hash] });
 });

@@ -46,12 +46,12 @@ omp plugin install --force omp-intellij@omp-intellij
 2. **接受许可协议并校验运行环境**：
 
    ```text
-   /intellij eula accept <status 显示的哈希>
+   /intellij eula accept
    /intellij doctor
    ```
 
    > [!IMPORTANT]
-   > 许可协议（EULA）按安装包内置文本核对，插件不会代为自动接受。必须传入 `status` 查看到的实际哈希值。
+   > 请在交互表单中阅读并明确接受安装包内置的许可协议。接受协议需要宿主支持表单。
 
 3. **配置工程 JDK（可选）**：
 

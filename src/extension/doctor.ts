@@ -289,7 +289,7 @@ export async function inspectDoctor(
         add(
           'eula',
           'warning',
-          `JetBrains EULA is not accepted (current hash: ${doc.hash}). Run /intellij eula accept ${doc.hash} to accept.`,
+          `JetBrains EULA is not accepted (current hash: ${doc.hash}). Run /intellij eula accept to review it.`,
           `EULA file: ${doc.path}`,
         );
       }
