@@ -3,7 +3,7 @@
   "startupTimeoutMs": 30000,
   "initializeTimeoutMs": 30000,
   "requestWaitTimeoutMs": 300000,
-  "idleTimeout": "30m",
+  "idleTimeout": "30s",
   "cachePolicy": {
     "retentionDays": 30,
     "warnAboveGiB": 5,
